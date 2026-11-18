@@ -8,7 +8,8 @@ OpenVPN Web 一体化管理系统 —— 核心逻辑层（无 Web 依赖，可�
   * 账号密码认证（auth-user-pass-verify via-file），一人一账号一固定 IP
   * 全员同一个 company.ovpn，不含任何个人凭据
   * ACL 默认拒绝，按「账号固定 IP -> 目标/端口/协议」全量重建 iptables 自定义链
-  * 所有写操作先备份快照，失败可回滚；配置/规则全量重建，不做增量
+  * 所有写操作先打备份点（统一为可下载的 tar.gz 包），失败可回滚；
+    配置/规则全量重建，不做增量
 """
 import os
 import re
@@ -45,7 +46,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "1.3.0"
+WEB_VERSION = "1.3.1"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -1998,42 +1999,27 @@ def write_all_config():
 # --------------------------------------------------------------------------- 快照 / 回滚
 
 def snapshot(tag="auto"):
-    ensure_dirs()
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(3)
-    path = os.path.join(SNAPSHOTS, ts)
-    os.makedirs(path, exist_ok=True)
-    for name in ("server.conf", "company.ovpn", "ca.crt", "ca.key", "server.crt",
-                 "server.key", "ta.key"):
-        p = os.path.join(DATA, name)
-        if os.path.exists(p):
-            shutil.copy2(p, path)
-    # 数据库用 SQLite 在线备份而不是复制文件：WAL 模式下直接拷 .db 会漏掉还在 -wal 里的事务，
-    # 删 -wal 又会让并发的后台任务拿到 "attempt to write a readonly database"。
-    try:
-        src = db()
-        dst = sqlite3.connect(os.path.join(path, "openvpn-web.db"))
-        with dst:
-            src.backup(dst)
-        dst.close()
-        src.close()
-    except Exception:
-        p = os.path.join(DATA, "openvpn-web.db")
-        if os.path.exists(p):
-            shutil.copy2(p, path)
-    shutil.copytree(CCD, os.path.join(path, "ccd"), dirs_exist_ok=True)
-    if os.path.exists(BIN):
-        shutil.copy2(BIN, os.path.join(path, "openvpn.bin"))
-    with open(os.path.join(path, "meta.json"), "w") as f:
-        json.dump({"tag": tag, "ts": now(), "cfg": cfg(), "fingerprint": get_meta("config_fingerprint")},
-                  f, ensure_ascii=False, indent=2)
+    """打一个回滚点。统一产出备份包（来源 auto），返回包路径。
+
+    以前这里生成 data/snapshots/<时间戳>/ 目录，和全备份各存一套、界面也分两块，
+    容易让人以为是两种东西。现在两种用途合并成同一个 tar.gz：系统自动打点只是
+    来源不同，格式、可下载性、恢复方式完全一致。延迟 import 是避开 fullbackup
+    顶层 import core 造成的循环。
+    """
+    import fullbackup
+    r = fullbackup.create(tag, kind="auto")
     con = db()
-    con.execute("INSERT INTO backups(ts,kind,path,note) VALUES(?,?,?,?)",
-                (now(), "snapshot", path, tag))
-    con.commit(); con.close()
-    return path
+    try:
+        con.execute("INSERT INTO backups(ts,kind,path,note) VALUES(?,?,?,?)",
+                    (now(), "backup", r["path"], tag))
+        con.commit()
+    finally:
+        con.close()
+    return r["path"]
 
 
-def restore_snapshot(path):
+def _restore_legacy_snapshot(path):
+    """恢复老版本 data/snapshots/<时间戳>/ 目录快照，新版不再生成，仅兼容读取"""
     if not os.path.isdir(path) or os.path.realpath(path).startswith(os.path.realpath(SNAPSHOTS)) is False:
         raise ValueError("快照路径非法")
     # 任务进度与操作审计不属于「业务状态」，回滚时保留，否则前端轮询会断、审计会丢
@@ -2086,6 +2072,20 @@ def restore_snapshot(path):
                 set_meta(k, v)
         set_meta("config_fingerprint", m.get("fingerprint", ""))
     return True
+
+
+def restore_snapshot(path):
+    """恢复一份备份：新格式 tar.gz 走统一恢复，老目录快照走兼容分支。"""
+    import fullbackup
+    if not path:
+        raise ValueError("未指定备份")
+    rp = os.path.realpath(path)
+    if os.path.isdir(rp):
+        return _restore_legacy_snapshot(rp)
+    base = os.path.realpath(fullbackup.FULL)
+    if not rp.startswith(base + os.sep):
+        raise ValueError("备份包路径非法")
+    return fullbackup.restore(rp, audit=False, protect=False)
 
 
 def list_backups():

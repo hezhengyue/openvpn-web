@@ -161,7 +161,7 @@ async function waitUp() {
       else if (nw.style.display !== 'none') errors.push('已初始化后侧栏仍显示安装向导');
     } catch (e) { errors.push('设置页交互抛错: ' + e.message); }
 
-    // 版本与更新页：Web 自身更新已移除，快照卡片要独立存在
+    // 版本与更新页：快照与全备份已合并为一张「备份与恢复」卡片
     try {
       w.go('update'); await wait(600);
       const t = w.document.querySelector('#page').textContent;
@@ -169,11 +169,13 @@ async function waitUp() {
       if (w.document.querySelector('#upbin')) errors.push('版本页仍有「上传二进制」入口（应只留自动编译）');
       if (!w.document.querySelector('#vstat') || !w.document.querySelector('#vver')) errors.push('顶栏缺少状态片');
       if (/Web 自身更新/.test(t)) errors.push('版本页仍显示 Web 自身更新文案');
-      if (!/快照与回滚/.test(t)) errors.push('版本页缺少快照与回滚卡片');
-      if (!/ta\.key/.test(t)) errors.push('快照说明没写清备份内容');
-      if (!/全备份与迁移/.test(t)) errors.push('版本页缺少全备份与迁移卡片');
-      if (!w.document.querySelector('#fbf')) errors.push('全备份卡片缺少上传备份包的输入框');
-      if (!/openvpn\//.test(t) || !/web\//.test(t)) errors.push('全备份说明没写清两块内容');
+      if (!/备份与恢复/.test(t)) errors.push('版本页缺少合并后的备份与恢复卡片');
+      if (/快照与回滚|全备份与迁移/.test(t)) errors.push('版本页仍保留旧的两张备份卡片');
+      if (!/ta\.key/.test(t)) errors.push('备份说明没写清备份内容');
+      if (!w.document.querySelector('#fbf')) errors.push('备份卡片缺少上传备份包的输入框');
+      if (!/openvpn\//.test(t) || !/web\//.test(t)) errors.push('备份说明没写清两块内容');
+      if (!/立即备份/.test(t)) errors.push('备份卡片缺少手动备份入口');
+      if (!/来源/.test(t)) errors.push('备份列表缺少来源标记');
     } catch (e) { errors.push('版本页交互抛错: ' + e.message); }
 
     // 导入面板：密码策略开关

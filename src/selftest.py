@@ -553,16 +553,17 @@ def main():
     check("更新后指纹不变（客户端不用动）", core.get_meta("config_fingerprint") == before)
     if POSIX:
         check("版本已更新", core.version_info()["version"] == "2.6.24")
-    check("快照已生成（可回滚）", len([b for b in core.list_backups() if b["kind"] == "snapshot"]) >= 2)
+    check("备份点已生成（可回滚）", len([b for b in core.list_backups() if b["kind"] == "backup"]) >= 2)
 
     # ---------- 回滚 ----------
-    section("快照回滚")
-    snap = [b for b in core.list_backups() if b["kind"] == "snapshot"][-1]["path"]
-    check("按钮直接恢复快照", P("/api/backups/restore", {"path": snap}).get_json()["ok"])
+    section("备份回滚")
+    snap = [b for b in core.list_backups() if b["kind"] == "backup"][-1]["path"]
+    check("自动打点是可恢复的备份包", os.path.isfile(snap) and snap.endswith(".tar.gz"))
+    check("按钮直接恢复备份点", P("/api/backups/restore", {"path": snap}).get_json()["ok"])
     core.init_db()
 
-    # ---------- 全备份 / 迁移 ----------
-    section("全备份与迁移")
+    # ---------- 备份 / 迁移 ----------
+    section("备份与迁移")
     core.add_user("备份用户", password="Test12345!", real_name="备份", dept="运维部")
     core.write_all_config()
     r = fullbackup.create("自检")
@@ -577,12 +578,19 @@ def main():
     check("包内含纯 OpenVPN 材料", "openvpn/ccd/备份用户" in names and "openvpn/server.conf" in names)
     check("包内含 Web 数据库", "web/openvpn-web.db" in names)
     check("包内含中文恢复说明", "恢复说明.txt" in names)
-    check("全备份列表能列出", any(x["name"] == r["name"] for x in fullbackup.list_items()))
+    check("备份列表能列出", any(x["name"] == r["name"] for x in fullbackup.list_items()))
+    check("手动备份带来源标记", info["manifest"].get("origin") == "manual")
+    check("列表里带来源标记", any(x.get("origin") == "manual" for x in fullbackup.list_items()))
+    if os.path.isfile(core.BIN):
+        check("包内含 openvpn 二进制（升级失败可回滚）", "openvpn/openvpn.bin" in names)
+    auto_p = core.snapshot("自检自动")
+    check("自动打点生成备份包", os.path.isfile(auto_p) and auto_p.endswith(".tar.gz"))
+    check("自动打点标记来源 auto", fullbackup.preview(auto_p)["origin"] == "auto")
     core.delete_user("备份用户")
     check("恢复前测试账号已删", not any(u["username"] == "备份用户" for u in core.list_users()))
     res = fullbackup.restore(fp, audit=False)
     check("全备份恢复后账号回来", any(u["username"] == "备份用户" for u in core.list_users()))
-    check("恢复前自动打了保护快照", os.path.isdir(res["snapshot"]))
+    check("恢复前自动打了保护备份", os.path.isfile(res["snapshot"]))
     check("恢复后 ccd 也跟着回来", os.path.exists(os.path.join(core.CCD, "备份用户")))
     # 坏包必须整包拒绝，绝不能写一半
     wrong = os.path.join(TMP, "wrong.tar.gz")
@@ -623,8 +631,9 @@ def main():
                 content_type="multipart/form-data", headers=H)
     uj = up.get_json()
     check("接口上传并预览备份包", uj.get("ok") and uj["preview"]["name"] == j["name"], uj)
-    check("接口列出全备份", any(x["name"] == j["name"]
+    check("接口列出备份", any(x["name"] == j["name"]
           for x in c.get("/api/full-backup/list").get_json()["items"]))
+    check("接口按包名恢复本机备份", P("/api/full-backup/restore", {"name": r["name"]}).get_json()["ok"])
     _dr = P("/api/full-backup/delete", {"name": j["name"]})
     check("接口删除全备份", _dr.get_json().get("ok") is True,
           (_dr.status_code, _dr.data[:200], j["name"]))

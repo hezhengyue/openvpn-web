@@ -1172,7 +1172,7 @@ def backups_get():
 
 @app.post("/api/backups")
 def backups_create():
-    """手工打一份快照（升级前、改大配置前点一下，比等自动快照更安心）"""
+    """兼容旧接口：手工打一个备份点（新界面走 /api/full-backup/create）"""
     d = request.get_json(silent=True) or {}
     p = core.snapshot(d.get("tag") or "手动")
     core.log_audit("admin", "backup.create", p)
@@ -1188,7 +1188,7 @@ def backups_restore():
     sudo_worker(tid, "apply-rules")
     sudo_worker(tid, "restart-vpn")
     core.log_audit("admin", "backup.restore", path)
-    return ok({"msg": "已恢复快照并重启服务"})
+    return ok({"msg": "已恢复备份并重启服务"})
 
 
 # --------------------------------------------------------------------------- 全备份 / 迁移
@@ -1200,7 +1200,7 @@ def full_backup_list():
 @app.post("/api/full-backup/create")
 def full_backup_create():
     d = request.get_json(silent=True) or {}
-    r = fullbackup.create(d.get("tag") or "手动")
+    r = fullbackup.create(d.get("tag") or "手动", kind="manual")
     core.log_audit("admin", "backup.full_create", r["name"])
     return ok(r)
 
@@ -1231,12 +1231,18 @@ def full_backup_upload():
 @app.post("/api/full-backup/restore")
 def full_backup_restore():
     d = request.get_json(silent=True) or {}
-    path = fullbackup.staged_path(d.get("token", ""))
+    token, name = d.get("token", ""), d.get("name", "")
+    if token:
+        path = fullbackup.staged_path(token)   # 从另一台机器上传来的包
+    elif name:
+        path = fullbackup.local_path(name)     # 本机已有的备份点
+    else:
+        raise ValueError("请指定要恢复的备份包")
     r = fullbackup.restore(path)
     tid = uuid.uuid4().hex
     sudo_worker(tid, "apply-rules")
     sudo_worker(tid, "restart-vpn")
-    return ok({"msg": "全备份已恢复，服务正在重启", "result": r})
+    return ok({"msg": "备份已恢复，服务正在重启", "result": r})
 
 
 @app.post("/api/full-backup/delete")

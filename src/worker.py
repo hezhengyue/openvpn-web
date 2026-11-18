@@ -301,9 +301,14 @@ def action_selfcheck_system(p):
 
 
 def action_restore_snapshot(p):
-    path = safe_path(p.get("path", ""), base=os.path.join(DATA, "snapshots"))
+    # 快照与全备份已合并：新格式是 full-backups 下的 tar.gz，
+    # 老版本 data/snapshots/ 下的目录快照仍允许恢复。
+    raw = p.get("path", "")
+    base = os.path.join(DATA, "full-backups") if raw.endswith(".tar.gz") \
+        else os.path.join(DATA, "snapshots")
+    path = safe_path(raw, base=base)
     core.restore_snapshot(path)
-    log("已恢复快照 %s" % path)
+    log("已恢复备份 %s" % path)
 
 
 WEB_FILES = {"app.py", "core.py", "index.html", "auth-verify.py", "README.md", "version.txt",

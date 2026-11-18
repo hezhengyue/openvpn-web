@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-全备份 / 迁移。
+备份 / 回滚 / 迁移（快照与全备份已合并为一套）。
 
-一个 tar.gz，分成两块，互不依赖：
+一个 tar.gz 既是本机的回滚点，也是可下载的迁移包：
 
-  openvpn/  纯 OpenVPN 原生材料（CA、证书、ta.key、server.conf、company.ovpn、ccd/）。
-            就算不用这个 Web 系统，拷到任何 OpenVPN 服务器上手工改好路径也能跑。
+  openvpn/  纯 OpenVPN 原生材料（CA、证书、ta.key、server.conf、company.ovpn、
+            ccd/、openvpn.bin）。就算不用这个 Web 系统，拷到任何 OpenVPN
+            服务器上手工改好路径也能跑。
   web/      Web 自身状态（SQLite 台账/授权/审计/配置、会话签名密钥、初始管理密码）。
 
-与 core.snapshot() 的区别：快照是本机目录、给"改错了回滚"用；全备份是可下载、
-可搬到另一台机器、装好 Web 后一条命令恢复的迁移包。
+来源标记：系统自动打点（改配置、升级前等）生成 origin=auto 的包，手动点
+【立即备份】生成 origin=manual 的包。两者同目录、同格式，都能一键恢复和下载，
+只是来源不同。老版本 data/snapshots/ 下的目录快照仍可恢复（core 里的兼容分支）。
 
 安全：包内含 CA 私钥与 tls-crypt 密钥，等同于整个 VPN 的身份，必须当机密文件保管。
 """
@@ -56,6 +58,7 @@ def _manifest_text(m):
 Web 版本   : {web}
 生成时间   : {ts}
 标签       : {tag}
+来源       : {origin}（auto=系统自动打点 / manual=手动备份）
 VPN 网段   : {vp}
 配置指纹   : {fp}
 包格式     : {kind} v{fmt}
@@ -64,7 +67,7 @@ VPN 网段   : {vp}
 
 [ openvpn/ ]  不依赖 Web 系统，可以直接用 OpenVPN 恢复
   ca.crt / ca.key / server.crt / server.key / ta.key
-  server.conf / company.ovpn / ccd/
+  server.conf / company.ovpn / openvpn.bin / ccd/
 
   手工恢复：
   1. 把 openvpn/ 下的文件拷到目标机的 OpenVPN 数据目录（本项目是
@@ -92,11 +95,15 @@ VPN 网段   : {vp}
 请加密保存，不要放公网网盘或发给无关人员。
 """.format(web=m.get("web_version", ""), ts=m.get("created_at", ""),
            tag=m.get("tag", ""), vp=vp, fp=m.get("fingerprint", ""),
+           origin="自动" if m.get("origin") == "auto" else "手动",
            kind=KIND, fmt=FORMAT)
 
 
-def create(tag="手动", keep=10):
-    """生成全备份包，返回 {path,name,size,manifest}。keep=0 表示不清理旧包。"""
+def create(tag="手动", keep=10, kind="manual"):
+    """生成备份包，返回 {path,name,size,manifest}。keep=0 表示不清理旧包。
+
+    kind=auto 表示系统自动打点，manual 表示用户手工触发；格式完全一致。
+    """
     _ensure()
     tmp = tempfile.mkdtemp(dir=core.STAGING)
     try:
@@ -111,6 +118,10 @@ def create(tag="手动", keep=10):
             if os.path.isfile(p):
                 shutil.copy2(p, os.path.join(ov, name))
         shutil.copytree(core.CCD, os.path.join(ov, "ccd"), dirs_exist_ok=True)
+        # 二进制也进包：以前 core.snapshot() 单独存一份 openvpn.bin 用于升级失败回滚，
+        # 两套合并后必须保留这份能力，否则「编译失败自动回滚」会退回旧配置却留着新二进制。
+        if os.path.isfile(core.BIN):
+            shutil.copy2(core.BIN, os.path.join(ov, "openvpn.bin"))
 
         # ---- 第二块：Web 状态 ----
         # 数据库走 SQLite 在线备份：WAL 下直接 cp .db 会漏掉还在 -wal 里的事务
@@ -146,6 +157,7 @@ def create(tag="手动", keep=10):
         m = {
             "kind": KIND, "format": FORMAT, "web_version": core.WEB_VERSION,
             "created_at": core.now(), "tag": str(tag or "手动")[:32],
+            "origin": "auto" if kind == "auto" else "manual",
             "vpn_cidr": core.cfg().get("vpn_cidr", ""),
             "fingerprint": core.get_meta("config_fingerprint", ""),
             "files": files,
@@ -211,14 +223,15 @@ def preview(path):
     if n_ov < 3 or n_web < 1:
         raise ValueError("备份包内容不完整（openvpn %d 个文件 / web %d 个文件）" % (n_ov, n_web))
     return {"manifest": m, "openvpn_files": n_ov, "web_files": n_web,
+            "origin": m.get("origin", "manual"),
             "size": os.path.getsize(path), "name": os.path.basename(path)}
 
 
-def restore(path, audit=True):
-    """恢复一个全备份包。动数据前先自动打一份本机快照，出事还能退回来。"""
+def restore(path, audit=True, protect=True):
+    """恢复一份备份包。protect=True 时动数据前先自动打一份保护备份。"""
     info = preview(path)
     m = info["manifest"]
-    snap = core.snapshot("全备份恢复前")
+    snap = core.snapshot("备份恢复前") if protect else ""
     tmp = tempfile.mkdtemp(dir=core.STAGING)
     try:
         with tarfile.open(path, "r:gz") as tf:
@@ -245,9 +258,14 @@ def restore(path, audit=True):
         ov = os.path.join(tmp, "openvpn")
         for rel in sorted(m["files"]["openvpn"]):
             src = os.path.join(ov, rel)
-            if rel.startswith("ccd/"):
+            if rel.startswith("ccd/") or rel == "openvpn.bin":
                 continue
             shutil.copy2(src, os.path.join(core.DATA, rel))
+        # 二进制单独放回 ROOT/bin（老版本包没有这一项，跳过即可）
+        binfile = os.path.join(ov, "openvpn.bin")
+        if os.path.isfile(binfile):
+            os.makedirs(os.path.dirname(core.BIN), exist_ok=True)
+            shutil.copy2(binfile, core.BIN)
         # ccd 整个目录替换，不能留目标机上多出来的旧账号
         for fn in os.listdir(core.CCD):
             p = os.path.join(core.CCD, fn)
@@ -306,13 +324,24 @@ def list_items():
             m = preview(p)["manifest"]
             out.append({"name": fn, "size": os.path.getsize(p),
                         "created_at": m.get("created_at", ""), "tag": m.get("tag", ""),
+                        "origin": m.get("origin", "manual"),
                         "web_version": m.get("web_version", ""),
                         "fingerprint": m.get("fingerprint", "")})
         except Exception:
             out.append({"name": fn, "size": os.path.getsize(p),
-                        "created_at": "", "tag": "(无法读取)", "web_version": "",
-                        "fingerprint": ""})
+                        "created_at": "", "tag": "(无法读取)", "origin": "manual",
+                        "web_version": "", "fingerprint": ""})
     return out
+
+
+def local_path(name):
+    """取服务器上已有备份包的路径，供「恢复本机备份」接口用，挡路径穿越"""
+    if not name or os.path.basename(name) != name or not name.endswith(".tar.gz"):
+        raise ValueError("备份包名非法")
+    p = os.path.join(FULL, name)
+    if not os.path.isfile(p):
+        raise ValueError("备份包不存在")
+    return p
 
 
 def delete(name):
