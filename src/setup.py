@@ -97,7 +97,8 @@ def firewall(c):
         rc, out = sh(["firewall-cmd", "--state"])
         if rc == 0 and "running" in out:
             sh(["firewall-cmd", "--permanent", "--add-port=%d/%s" % (port, proto)])
-            # Web 端口只对私网开放（应用层还有 web_allow_cidr 二次校验）
+            # Web 端口先对私网放行；应用层还有一道「管理端访问白名单」（默认收紧到
+            # 本机网卡所在网段 + 127.0.0.1），VPN 拨号用户只能打开自助改密页
             sh(["firewall-cmd", "--permanent", "--add-rich-rule",
                 "rule family=ipv4 source address=10.0.0.0/8 port port=%d protocol=tcp accept"
                 % int(os.environ.get("OVPN_WEB_PORT", 8800))])

@@ -75,18 +75,31 @@ def bootstrap_admin():
 # --------------------------------------------------------------------------- 鉴权
 
 def client_ip():
-    return request.headers.get("X-Forwarded-For", request.remote_addr or "").split(",")[0].strip()
+    """真实来源 IP。
+
+    只有「本机反代」（remote_addr 是 127.0.0.1）才信 X-Forwarded-For：
+    否则任何人随手加一个 XFF 头就能伪装成白名单里的地址，白名单等于形同虚设。
+    """
+    ra = (request.remote_addr or "").strip()
+    if ra in ("127.0.0.1", "::1", "localhost"):
+        xff = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+        if xff:
+            return xff
+    return ra
 
 
 @app.before_request
 def guard():
     ip = client_ip()
-    # 自助改密要覆盖两类人：内网直连的，和已经拨进隧道但从"非私网"网段来的
-    # （比如 VPN 网段是 6.6.6.0/24，就不在默认的 10/8 白名单里）
+    # 审计上下文：让每条日志都带上「谁 + 从哪个 IP」
+    core.AUDIT_CTX.update({"actor": session.get("user") or "", "ip": ip})
+    # 自助改密要覆盖两类人：白名单里的，和已经拨进本机 VPN 隧道的
     is_self = (request.path == "/self" or request.path == "/api/session"
                or request.path.startswith("/api/self"))
     if not core.client_allowed(ip) and not (is_self and core.vpn_client_allowed(ip)):
-        return jsonify(ok=False, msg="来源 IP 不在允许范围（默认仅私网）"), 403
+        return jsonify(ok=False, allow=core.allow_list(),
+                       msg="来源 IP %s 不在管理端白名单内；要放行请在服务器上执行 "
+                           "python3 app.py --allow <网段>" % ip), 403
     # 首页本身就是登录页容器，未登录也要能加载
     if request.path in ("/", "/favicon.ico", "/api/login", "/self") or \
             request.path.startswith("/api/session") or request.path.startswith("/api/self"):
@@ -129,7 +142,9 @@ def api_session():
         session["csrf"] = uuid.uuid4().hex
     return ok({"logged": bool(session.get("user")), "csrf": session["csrf"],
                "initialized": bool(core.get_meta("initialized")),
-               "web_version": core.WEB_VERSION, "mock": MOCK})
+               "web_version": core.WEB_VERSION, "mock": MOCK,
+               "admin_name": core.admin_name(), "src_ip": client_ip(),
+               "allow": core.allow_list()})
 
 
 @app.post("/api/login")
@@ -146,15 +161,17 @@ def api_login():
     LOGIN_FAILS.pop(ip, None)
     session.clear()
     session.permanent = True
-    session["user"] = "admin"
+    # 登录只有密码没有用户名，所以会话里的「操作者」就是可配置的操作者名称
+    session["user"] = core.admin_name()
     session["csrf"] = uuid.uuid4().hex
-    core.log_audit("admin", "login", "来自 %s" % ip)
-    return ok({"csrf": session["csrf"], "initialized": bool(core.get_meta("initialized"))})
+    core.log_audit(session["user"], "login", "登录成功")
+    return ok({"csrf": session["csrf"], "initialized": bool(core.get_meta("initialized")),
+               "admin_name": session["user"]})
 
 
 @app.post("/api/logout")
 def api_logout():
-    core.log_audit("admin", "logout", client_ip())
+    core.log_audit(session.get("user") or core.admin_name(), "logout", "退出登录")
     session.clear()
     return ok()
 
@@ -166,6 +183,36 @@ def api_password():
         raise ValueError("原密码错误")
     core.admin_set_password(d.get("new", ""))
     return ok(msg="管理密码已修改")
+
+
+@app.post("/api/admin-name")
+def api_admin_name():
+    """改操作者名称：审计日志里的「操作者」列就显示这个名字"""
+    d = request.get_json(silent=True) or {}
+    name = core.set_admin_name(d.get("name", ""))
+    session["user"] = name          # 立即生效，不用重新登录
+    core.log_audit(name, "admin.rename", "操作者名称已修改")
+    return ok({"name": name, "msg": "操作者名称已改为 " + name})
+
+
+@app.get("/api/security/allow")
+def api_allow_get():
+    return ok({"allow": core.allow_list(), "detected": core.local_subnets(),
+               "current_ip": client_ip(), "admin_name": core.admin_name(),
+               "vpn_cidr": core.cfg().get("vpn_cidr", "")})
+
+
+@app.post("/api/security/allow")
+def api_allow_set():
+    """管理端访问白名单：8800 端口只对名单内的来源开放"""
+    d = request.get_json(silent=True) or {}
+    items = d.get("allow")
+    if not isinstance(items, list):
+        items = str(items or "").replace("，", ",").split(",")
+    old = core.allow_list()
+    new = core.set_allow_list(items, keep_ip=client_ip())
+    core.log_audit("", "security.allow", "%s -> %s" % (",".join(old), ",".join(new)))
+    return ok({"allow": new, "msg": "白名单已更新（立即生效，不用重启）"})
 
 
 # --------------------------------------------------------------------------- 用户自助
@@ -455,7 +502,7 @@ def api_state():
     con.close()
     return ok({
         "initialized": bool(core.get_meta("initialized")),
-        "version": vi, "cfg": c,
+        "version": vi, "cfg": c, "admin_name": core.admin_name(), "src_ip": client_ip(),
         "stats": {"users": len(users), "enabled": len([u for u in users if u["enabled"]]),
                   "online": len(online), "grants": n_grants, "peers": n_peers,
                   "acl_mode": c["acl_mode"], "nat_mode": c.get("nat_mode", "nat")},
@@ -857,16 +904,17 @@ def settings_preview():
 
 @app.get("/api/settings/capacity")
 def settings_capacity():
-    """「最大客户端」填多少合适：按台账算，别凭感觉"""
+    """地址容量：网段里到底还剩多少个固定 IP 可分（一人一个，池子占掉的不算）"""
     c = core.cfg()
     users = core.list_users()
-    enabled = len([u for u in users if u["enabled"]])
-    pool = core.static_capacity(c)
-    suggest = min(pool, max(8, enabled + 8))
-    return ok({"enabled": enabled, "total": len(users), "pool": pool,
-               "suggest": suggest, "current": c.get("max_clients"),
-               "msg": "启用账号 %d 个，网段最多容纳 %d 个固定 IP；建议填 %d（启用人数 + 8 余量）"
-                      % (enabled, pool, suggest)})
+    usable = core.usable_host_ips(c)
+    used = len([u for u in users if u["vpn_ip"] in usable])
+    return ok({"usable": len(usable), "used": used, "free": max(0, len(usable) - used),
+               "enabled": len([u for u in users if u["enabled"]]),
+               "total": len(users), "pool": core.pool_text(c),
+               "pool_enabled": bool(c.get("pool_enabled")),
+               "msg": "网段 %s 可分配固定 IP %d 个，已用 %d 个，还剩 %d 个"
+                      % (c["vpn_cidr"], len(usable), used, max(0, len(usable) - used))})
 
 
 @app.get("/api/pki")
@@ -1173,6 +1221,20 @@ def favicon():
 
 def main():
     core.init_db()
+    # 命令行救场：白名单配错把自己关在门外时，SSH 上去一条命令就能放行
+    argv = sys.argv[1:]
+    if argv and argv[0] in ("--allow", "--allow-add"):
+        if len(argv) < 2:
+            print("用法: python3 app.py --allow 10.20.30.0/24[,10.0.0.0/8]")
+            print("      python3 app.py --allow-reset      # 重置成 127.0.0.1 + 本机网卡网段")
+            sys.exit(1)
+        items = list(core.allow_list()) if argv[0] == "--allow-add" else []
+        items += re.split(r"[,，\s]+", argv[1])
+        print("新白名单: %s" % ", ".join(core.set_allow_list(items)))
+        sys.exit(0)
+    if argv and argv[0] == "--allow-reset":
+        print("新白名单: %s" % ", ".join(core.set_allow_list(core.local_subnets())))
+        sys.exit(0)
     bootstrap_admin()
     print("=" * 60)
     print(" OpenVPN Web 一体化管理系统  v%s" % core.WEB_VERSION)

@@ -21,6 +21,8 @@ core.init_db(); core.set_meta("admin_hash", core.hash_password("SmokePass123!"))
 for i,n in enumerate(["alice","bob","carol","dave"]):
     core.add_user(n, real_name=["爱丽丝","鲍勃","卡罗","戴夫"][i], dept=["运维部","财务部","运维部","外包"][i],
                   note="", password="Passw0rd!23")
+# 账号名本身就用中文（这一轮新增支持）
+core.add_user("张三", real_name="张三", dept="运维部", password="Passw0rd!23")
 core.add_asset_group("核心数据库","生产库",[("10.10.1.11","tcp","3306"),("10.10.1.12","tcp","3306"),("10.10.1.13","tcp","3306")])
 core.add_asset_group("Web 前端","",[("10.10.2.0/24","tcp","80,443")])
 core.add_user_group("运维组","7x24",["alice","carol"])
@@ -195,10 +197,49 @@ async function waitUp() {
       if (!inp || inp.type === 'password') errors.push('改密弹窗的密码框不可见');
     } catch (e) { errors.push('账号页交互抛错: ' + e.message); }
 
+    // 这一轮：最大客户端去掉、动态地址池改成手动设置、白名单/操作者名称、审计带 IP
+    try {
+      w.go('settings'); await wait(500);
+      const pg = w.document.querySelector('#page');
+      if (w.document.querySelector('#c_max_clients')) errors.push('设置页仍有「最大客户端」');
+      if (/最大客户端|max-clients/.test(pg.textContent)) errors.push('设置页仍有最大客户端文案');
+      const pool = w.document.querySelector('#c_pool_on');
+      if (!pool) errors.push('设置页缺少「动态地址池」开关');
+      else {
+        const start = w.document.querySelector('#c_pool_start');
+        if (pool.checked) errors.push('动态地址池默认应关闭');
+        if (!start.disabled) errors.push('地址池未启用时起止地址应禁用');
+        pool.checked = true; w.poolToggle();
+        if (start.disabled) errors.push('勾选后地址池起止地址仍禁用');
+        const cfg = w.readCfg();
+        if (cfg.pool_enabled !== true || !cfg.pool_start) errors.push('readCfg 没读到地址池字段');
+        pool.checked = false; w.poolToggle();
+      }
+      const who = w.document.querySelector('#vwho');
+      if (!who || !(who.textContent || '').trim()) errors.push('顶栏没有显示操作者名称');
+    } catch (e) { errors.push('设置页地址池交互抛错: ' + e.message); }
+
+    try {
+      w.go('security'); await wait(500);
+      const t = w.document.querySelector('#page').textContent;
+      if (!/操作者名称/.test(t)) errors.push('安全页缺少操作者名称设置');
+      if (!/访问白名单/.test(t)) errors.push('安全页缺少管理端访问白名单');
+      if (!w.document.querySelector('#tg_web_allow')) errors.push('白名单没有标签式输入区');
+      else if (w.document.querySelectorAll('#tgchip_web_allow .chip').length < 1)
+        errors.push('白名单初始条目没渲染出来');
+      if (!w.document.querySelector('#adn')) errors.push('缺少操作者名称输入框');
+    } catch (e) { errors.push('安全页交互抛错: ' + e.message); }
+
+    try {
+      w.go('logs'); await wait(500);
+      const head = w.document.querySelector('#page table thead');
+      const txt = head ? head.textContent : '';
+      if (!/操作者 IP/.test(txt)) errors.push('审计日志缺少「操作者 IP」列: ' + txt);
+    } catch (e) { errors.push('日志页交互抛错: ' + e.message); }
+
     // 自助改密页：不该再有固定 IP 输入框
     try {
-      const sp = await (await fetch(base + '/self')).text();
-      if (/id="ip"/.test(sp) || /id="ipbox"/.test(sp)) errors.push('自助页仍然有固定 IP 输入框');
+      const sp = await (await fetch(base + '/self')).text();      if (/id="ip"/.test(sp) || /id="ipbox"/.test(sp)) errors.push('自助页仍然有固定 IP 输入框');
       if (!/whoami/.test(sp)) errors.push('自助页缺少自动识别');
       if (!/连上 VPN/.test(sp)) errors.push('自助页没说明必须先连 VPN');
     } catch (e) { errors.push('自助页检查抛错: ' + e.message); }

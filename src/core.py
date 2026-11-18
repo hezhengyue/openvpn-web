@@ -45,13 +45,15 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "1.1.1"
+WEB_VERSION = "1.2.0"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
-USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
-DYNAMIC_POOL = (2, 9)                   # ifconfig-pool .2~.9
-STATIC_RANGE = (10, 254)                # 台账固定 IP 只能用这一段
+# 账号名允许中文（OpenVPN 的 common name 就是原始字节，ccd 文件名跟着它走）。
+# 但仍禁止 / 空格 引号 等会破坏 ccd 文件名或配置行的字符；"." / ".." 单独拦掉。
+USERNAME_RE = re.compile(r"^[A-Za-z0-9._\-\u4e00-\u9fff\u3400-\u4dbf]{1,32}$")
+FIRST_HOST = 2                          # .1 是服务端自己，.2 起才能分给客户端
+LAST_HOST = 254                         # 广播地址留给网段
 
 DEFAULT_CFG = {
     "public_addr": "",
@@ -70,7 +72,12 @@ DEFAULT_CFG = {
     # 默认两个足够覆盖 AES-NI 服务器与无 AES 加速的 ARM 手机端，少一个是少一次协商分支。
     "data_ciphers": "AES-256-GCM:CHACHA20-POLY1305",
     "tls_min": "1.2",
-    "max_clients": 200,
+    # 动态地址池（ifconfig-pool）：默认关闭。
+    # 本系统每个账号都由 ccd 的 ifconfig-push 固定下发 IP，池子是给「没台账的临时连接」
+    # 兜底用的，用不上就别开；要开就自己指定起止地址，不再写死 .2~.9。
+    "pool_enabled": False,
+    "pool_start": "10.8.0.2",
+    "pool_end": "10.8.0.9",
     "acl_mode": "observe",              # observe=只记录不拦截 / enforce=默认拒绝
     # 网络模式（「无 NAT 溯源」做成默认关闭、可开启的开关）：
     #   nat    默认。对 VPN 网段做 SNAT/MASQUERADE，开箱即用，不需要机房网关配回程路由；
@@ -138,7 +145,8 @@ CREATE TABLE IF NOT EXISTS auth_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, username TEXT, src_ip TEXT,
   result TEXT, reason TEXT);
 CREATE TABLE IF NOT EXISTS audit (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, actor TEXT, action TEXT, detail TEXT);
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, actor TEXT, action TEXT, detail TEXT,
+  ip TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY, kind TEXT, status TEXT, progress INTEGER, msg TEXT,
   created_at TEXT, finished_at TEXT, actor TEXT);
@@ -171,7 +179,8 @@ def init_db():
         con.execute("INSERT OR IGNORE INTO meta(k,v) VALUES(?,?)", (k, json.dumps(v, ensure_ascii=False)))
     for k, v in (("initialized", 0), ("wizard_step", 0), ("admin_hash", ""),
                  ("admin_salt", ""), ("config_fingerprint", ""), ("openvpn_version", ""),
-                 ("last_update", ""), ("csrf", ""), ("schema_v2", 0)):
+                 ("last_update", ""), ("csrf", ""), ("schema_v2", 0),
+                 ("admin_name", ""), ("allow_init_v2", 0)):
         con.execute("INSERT OR IGNORE INTO meta(k,v) VALUES(?,?)", (k, json.dumps(v, ensure_ascii=False)))
     con.commit()
     # 迁移只搬数据，不建表（表已由 SCHEMA 建好）；万一某台机器上老库结构特殊，
@@ -180,7 +189,33 @@ def init_db():
         _migrate(con)
     except Exception as e:
         print("[migrate] 跳过（不影响启动）: %s" % e)
+    try:
+        _tighten_web_allow(con)
+    except Exception as e:
+        print("[migrate] 管理端白名单沿用原值: %s" % e)
     con.close()
+
+
+LEGACY_WEB_ALLOW = "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+
+
+def _tighten_web_allow(con):
+    """老库里的白名单是「所有私网」——等于任何一条 VPN（包括别的公司的）都能打开后台。
+
+    只做一次：把「还是老默认值」的白名单收紧成「本机网卡所在网段 + 127.0.0.1」。
+    用户自己改过（值不等于老默认）就一个字都不动，避免升级后把人锁在门外。
+    """
+    if get_meta("allow_init_v2", con=con):
+        return 0
+    cur = (get_meta("web_allow_cidr", con=con) or "").strip()
+    if cur.replace(" ", "") == LEGACY_WEB_ALLOW:
+        subnets = local_subnets()
+        if subnets:
+            set_meta("web_allow_cidr", ",".join(subnets), con=con)
+            print("[migrate] 管理端白名单已收紧为: %s" % ",".join(subnets))
+    set_meta("allow_init_v2", 1, con=con)
+    con.commit()
+    return 1
 
 
 def _has_table(con, name):
@@ -249,6 +284,10 @@ def _migrate(con):
     for col in ("real_name", "dept"):
         if col not in cols:
             con.execute("ALTER TABLE users ADD COLUMN %s TEXT DEFAULT ''" % col)
+    # 2) audit 补「操作者来源 IP」（老库里没有这一列，升级后新记录才有值）
+    acols = {r[1] for r in con.execute("PRAGMA table_info(audit)")}
+    if "ip" not in acols:
+        con.execute("ALTER TABLE audit ADD COLUMN ip TEXT DEFAULT ''")
     con.commit()
 
     if not get_meta("schema_v2", con=con):
@@ -364,7 +403,11 @@ def rand_password(n=16):
 
 
 def valid_username(name):
-    return bool(USERNAME_RE.match(name or ""))
+    name = name or ""
+    # "." / ".." 会变成 ccd 目录本身，文件名层面也建不出来
+    if name.strip(".") == "":
+        return False
+    return bool(USERNAME_RE.match(name))
 
 
 def parse_version(v):
@@ -377,15 +420,56 @@ def vpn_network(c):
     return ipaddress.IPv4Network(c["vpn_cidr"], strict=False)
 
 
-def static_capacity(c):
-    """台账最多能放多少个固定 IP（.10~.254，网段比 /24 小时按实际可用地址收窄）。
+def pool_span(c):
+    """动态地址池的序号范围 (起, 止)；未启用或配置不合法时返回 None。
 
-    这才是「能有多少人同时在线」的硬天花板：一人一个固定 IP，用满就分配不出来了。
-    地址池（.2~.9）只是兜底，不参与这个计算。
+    序号 = 相对网络地址的偏移量（.1 = 1）。池子只在
+    「pool_enabled 打开、且起止都落在当前 VPN 网段内」时生效，
+    这样改了 VPN 网段以后老池子不会静默生效到别的网段上。
+    """
+    if not c.get("pool_enabled"):
+        return None
+    net = vpn_network(c)
+    try:
+        a = int(ipaddress.IPv4Address(str(c.get("pool_start")).strip()))
+        b = int(ipaddress.IPv4Address(str(c.get("pool_end")).strip()))
+    except Exception:
+        return None
+    s, e = a - int(net.network_address), b - int(net.network_address)
+    if s < FIRST_HOST or e > net.num_addresses - 2 or s > e:
+        return None
+    return (s, e)
+
+
+def usable_host_ips(c):
+    """台账能用的固定 IP 清单：去掉网络地址、广播地址、服务端自己（.1）与动态池。
+
+    这是唯一口径：分配、校验、导入校验、容量提示都从这里取，
+    免得「界面说 245 个、实际只能分 236 个」这种对不上的事。
     """
     net = vpn_network(c)
-    last_usable = net.num_addresses - 2          # 去掉网络地址与广播
-    return max(0, min(STATIC_RANGE[1], last_usable) - STATIC_RANGE[0] + 1)
+    last = min(LAST_HOST, net.num_addresses - 2)
+    pool = pool_span(c)
+    out = []
+    for i in range(FIRST_HOST, last + 1):
+        if pool and pool[0] <= i <= pool[1]:
+            continue
+        out.append(str(net.network_address + i))
+    return out
+
+
+def static_capacity(c):
+    """台账最多能放多少个固定 IP（一人一个，用满就分配不出来）。"""
+    return len(usable_host_ips(c))
+
+
+def pool_text(c):
+    """给界面/日志看的一句话：动态池是开着还是关着、范围多少"""
+    span = pool_span(c)
+    if not span:
+        return "未启用（所有地址都给台账固定分配）"
+    net = vpn_network(c)
+    return "%s ~ %s" % (net.network_address + span[0], net.network_address + span[1])
 
 
 def split_around(net, avoid):
@@ -469,14 +553,10 @@ def route_warnings(c):
                          % (a, b, a if a.prefixlen <= b.prefixlen else b))
     try:
         enabled = len([u for u in list_users() if u["enabled"]])
-        cap = int(c.get("max_clients") or 0)
-        if cap and enabled > cap:
-            w.append("最大客户端数 %d 小于启用账号数 %d：超出的账号会被服务端直接拒绝"
-                     "（日志里是 TLS Error: max-clients reached），把它们改到一致。" % (cap, enabled))
-        pool = static_capacity(c)
-        if cap > pool:
-            w.append("最大客户端数 %d 大于网段能容纳的固定 IP 数 %d：一人一个固定 IP，"
-                     "超出部分分配不出来，请扩大 VPN 网段。" % (cap, pool))
+        cap = static_capacity(c)
+        if enabled > cap:
+            w.append("启用账号 %d 个，但网段只能放 %d 个固定 IP：多出来的账号分不到地址，"
+                     "请扩大 VPN 网段（或关掉动态地址池腾出地址）。" % (enabled, cap))
     except Exception:
         pass
     return w
@@ -484,16 +564,20 @@ def route_warnings(c):
 
 def validate_vpn_ip(ip, c, exclude_user=None, con=None):
     net = vpn_network(c)
-    addr = ipaddress.IPv4Address(ip)
+    try:
+        addr = ipaddress.IPv4Address(str(ip).strip())
+    except Exception:
+        raise ValueError("固定 IP 格式不正确：%s" % ip)
     if addr not in net:
         raise ValueError("固定 IP %s 不在 VPN 网段 %s 内" % (ip, c["vpn_cidr"]))
-    last = int(addr) - int(net.network_address)
-    if not (STATIC_RANGE[0] <= last <= min(STATIC_RANGE[1], net.num_addresses - 2)):
-        raise ValueError("固定 IP 只能使用网段内第 %d~%d 号（.2~.9 是动态池，不能占用）"
-                         % STATIC_RANGE)
+    span = pool_span(c)
+    if span and span[0] <= int(addr) - int(net.network_address) <= span[1]:
+        raise ValueError("固定 IP %s 落在动态地址池（%s）里，请换一个" % (ip, pool_text(c)))
+    if str(addr) not in usable_host_ips(c):
+        raise ValueError("固定 IP %s 不可用：网络/广播地址与 .1（服务端自己）不能分给账号" % ip)
     own = con is None
     con = con or db()
-    row = con.execute("SELECT username FROM users WHERE vpn_ip=?", (ip,)).fetchone()
+    row = con.execute("SELECT username FROM users WHERE vpn_ip=?", (str(addr),)).fetchone()
     if own:
         con.close()
     if row and row[0] != exclude_user:
@@ -549,20 +633,58 @@ def validate_cfg(c):
             errs.append("tun-mtu 需在 576~1600 之间（公网推荐 1400，局域网可 1500）")
     except Exception:
         errs.append("tun-mtu 必须是数字")
-    try:
-        if int(c.get("max_clients", 0)) < 1:
-            errs.append("最大客户端数至少为 1")
-    except Exception:
-        errs.append("最大客户端数必须是数字")
+    # 动态地址池：要么不开，开了就必须是网段内的合法一段，且不能把地址全吃掉
+    if c.get("pool_enabled"):
+        try:
+            net = vpn_network(c)
+            a = ipaddress.IPv4Address(str(c.get("pool_start")).strip())
+            b = ipaddress.IPv4Address(str(c.get("pool_end")).strip())
+            if a not in net or b not in net:
+                errs.append("动态地址池的起止地址必须都在 VPN 网段 %s 内" % c["vpn_cidr"])
+            elif int(a) - int(net.network_address) < FIRST_HOST:
+                errs.append("动态地址池不能包含 .1（服务端自己占用）")
+            elif a > b:
+                errs.append("动态地址池的起始地址不能大于结束地址")
+            elif not usable_host_ips(c):
+                errs.append("动态地址池把可用地址全部占满了，台账就没有固定 IP 可分")
+        except Exception:
+            errs.append("动态地址池的起止地址不合法")
     return errs
 
 
 # --------------------------------------------------------------------------- 日志 / 审计
 
-def log_audit(actor, action, detail):
+# 当前请求的审计上下文：actor=操作者名称，ip=来源 IP，由 app.py 在每个请求开头写入。
+# log_audit 缺省时从这里取值，这样 core 内部（add_user / update_user …）记的日志
+# 也能自动带上「谁、从哪个 IP 操作的」，不用把参数一路透传。
+AUDIT_CTX = {"actor": "", "ip": ""}
+
+
+def admin_name():
+    """后台操作者名称（可在「管理密码与安全」里改），审计日志用它代替写死的 admin"""
+    return (get_meta("admin_name") or "").strip() or "管理员"
+
+
+def set_admin_name(name):
+    name = (name or "").strip()
+    if not name or len(name) > 32:
+        raise ValueError("操作者名称 1~32 个字符")
+    if re.search(r"[\r\n\t]", name):
+        raise ValueError("操作者名称不能包含换行或制表符")
+    set_meta("admin_name", name)
+    return name
+
+
+def log_audit(actor, action, detail, ip=None):
+    ctx = AUDIT_CTX
+    # 没登录时的兜底 actor（"admin"/"web"）换成配置里的操作者名称
+    if actor in (None, "", "admin", "web") and ctx.get("actor"):
+        actor = ctx["actor"]
+    if ip is None:
+        ip = ctx.get("ip") or ""
     con = db()
-    con.execute("INSERT INTO audit(ts,actor,action,detail) VALUES(?,?,?,?)",
-                (now(), actor, action, detail))
+    con.execute("INSERT INTO audit(ts,actor,action,detail,ip) VALUES(?,?,?,?,?)",
+                (now(), actor, action, detail, ip))
     con.commit()
     con.close()
 
@@ -625,18 +747,16 @@ def next_free_ip(c, con=None):
     used = {r[0] for r in con.execute("SELECT vpn_ip FROM users").fetchall()}
     if own:
         con.close()
-    net = vpn_network(c)
-    for i in range(STATIC_RANGE[0], min(STATIC_RANGE[1], net.num_addresses - 2) + 1):
-        ip = str(net.network_address + i)
+    for ip in usable_host_ips(c):
         if ip not in used:
             return ip
-    raise ValueError("固定 IP 段已用完")
+    raise ValueError("固定 IP 段已用完（当前网段可用 %d 个）" % static_capacity(c))
 
 
 def add_user(username, vpn_ip=None, password=None, note="", real_name="", dept="", actor="web"):
     c = cfg()
     if not valid_username(username):
-        raise ValueError("用户名只支持字母/数字/点/下划线/连字符，1~32 位，不支持中文和空格")
+        raise ValueError("账号名只支持中文、字母、数字、点、下划线、连字符，1~32 位，不能有空格")
     con = db()
     if con.execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone():
         con.close()
@@ -780,7 +900,6 @@ def parse_users_file(content, filename=""):
     keys = ("用户名", "姓名", "部门", "密码", "VPN固定IP", "状态", "备注")
     idx = {k: head.index(k) for k in keys if k in head}
     out, errs = [], []
-    net = vpn_network(cfg())
     for i, r in enumerate(rows[1:], start=2):
         def cell(k):
             j = idx.get(k)
@@ -808,11 +927,10 @@ def parse_users_file(content, filename=""):
         if o["vpn_ip"] in seen.values():
             errs.append("固定 IP 重复: %s" % o["vpn_ip"])
         seen[o["username"]] = o["vpn_ip"]
+    usable = set(usable_host_ips(cfg()))
     for o in out:
-        last = int(ipaddress.IPv4Address(o["vpn_ip"])) - int(net.network_address)
-        if ipaddress.IPv4Address(o["vpn_ip"]) not in net or not (
-                STATIC_RANGE[0] <= last <= min(STATIC_RANGE[1], net.num_addresses - 2)):
-            errs.append("%s 的固定 IP %s 不在可用静态段（.2~.9 为动态池）"
+        if o["vpn_ip"] not in usable:
+            errs.append("%s 的固定 IP %s 不可用（不在 VPN 网段内，或落在动态池 / .1 / 广播地址上）"
                         % (o["username"], o["vpn_ip"]))
     return out, errs
 
@@ -827,11 +945,11 @@ def preview_import(content, filename="", actor="web"):
     if len(set(ips)) != len(ips):
         raise ValueError("整批拒绝：表内固定 IP 有重复")
     c = cfg()
-    net = vpn_network(c)
+    usable = set(usable_host_ips(c))
     for r in rows:
-        last = int(ipaddress.IPv4Address(r["vpn_ip"])) - int(net.network_address)
-        if not (STATIC_RANGE[0] <= last <= min(STATIC_RANGE[1], net.num_addresses - 2)):
-            raise ValueError("整批拒绝：%s 落在动态池或保留地址" % r["vpn_ip"])
+        if r["vpn_ip"] not in usable:
+            raise ValueError("整批拒绝：%s 不可用（不在 VPN 网段内，或落在动态池 / 保留地址上）"
+                             % r["vpn_ip"])
     old = {u["username"]: u for u in list_users()}
     new = {r["username"]: r for r in rows}
     changes = []
@@ -1586,8 +1704,6 @@ def _proto_name(c, role):
 def render_server_conf(c):
     net = vpn_network(c)
     local = str(net.network_address + 1)
-    pool_start = str(net.network_address + DYNAMIC_POOL[0])
-    pool_end = str(net.network_address + DYNAMIC_POOL[1])
     # 手工展开 --server 宏：官方 wiki 指出宏会占用整段做动态池，与 ccd 静态地址冲突
     L = [
         "# 由 OpenVPN Web 一体化管理系统生成，请勿手工编辑",
@@ -1600,12 +1716,18 @@ def render_server_conf(c):
         "mode server",
         "tls-server",
         "ifconfig %s %s" % (local, _mask(c)),
-        # 地址池只是兜底，不是并发上限：每个账号的 IP 由 ccd 的 ifconfig-push 固定下发
-        # （.10~.254），池子只留 .2~.9 这段空位，免得和台账里的固定 IP 撞车。
-        # 真正的并发上限是下面的 max-clients，与池子大小无关。
-        "# 地址池：仅兜底（账号 IP 由 ccd 固定下发，.10~.254）；并发上限看 max-clients",
-        "ifconfig-pool %s %s" % (pool_start, pool_end),
     ]
+    # 地址池是可选项：本系统每个账号的 IP 都由 ccd 的 ifconfig-push 固定下发，
+    # 不需要 DHCP 式的动态分配。只有运维显式打开「动态地址池」才写 ifconfig-pool。
+    span = pool_span(c)
+    if span:
+        L += [
+            "# 动态地址池：只给没有台账的临时连接兜底（%s ~ %s）" % (
+                net.network_address + span[0], net.network_address + span[1]),
+            "ifconfig-pool %s %s" % (net.network_address + span[0], net.network_address + span[1]),
+        ]
+    else:
+        L.append("# 未启用动态地址池：客户端地址全部由 ccd 的 ifconfig-push 固定下发")
     # VPN 网段与附加推送路由统一由 push_targets 给出，避免两处各自拼一份、漏掉一条
     for nw in push_targets(c):
         L.append('push "route %s %s"' % (str(nw.network_address), str(nw.netmask)))
@@ -1630,7 +1752,8 @@ def render_server_conf(c):
         "keepalive 10 120",
         "persist-key",
         "persist-tun",
-        "max-clients %s" % c["max_clients"],
+        # 不写 max-clients：并发上限天然由「一人一个固定 IP + ccd-exclusive」决定，
+        # 再叠一个数字只会变成莫名其妙的「TLS Error: max-clients reached」。
         "status %s 10" % os.path.join(DATA, "status.log"),
         "log-append %s" % os.path.join(DATA, "openvpn.log"),
         "verb 3",
@@ -2345,13 +2468,114 @@ def vpn_client_allowed(ip):
         return False
 
 
-def client_allowed(ip):
+def local_subnets():
+    """本机各网卡所在网段 —— 管理端访问白名单的推荐值。
+
+    优先读 `ip -4 -o addr`（Linux 目标环境），拿不到就用 UDP 探测出口地址按 /24 兜底；
+    第一项固定是 127.0.0.1，保证本机命令行还能自救。
+
+    隧道网卡（tun/tap/ppp）与 VPN 网段一律排除：VPN 拨号用户只该用自助改密页，
+    不该因为「服务器自己有一张 tun0 网卡」就顺带拿到管理后台。
+    """
+    out = ["127.0.0.1/32"]
     try:
-        addr = ipaddress.IPv4Address(ip)
-        for cidr in (get_meta("web_allow_cidr") or "").split(","):
-            cidr = cidr.strip()
-            if cidr and addr in ipaddress.IPv4Network(cidr, strict=False):
-                return True
+        vpn = vpn_network(cfg())
+    except Exception:
+        vpn = None
+    nets = []
+
+    def add(n):
+        try:
+            n = ipaddress.IPv4Network(str(n), strict=False)
+        except Exception:
+            return
+        if n.is_loopback or n.is_link_local:
+            return
+        if vpn and n.overlaps(vpn):
+            return
+        if str(n) not in out:
+            out.append(str(n))
+
+    try:
+        r = subprocess.run(["ip", "-4", "-o", "addr", "show"], capture_output=True,
+                           text=True, timeout=5)
+        for line in r.stdout.splitlines():
+            ifname = (line.split()[1] if len(line.split()) > 1 else "")
+            if ifname.startswith(("tun", "tap", "ppp", "wg", "ipsec")):
+                continue
+            m = re.search(r"inet (\d+\.\d+\.\d+\.\d+)/(\d+)", line)
+            if m and not m.group(1).startswith("127."):
+                add("%s/%s" % (m.group(1), m.group(2)))
     except Exception:
         pass
+    if len(out) == 1:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("223.5.5.5", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            if ip and not ip.startswith("127."):
+                add(ip + "/24")
+        except Exception:
+            pass
+    return out
+
+
+def allow_list():
+    """管理端访问白名单（CIDR 列表）。空 = 只允许本机，绝不等于「全部放行」。"""
+    raw = get_meta("web_allow_cidr") or ""
+    if isinstance(raw, list):
+        items = raw
+    else:
+        items = re.split(r"[,，\s]+", str(raw))
+    out = [x.strip() for x in items if x.strip()]
+    return out or ["127.0.0.1/32"]
+
+
+def set_allow_list(items, keep_ip=""):
+    """保存白名单。必须保证 keep_ip（当前操作者）仍在名单内，否则会把自己关在门外。"""
+    clean, errs = [], []
+    for x in items or []:
+        x = str(x).strip()
+        if not x:
+            continue
+        try:
+            n = ipaddress.IPv4Network(x, strict=False)
+        except Exception:
+            errs.append(x)
+            continue
+        if str(n) not in clean:
+            clean.append(str(n))
+    if errs:
+        raise ValueError("这些不是合法网段：%s（例：10.20.30.0/24）" % "、".join(errs))
+    if not clean:
+        raise ValueError("白名单不能为空；想只允许本机请填 127.0.0.1/32")
+    if keep_ip:
+        try:
+            addr = ipaddress.IPv4Address(keep_ip)
+            if not any(addr in ipaddress.IPv4Network(n) for n in clean):
+                raise ValueError("保存后你自己（%s）就进不来了：请把当前来源网段加进白名单" % keep_ip)
+        except ValueError:
+            raise
+        except Exception:
+            pass
+    set_meta("web_allow_cidr", ",".join(clean))
+    log_audit("", "security.allow", "白名单 -> %s" % ",".join(clean))
+    return clean
+
+
+def client_allowed(ip):
+    """来源 IP 是否允许打开管理端（自助改密页另有 vpn_client_allowed 兜底）"""
+    try:
+        addr = ipaddress.IPv4Address((ip or "").strip())
+    except Exception:
+        return False
+    if addr.is_loopback:
+        return True
+    for cidr in allow_list():
+        try:
+            if addr in ipaddress.IPv4Network(cidr, strict=False):
+                return True
+        except Exception:
+            continue
     return False

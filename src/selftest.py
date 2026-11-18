@@ -72,12 +72,14 @@ def main():
     ovpn = open(os.path.join(core.DATA, "company.ovpn")).read()
     rules = open(os.path.join(core.STATE, "rules.sh")).read()
     for k in ("username-as-common-name", "verify-client-cert none", "ccd-exclusive",
-              "ifconfig-pool 10.8.0.2 10.8.0.9", "auth-user-pass-verify", "tls-crypt"):
+              "auth-user-pass-verify", "tls-crypt"):
         check("server.conf 含 " + k, k in conf)
-    # 地址池只有 .2~.9 很容易被误读成「只能连 8 个人」，配置里必须写明它只是兜底
-    check("server.conf 注明地址池只是兜底", "地址池：仅兜底" in conf)
-    check("网段能容纳的固定 IP 数（/24 -> 245）", core.static_capacity(core.cfg() or core.DEFAULT_CFG) == 245,
-          core.static_capacity(core.DEFAULT_CFG))
+    # 地址池改成可选：默认不写 ifconfig-pool，也不写 max-clients
+    check("默认不写 ifconfig-pool（地址全由 ccd 固定下发）", "ifconfig-pool" not in conf)
+    check("server.conf 注明未启用地址池", "未启用动态地址池" in conf)
+    check("不再写 max-clients", "max-clients" not in conf)
+    check("网段能分配 253 个固定 IP（.2~.254）", core.static_capacity(core.cfg()) == 253,
+          core.static_capacity(core.cfg()))
     # 2.6 不接受裸写 proto tcp（Options error: --proto tcp is ambiguous），必须按方向写
     check("server.conf 写 proto tcp-server", "proto tcp-server" in conf)
     check("company.ovpn 写 proto tcp-client", "proto tcp-client" in ovpn)
@@ -128,17 +130,35 @@ def main():
         return c.post(path, json=body or {}, headers=H)
     check("缺 CSRF 被拒", c.post("/api/users", json={}).status_code == 403)
     check("带 CSRF 通过", c.get("/api/state").status_code == 200)
+    check("登录后操作者名称默认不是写死的 admin", core.admin_name() not in ("", "admin"),
+          core.admin_name())
+    jn = P("/api/admin-name", {"name": "运维-小王"}).get_json()
+    check("可配置操作者名称", jn.get("name") == "运维-小王", jn)
+    check("会话立即用新名称", c.get("/api/state").get_json()["admin_name"] == "运维-小王")
+    check("空名称被拒", P("/api/admin-name", {"name": "  "}).status_code == 400)
+    # 来源白名单：远程地址换成公网 IP 必须被挡在门外
+    check("白名单外的来源 403",
+          c.get("/api/state", environ_base={"REMOTE_ADDR": "8.8.8.8"}).status_code == 403)
+    check("伪造 X-Forwarded-For 不能绕过白名单",
+          c.get("/api/state", environ_base={"REMOTE_ADDR": "8.8.8.8"},
+                headers={"X-Forwarded-For": "127.0.0.1"}).status_code == 403)
 
     # ---------- 账号台账 ----------
     section("账号 / 固定 IP / 校验")
     u1 = core.add_user("zhangsan", real_name="张三", dept="运维部")
     u2 = core.add_user("lisi", "10.8.0.11", real_name="李四", dept="财务部")
-    check("自动分配 10.8.0.10", u1["vpn_ip"] == "10.8.0.10")
+    check("自动分配 10.8.0.2", u1["vpn_ip"] == "10.8.0.2")
     check("姓名/部门入库", core.list_users()[0]["real_name"] in ("张三", "李四"))
-    check("用户名列仍不允许中文", not core.valid_username("张三"))
+    # 账号名允许中文（OpenVPN 的 common name 就是原始字节，ccd 文件名跟着走）
+    u_cn = core.add_user("张三", real_name="张三", dept="运维部")
+    check("账号名可以是中文", u_cn["username"] == "张三")
+    core.rebuild_ccd()
+    check("中文账号生成 ccd（中文文件名）", os.path.exists(os.path.join(core.CCD, "张三")))
+    for bad in ("a/b", "张 三", "..", ".", "x" * 33, ""):
+        check("拒绝非法账号名 %r" % bad, not core.valid_username(bad))
     core.update_user("lisi", dept="审计部")
     check("部门可改", [u for u in core.list_users() if u["username"] == "lisi"][0]["dept"] == "审计部")
-    for bad, why in (("10.8.0.11", "IP 冲突"), ("10.8.0.5", "动态池"), ("10.9.0.20", "网段外")):
+    for bad, why in (("10.8.0.11", "IP 冲突"), ("10.8.0.1", "服务端自己"), ("10.9.0.20", "网段外")):
         try:
             core.add_user("baduser", bad); check("拒绝" + why, False)
         except ValueError:
@@ -147,8 +167,39 @@ def main():
     core.rebuild_ccd()
     check("改 IP 后 ccd 同步", "10.8.0.12" in open(os.path.join(core.CCD, "zhangsan")).read())
     check("停用账号不生成 ccd", (core.update_user("lisi", enabled=False) or True) and
-          core.rebuild_ccd() == 1)
+          core.rebuild_ccd() == 2 and not os.path.exists(os.path.join(core.CCD, "lisi")))
     core.update_user("lisi", enabled=True)
+
+    # ---------- 动态地址池（可选，默认关闭） ----------
+    section("动态地址池（ifconfig-pool）")
+    c0 = core.cfg()
+    check("默认关闭", c0["pool_enabled"] is False and core.pool_span(c0) is None)
+    check("池子关闭时 .5 也在可分配清单里", "10.8.0.5" in core.usable_host_ips(c0))
+    tmpu = core.add_user("poolok", "10.8.0.5")
+    check("池子关闭时能手动用 .5", tmpu["vpn_ip"] == "10.8.0.5")
+    core.delete_user("poolok")
+    core.update_user("lisi", vpn_ip="10.8.0.11")
+
+    core.set_meta("pool_enabled", True)
+    core.set_meta("pool_start", "10.8.0.2")
+    core.set_meta("pool_end", "10.8.0.9")
+    c1 = core.cfg()
+    check("开启后池子生效", core.pool_span(c1) == (2, 9))
+    check("池子占掉的地址不再分给台账", core.static_capacity(c1) == 245, core.static_capacity(c1))
+    try:
+        core.add_user("poolbad", "10.8.0.5"); check("拒绝落在池子里的 IP", False)
+    except ValueError:
+        check("拒绝落在池子里的 IP", True)
+    check("下一个可用 IP 跳过池子", core.next_free_ip(c1) not in
+          ["10.8.0.%d" % i for i in range(2, 10)])
+    check("server.conf 写上 ifconfig-pool", "ifconfig-pool 10.8.0.2 10.8.0.9"
+          in core.render_server_conf(c1))
+    bad_pool = dict(c1, pool_start="10.9.0.2")
+    check("池子不在 VPN 网段内被拒", any("均须在" in x or "必须都在" in x
+                                        for x in core.validate_cfg(bad_pool)), core.validate_cfg(bad_pool))
+    core.set_meta("pool_enabled", False)
+    check("关掉池子后恢复 253 个", core.static_capacity(core.cfg()) == 253)
+    core.write_all_config()
 
     # ---------- 认证脚本 ----------
     section("auth-user-pass-verify 认证脚本")
@@ -334,7 +385,8 @@ def main():
               "vpn_cidr": "10.8.0.0/24", "extra_routes": ["10.10.0.0/16"],
               "dns": ["10.10.0.53"], "ntp": ["10.10.0.123"], "tun_mtu": 1400,
               "compress": "off", "data_ciphers": "AES-256-GCM:CHACHA20-POLY1305",
-              "tls_min": "1.2", "max_clients": 200}
+              "tls_min": "1.2", "pool_enabled": False,
+              "pool_start": "10.8.0.2", "pool_end": "10.8.0.9"}
     check("向导参数保存", P("/api/wizard/params", params).get_json()["ok"])
     check("环境自检 API", P("/api/wizard/check").get_json()["ok"])
     ex = P("/api/wizard/execute", {}).get_json()
@@ -364,8 +416,22 @@ def main():
     check("按钮再切强制模式", P("/api/acl/mode", {"mode": "enforce"}).get_json()["ok"])
     check("下一个可用 IP 接口", c.get("/api/users/next-ip").get_json()["vpn_ip"].startswith("10.8.0."))
     _cap = c.get("/api/settings/capacity").get_json()
-    check("容量建议接口", _cap["suggest"] >= 1)
-    check("容量接口的池子 = 网段可容纳固定 IP 数", _cap["pool"] == 245, _cap)
+    check("容量接口：/24 可分配 253 个", _cap["usable"] == 253, _cap)
+    check("容量接口：还有空闲地址", _cap["free"] >= 1, _cap)
+    # ---------- 审计 IP / 白名单 ----------
+    rows = core.get_logs("audit", 80)
+    check("审计日志带操作者 IP", any(r.get("ip") == "127.0.0.1" for r in rows), rows[:1])
+    check("审计日志的操作者是配置名称", any(r["actor"] == "运维-小王" for r in rows))
+    a0 = c.get("/api/security/allow").get_json()
+    check("白名单接口返回当前来源 IP", a0["current_ip"] == "127.0.0.1", a0)
+    check("白名单接口返回候选网段", isinstance(a0.get("detected"), list) and a0["detected"])
+    av = P("/api/security/allow", {"allow": ["127.0.0.1/32", "10.20.30.0/24"]}).get_json()
+    check("保存白名单", av.get("allow") == ["127.0.0.1/32", "10.20.30.0/24"], av)
+    r403 = P("/api/security/allow", {"allow": ["8.8.8.8/32"]})
+    check("白名单排除当前 IP 时拒绝保存",
+          r403.status_code == 400 and "进不来" in r403.get_json()["msg"], r403.get_json())
+    check("非法网段被拒", P("/api/security/allow", {"allow": ["10.0.0.0/33"]}).status_code == 400)
+    check("空名单被拒", P("/api/security/allow", {"allow": []}).status_code == 400)
     check("手工打快照接口", P("/api/backups", {"tag": "自检"}).get_json()["ok"])
     # 自助页：来源 IP 能被认出来就不该让人再填一遍 IP
     w = c.get("/api/self/whoami").get_json()
