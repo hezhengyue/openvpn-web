@@ -84,6 +84,11 @@ def main():
     check("server.conf 写 proto tcp-server", "proto tcp-server" in conf)
     check("company.ovpn 写 proto tcp-client", "proto tcp-client" in ovpn)
     check("server.conf 不再有裸 proto tcp", "\nproto tcp\n" not in conf)
+    # topology 必须两端都对上：服务端不 push 的话，客户端按 net30 解析 ccd 下发的
+    # "ifconfig-push <ip> <掩码>"，Windows 会 fatal（掩码被当成对端 IP）
+    check("server.conf 写 topology subnet", "\ntopology subnet\n" in conf)
+    check("server.conf 显式推送 topology subnet", 'push "topology subnet"' in conf)
+    check("company.ovpn 写 topology subnet", "\ntopology subnet\n" in ovpn)
     # VPN 网段必须自动出现在推送路由里，且只出现一次（不能走两处各写一遍）
     vpn_net = core.vpn_network(core.cfg())
     vpn_push = 'push "route %s %s"' % (vpn_net.network_address, vpn_net.netmask)

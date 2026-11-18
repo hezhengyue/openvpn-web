@@ -424,6 +424,8 @@ Web 程序自身不提供「上传更新包」入口（日常更新就是覆盖�
 
 不用。ovpn 里装的是连接凭据（CA、tls-crypt、remote、proto、auth-user-pass），不是版本号。2.5 起数据通道加密改成 `data-ciphers` 协商，客户端上报 `IV_CIPHERS`、服务端挑双方都支持的算法，新老版本互通。真正需要重新发 ovpn 的只有三类：改连接参数（地址/端口/协议/MTU）、换 CA / ta.key / 服务端证书主题、改加密套件到某些客户端不支持的算法——而且仍然是**全员一份**。
 
+> 拓扑（`topology subnet`）不在此列：服务端每次连接都会用 `push "topology subnet"` 下发，老 ovpn 即使没写这一行也会被纠正，不用重新分发。
+
 唯一要升级客户端「软件」的情况是它本身太老：**OpenVPN 2.3 及更早**不会协商 `data-ciphers`、也不支持 `tls-crypt`，连不上 2.6 服务端。定个底线：客户端 ≥ 2.4，推荐 2.6 / OpenVPN Connect 3.x。这是一次性要求，跟以后打多少次补丁无关。
 
 ---
@@ -464,6 +466,7 @@ Web 程序自身不提供「上传更新包」入口（日常更新就是覆盖�
 | 内网日志源 IP 全是 VPN 服务器 | 当前是默认 NAT 模式（正常）；想看账号固定 IP 就开启「无 NAT 溯源」。若已开启仍如此 → 有 NAT 残留，点「重建规则」，自检页会报 |
 | 全员连不上 | 服务没起 / 端口被占 / `ccd-exclusive` 下账号没有 ccd / firewalld reload 冲了 FORWARD（timer 5 分钟内恢复） |
 | 某账号连不上 | 状态是否停用、密码、是否被失败锁定、`ccd/<用户名>` 是否存在 |
+| Windows 报 `local and remote VPN endpoints must exist within the same 255.255.255.252 subnet` | 客户端把 ccd 下发的 `10.8.0.x 255.255.255.0` 按点对点（net30）解析了，即拓扑没对上。服务端 `server.conf` 要有 `topology subnet` **和** `push "topology subnet"`；客户端 ovpn 也要有 `topology subnet`。缺 push 时 Linux 客户端能连、Windows 直接 fatal，所以别只拿 Linux 验 |
 | 改了 IP 权限不对 | 看是否触发了全量重建；自检页对比「启用账号数 / ccd 文件数」 |
 | ACL 没生效 | 是否还在观察模式；授权是否过期；目标是否被 LB/NAT 改了源 IP |
 | 客户端之间互访不通 | 是否加了互访授权（默认全拒）、是否还在观察模式、双方账号是否启用；自检页看 IPv4 转发是否开启 |
@@ -475,7 +478,7 @@ Web 程序自身不提供「上传更新包」入口（日常更新就是覆盖�
 
 ## 11. 验证情况与限制
 
-- `python3 src/selftest.py`（或装机后在安装目录 `python3 selftest.py`）：**199 项全通过**——配置渲染、双网络模式（默认 NAT / 无 NAT 溯源）与切换不改指纹、自建 NAT 链、IPv4 转发前提、证书签发、账号校验（含中文账号 + 中文 ccd）、动态地址池开关与地址冲突、认证脚本（放行/拒绝/锁定/fail-closed）、Excel 全量同步、ACL 默认拒绝与改 IP 不残留、客户端互访授权与过期过滤、跨大版本闸门、安装向导长任务、全部 API（含网络模式切换、P2P 增删、下一个可用 IP、容量、白名单保存与「排除自己」拒绝、操作者名称、审计带 IP、按钮式保存/恢复默认/重签 CA）、二进制更新、快照回滚
+- `python3 src/selftest.py`（或装机后在安装目录 `python3 selftest.py`）：**203 项全通过**——配置渲染、双网络模式（默认 NAT / 无 NAT 溯源）与切换不改指纹、自建 NAT 链、IPv4 转发前提、证书签发、账号校验（含中文账号 + 中文 ccd）、动态地址池开关与地址冲突、认证脚本（放行/拒绝/锁定/fail-closed）、Excel 全量同步、ACL 默认拒绝与改 IP 不残留、客户端互访授权与过期过滤、跨大版本闸门、安装向导长任务、全部 API（含网络模式切换、P2P 增删、下一个可用 IP、容量、白名单保存与「排除自己」拒绝、操作者名称、审计带 IP、按钮式保存/恢复默认/重签 CA）、二进制更新、快照回滚
 - 前端在 jsdom 里逐页真跑（`tests/smoke.js`），另有 `tests/shots.js` 用无头 Edge 截图肉眼核对版式
 - **真实环境实测（2026-11-18，Anolis 8.10 / OpenVPN 2.6.23 / TCP）**：建中文账号 `张三` → 服务端生成 `ccd/张三` → 客户端用中文账号认证通过 → `PUSH_REPLY ... ifconfig 10.8.0.2` 拿到台账固定 IP；白名单按来源判定：隧道内 IP 访问 `/api/state` = 403、`/self` = 200，白名单内网段可进后台，公网 IP 全 403
 

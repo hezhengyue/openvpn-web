@@ -45,7 +45,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "1.2.0"
+WEB_VERSION = "1.2.1"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -1728,6 +1728,11 @@ def render_server_conf(c):
         ]
     else:
         L.append("# 未启用动态地址池：客户端地址全部由 ccd 的 ifconfig-push 固定下发")
+    # 必须显式推送 topology：mode server 不会自动下发，客户端拿不到就按默认 net30
+    # （点对点）理解，把 ccd 下发的 "ifconfig-push 10.8.0.2 255.255.255.0" 里的掩码
+    # 当成对端 IP，Windows 上直接 fatal（"local and remote endpoints must exist within
+    # the same 255.255.255.252 subnet"）。
+    L.append('push "topology subnet"')
     # VPN 网段与附加推送路由统一由 push_targets 给出，避免两处各自拼一份、漏掉一条
     for nw in push_targets(c):
         L.append('push "route %s %s"' % (str(nw.network_address), str(nw.netmask)))
@@ -1777,6 +1782,9 @@ def render_ovpn(c):
         "# OpenVPN Web 一体化管理系统 —— 全员共用这一个文件，不含任何个人凭据",
         "client",
         "dev tun",
+        # 服务端是 subnet 拓扑（ccd 下发的 ifconfig-push 是 IP + 掩码），
+        # 客户端必须一致，否则 Windows 会按点对点解析而启动失败。
+        "topology subnet",
         "proto %s" % _proto_name(c, "client"),
         "remote %s %s" % (c["public_addr"], c["port"]),
         "resolv-retry infinite",
