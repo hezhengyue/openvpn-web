@@ -192,9 +192,20 @@ async function waitUp() {
       const t = w.document.querySelector('#ubox').textContent;
       if (!/爱丽丝|卡罗/.test(t)) errors.push('按部门/姓名搜索无效');
       kw.value = ''; kw.dispatchEvent(new w.Event('input'));
+      // 台账页只做台账：操作列不该再有「踢」（踢下线统一放在在线用户页）
+      const ubtns = [...w.document.querySelectorAll('#ubox button')].map(b => b.textContent.trim());
+      if (ubtns.some(t => t === '踢')) errors.push('账号管理页操作列仍有「踢」按钮');
       w.userPwd('alice'); await wait(100);
       const inp = w.document.querySelector('#u_pw');
       if (!inp || inp.type === 'password') errors.push('改密弹窗的密码框不可见');
+      // 重置成功后必须真的再弹一次密码（曾因外层 closeModal 把新弹窗一起关掉而不显示）
+      inp.value = 'ResetPw12345!';
+      w.document.querySelector('#mok').click();
+      await wait(1500);
+      const mask = w.document.querySelector('#mask');
+      if (mask.style.display !== 'flex') errors.push('改密保存后密码弹窗没弹出来');
+      else if (!mask.textContent.includes('ResetPw12345!')) errors.push('改密保存后弹窗里没有显示密码');
+      w.closeModal();
     } catch (e) { errors.push('账号页交互抛错: ' + e.message); }
 
     // 这一轮：最大客户端去掉、动态地址池改成手动设置、白名单/操作者名称、审计带 IP
@@ -235,7 +246,21 @@ async function waitUp() {
       const head = w.document.querySelector('#page table thead');
       const txt = head ? head.textContent : '';
       if (!/操作者 IP/.test(txt)) errors.push('审计日志缺少「操作者 IP」列: ' + txt);
+      // 动作必须是中文，不能把 user.add 这种 key 直接甩给用户看
+      const body = w.document.querySelector('#page table tbody').textContent;
+      if (/user\.add|user\.update|settings\.save/.test(body))
+        errors.push('审计日志动作仍显示英文 key: ' + body.slice(0, 120));
+      if (!/新增账号|修改账号|系统/.test(body)) errors.push('审计日志没有中文化的动作/操作者');
     } catch (e) { errors.push('日志页交互抛错: ' + e.message); }
+
+    // 在线页：搜索框 + 踢下线说明（客户端会自动重连，必须写清楚）
+    try {
+      w.go('online'); await wait(500);
+      const okw = w.document.querySelector('#okw');
+      if (!okw) errors.push('在线用户页缺少搜索框');
+      const t = w.document.querySelector('#page').textContent;
+      if (!/自动重连/.test(t)) errors.push('在线页没说明「踢下线后客户端会自动重连」');
+    } catch (e) { errors.push('在线页交互抛错: ' + e.message); }
 
     // 自助改密页：不该再有固定 IP 输入框
     try {

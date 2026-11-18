@@ -169,7 +169,7 @@ pre::-webkit-scrollbar-thumb{background:oklch(.45 .02 250);background-clip:conte
 #toast{position:fixed;top:16px;right:18px;z-index:99;display:flex;flex-direction:column;gap:8px;align-items:flex-end}
 .tst{background:oklch(.28 .015 255);color:#fff;padding:9px 14px;border-radius:var(--r-md);font-size:12.5px;
  box-shadow:var(--shadow-md);animation:slide .22s cubic-bezier(.2,.8,.3,1);max-width:420px;line-height:1.5}
-.tst.ok{background:oklch(.48 .13 155)}.tst.err{background:oklch(.52 .19 25)}
+.tst.ok{background:oklch(.48 .13 155)}.tst.err{background:oklch(.52 .19 25)}.tst.warn{background:oklch(.55 .14 70)}
 @keyframes slide{from{opacity:0;transform:translateX(12px)}to{opacity:1;transform:none}}
 
 /* ---------- 布局辅助 ---------- */
@@ -254,7 +254,7 @@ pre::-webkit-scrollbar-thumb{background:oklch(.45 .02 250);background-clip:conte
 </div>
 
 <div id="mask"><div class="mbox"><h3 id="mtitle"></h3><div id="mbody"></div>
- <div class="foot"><button class="btn" onclick="closeModal()">取消</button><button class="btn pri" id="mok">确定</button></div></div></div>
+ <div class="foot"><button class="btn" id="mcancel" onclick="closeModal()">取消</button><button class="btn pri" id="mok">确定</button></div></div></div>
 <div id="toast"></div>
 
 <script>
@@ -305,14 +305,20 @@ function go(p){S.page=p;nav(p);location.hash='#/'+p;const R={overview:pgOverview
 window.addEventListener('hashchange',()=>{const p=location.hash.slice(2);if(S.logged&&p&&p!==S.page)go(p)});
 document.querySelectorAll('.nav').forEach(n=>n.onclick=()=>go(n.dataset.p));
 
-function modal(title,body,onOk,okText,danger){
+function modal(title,body,onOk,okText,danger,noCancel){
   $('#mtitle').textContent=title;$('#mbody').innerHTML=body;
   const b=$('#mok');b.textContent=okText||'确定';
   b.className=danger?'btn danger-solid':'btn pri';
+  // 只能"知道了"的提示型弹窗（比如刚重置的密码）不给取消按钮——事情已经发生了，取消没有意义
+  const c=$('#mcancel');if(c)c.style.display=noCancel?'none':'';
   $('#mask').style.display='flex';
-  b.onclick=async()=>{try{await onOk();closeModal()}catch(e){}}
+  const g=++MODAL_GEN;
+  b.onclick=async()=>{try{await onOk();if(g===MODAL_GEN)closeModal()}catch(e){}}
 }
-function closeModal(){$('#mask').style.display='none'}
+/* 弹窗代次：onOk 里如果又打开了一个弹窗（比如保存成功后弹密码），
+   外层的 closeModal 不能把新弹窗关掉——只有"自己还是当前弹窗"时才关 */
+let MODAL_GEN=0;
+function closeModal(){$('#mask').style.display='none';MODAL_GEN++}
 /* 所有高危/不可逆操作统一走「弹窗说明 + 点按钮确认」，不再要求手动输入确认词 */
 function confirmAct(title,detail,onOk,okText){
   modal(title,'<div class="hint err">'+detail+'</div>',onOk,okText||'确认执行',true)
@@ -375,7 +381,7 @@ function showSecret(title,name,pw){
   <div class="k" style="margin-top:10px">密码</div>
   <div class="mono" style="font-size:18px;color:var(--primary);letter-spacing:.5px">${esc(pw)}</div></div>
   <div class="bar" style="margin-top:10px"><button class="btn" onclick="copyText(window.__pw||'')">复制密码</button></div>`,
- ()=>{},'知道了');window.__pw=pw}
+ ()=>{},'知道了',false,true);window.__pw=pw}
 
 /* 批量导入后：本次生成的所有初始密码必须能看见、能一次复制走 */
 function showBatchSecret(list,kept){
@@ -390,7 +396,7 @@ function showBatchSecret(list,kept){
    ${kept&&kept.length?`<div class="hint warn">另有 ${kept.length} 个账号的密码保持不变（表里密码列为空）：${esc(kept.slice(0,12).join('、'))}${kept.length>12?' 等':''}。如果这些账号的原密码已经没人知道，可勾选「空密码也重置」重新导入一次。</div>`:''}
    <div class="bar" style="margin-top:10px"><button class="btn" onclick="copyText(window.__pwall||'')">全部复制</button>
     <button class="btn" onclick="downloadText('初始密码.txt',window.__pwall||'')">下载为 txt</button></div>`,
-  ()=>{},'知道了');window.__pwall=txt}
+  ()=>{},'知道了',false,true);window.__pwall=txt}
 
 /* ---------------- 任务轮询 ---------------- */
 function taskBox(){return '<div class="card"><h3>执行进度 <small id="tstat"></small></h3><div class="prog"><i id="tprog"></i></div><pre id="tlog" style="height:220px"></pre></div>'}
@@ -571,16 +577,49 @@ async function wExec(){
 }
 
 /* ---------------- 在线用户 ---------------- */
-async function pgOnline(){const j=await get('/api/online');
+let ON={list:[],kw:''};
+async function pgOnline(){const j=await get('/api/online');ON.list=j.users||[];
  $('#page').innerHTML=`<div class="card"><h3>在线会话 <small>同账号只允许一处在线</small></h3>
- <div class="bar"><button class="btn" onclick="pgOnline()">刷新</button><span class="muted">状态日志中的 Common Name 即账号名</span></div>
- ${tbl(['账号','台账固定 IP','来源公网 IP','接收','发送','连接时间','操作'],j.users.map(u=>[
-  esc(u.username),u.vpn_ip==='未登记'?badge('未登记告警','err'):'<span class="mono">'+esc(u.vpn_ip)+'</span>',
+ <div class="bar"><input id="okw" placeholder="搜索账号 / 固定 IP" value="${esc(ON.kw)}" style="width:220px"
+   oninput="ON.kw=this.value;renderOnline()">
+  <button class="btn" onclick="pgOnline()">刷新</button>
+  <span class="muted" id="ocnt"></span></div>
+ <div id="obox"></div>
+ <div class="hint">「踢下线」只是断开当前这一条连接：<b>客户端会自动重连</b>（OpenVPN GUI / Connect 默认就是断线重连），
+  几秒后它会自己回来。要让它连不上，把账号改成<b>停用</b>。</div></div>`;
+ renderOnline()}
+function renderOnline(){
+ const box=document.getElementById('obox');if(!box)return;
+ const kw=(ON.kw||'').trim().toLowerCase();
+ const list=ON.list.filter(u=>!kw||[u.username,u.vpn_ip,u.real_addr]
+   .some(x=>String(x||'').toLowerCase().includes(kw)));
+ box.innerHTML=tbl(['账号','台账固定 IP','来源公网 IP','接收','发送','连接时间','操作'],list.map(u=>[
+  '<b>'+esc(u.username)+'</b>',
+  u.vpn_ip==='未登记'?badge('未登记告警','err'):'<span class="mono">'+esc(u.vpn_ip)+'</span>',
   esc(u.real_addr),esc(u.bytes_recv),esc(u.bytes_sent),esc(u.since),
-  '<button class="btn sm danger" onclick="kick(\''+esc(u.username)+'\')">踢下线</button>']))}
- </div>`}
-async function kick(n){confirmAct('踢下线 · '+n,'该账号当前连接会立即断开，需重新拨入。',
- async()=>{await post('/api/users/kick',{username:n});toast('已踢下线','ok');pgOnline()},'踢下线')}
+  '<button class="btn sm danger" onclick="kick(\''+esc(u.username)+'\')">踢下线</button>']),
+  kw?'没有匹配的会话':'当前没有在线会话');
+ const c=document.getElementById('ocnt');
+ if(c)c.textContent='在线 '+ON.list.length+' 个'+(kw?'，匹配 '+list.length+' 个':'');
+}
+async function kick(n){
+ confirmAct('踢下线 · '+n,
+  '该账号当前连接会立即断开。<b>但客户端通常会自动重连</b>，几秒后可能又出现在列表里——这是客户端行为，不是没踢掉。'
+  +'要彻底不让它连上来，请把账号改成「停用」。',
+  async()=>{
+   await post('/api/users/kick',{username:n});
+   toast('已断开，正在确认会不会自动重连…','ok');
+   ON.kw='';await pgOnline();
+   // 3 秒后再看一次：回来了就明说，别让人以为是没生效
+   setTimeout(async()=>{
+    try{const j=await get('/api/online');ON.list=j.users||[];renderOnline();
+     const back=ON.list.some(u=>u.username===n);
+     toast(back?(n+' 已自动重连（客户端自己重拨的）。要彻底阻止请「停用」该账号')
+               :(n+' 已下线，未再连入'),back?'warn':'ok');
+    }catch(e){}
+   },3000);
+  },'踢下线');
+}
 
 /* ---------------- 账号管理 ---------------- */
 let U={list:[],kw:'',state:'all'};
@@ -592,7 +631,8 @@ async function pgUsers(){const j=await get('/api/users');U.list=j.users;
  <button class="btn" onclick="download('/api/users/export')">导出 Excel</button>
  <span class="muted">共 ${U.list.length} 个账号</span></div>
  <div id="ubox"></div>
- <div class="hint">固定 IP 由服务端下发，客户端改不了；改 IP 会自动重建 ACL 并踢下线。<br>
+ <div class="hint">固定 IP 由服务端下发，客户端改不了；改 IP 会自动重建 ACL 并断开该账号当前连接。<br>
+ 要断开某人当前连接，去「在线用户」页操作；这里只管台账。<br>
  员工自助改密：<span class="mono" id="selfurl"></span></div></div>`;
  renderUsers();
  setTimeout(function(){const e=document.getElementById('selfurl');if(e)e.textContent=location.origin+'/self'},0)}
@@ -609,7 +649,6 @@ function renderUsers(){
   `<button class="btn sm" onclick="userEdit('${esc(u.username)}')">编辑</button>
    <button class="btn sm" onclick="userPwd('${esc(u.username)}')">改密</button>
    <button class="btn sm" onclick="userToggle('${esc(u.username)}',${u.enabled?0:1})">${u.enabled?'停用':'启用'}</button>
-   <button class="btn sm" onclick="kick('${esc(u.username)}')">踢</button>
    <button class="btn sm danger" onclick="userDel('${esc(u.username)}')">删除</button>`]),'没有匹配的账号')
   +pager('users',all.length,20,'renderUsers')}
 function userAdd(){modal('添加认证账号',`<label class="f"><span>账号</span><input id="u_name" placeholder="张三 或 zhangsan（支持中文）"></label>
@@ -927,6 +966,32 @@ function restore(p){confirmAct('恢复快照','将恢复配置、证书、台账
  async()=>{await post('/api/backups/restore',{path:p});toast('已恢复','ok');pgUpdate()},'恢复此快照')}
 
 /* ---------------- 日志 ---------------- */
+/* 审计动作的中文名：库里存的是稳定 key（不随文案变），只在展示层翻译 */
+const ACTCN={
+ 'login':'登录','logout':'退出登录','bootstrap':'初始化后台',
+ 'user.add':'新增账号','user.update':'修改账号','user.delete':'删除账号','user.kick':'断开连接',
+ 'users.export':'导出账号表','import.preview':'Excel 导入·预览','import.apply':'Excel 全量同步',
+ 'settings.save':'保存服务端设置','settings.default':'恢复默认参数',
+ 'service.restart':'重启服务','rules.rebuild':'重建防火墙规则','ovpn.download':'下载客户端配置',
+ 'network.nat':'切换网络模式','acl.mode':'切换 ACL 模式',
+ 'peer.add':'新增客户端互访','peer.delete':'删除客户端互访',
+ 'assetgroup.add':'新增资产组','assetgroup.update':'修改资产组','assetgroup.delete':'删除资产组',
+ 'assetitem.add':'新增资产','assetitem.delete':'删除资产',
+ 'usergroup.add':'新增用户组','usergroup.update':'修改用户组','usergroup.delete':'删除用户组',
+ 'grant.add':'新增授权','grant.delete':'删除授权',
+ 'ca.reinit':'重签 CA 与 tls-crypt','password.change':'修改管理密码','admin.rename':'修改操作者名称',
+ 'backup.create':'生成快照备份','backup.restore':'快照回滚',
+ 'security.allow':'保存访问白名单',
+ 'update.source':'上传源码并编译','update.binary':'上传 OpenVPN 二进制','update.web':'更新 Web 自身',
+ 'wizard.params':'安装向导·参数','wizard.binary':'安装向导·二进制','setup.auto':'自动安装'
+};
+function actCN(a){return ACTCN[a]||a||''}
+/* 老数据里 actor 存的是 admin / web（没有会话上下文时的兜底），给人看的名字换掉 */
+function actorCN(a){a=(a||'').trim();
+ if(!a||a==='admin')return '管理员';
+ if(a==='web'||a==='system')return '系统';
+ if(a==='installer')return '安装脚本';
+ return a}
 let LK='audit';
 async function pgLogs(){const j=await get('/api/logs?kind='+LK);
  const tabs=[['auth','认证日志'],['server','服务端日志'],['audit','Web 操作审计'],['deny','越权尝试']];
@@ -934,7 +999,9 @@ async function pgLogs(){const j=await get('/api/logs?kind='+LK);
   if(LK==='server')return [esc(r.detail)];
   if(LK==='deny')return [esc(r.ts||''),esc(r.mode||''),esc(r.src||''),esc(r.dst||''),esc(r.dport||''),esc(r.proto||'')];
   if(LK==='auth')return [esc(r.ts),esc(r.username),esc(r.src_ip),r.result==='OK'?badge('成功','ok'):badge('失败','err'),esc(r.reason)];
-  return [esc(r.ts),esc(r.actor),r.ip?'<span class="mono">'+esc(r.ip)+'</span>':'<span class="muted">—</span>',esc(r.action),esc(r.detail)]});
+  return [esc(r.ts),esc(actorCN(r.actor)),
+   r.ip?'<span class="mono">'+esc(r.ip)+'</span>':'<span class="muted">—</span>',
+   '<span title="'+esc(r.action)+'">'+esc(actCN(r.action))+'</span>',esc(r.detail)]});
  const cols={auth:['时间','账号','来源公网 IP','结果','原因'],server:['日志'],audit:['时间','操作者','操作者 IP','动作','详情'],
   deny:['时间','模式','源 IP','目标','端口','协议']}[LK];
  $('#page').innerHTML=`<div class="card"><h3>日志与审计</h3><div class="tabs">${tabs.map(t=>`<div class="tab ${LK===t[0]?'on':''}" onclick="LK='${t[0]}';pgLogs()">${t[1]}</div>`).join('')}</div>

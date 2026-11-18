@@ -45,7 +45,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "1.2.1"
+WEB_VERSION = "1.2.2"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -2221,17 +2221,44 @@ def online_users():
 
 
 def mgmt_kill(username):
-    """踢下线：裸 socket 给 management 接口发一句 kill，不引第三方库"""
+    """踢下线：裸 socket 给 management 接口发一句 kill，不引第三方库。
+
+    返回 True 才代表真的处理了。不能"没抛异常就算成功"——接口连不上、
+    OpenVPN 没运行时这里必须返回 False，让上层报错，而不是骗人一句「已踢下线」。
+    另外 management 对不存在的账号回 "ERROR: common name 'x' is not found"，
+    说明人早就掉线了，同样算达成目的。
+    """
     if MOCK:
         return True
     try:
         s = socket.create_connection(("127.0.0.1", 7505), timeout=3)
-        s.sendall(("kill %s\n" % username).encode())
-        s.recv(4096)
-        s.close()
-        return True
     except Exception:
         return False
+    try:
+        s.settimeout(1.0)
+        s.sendall(("kill %s\n" % username).encode("utf-8"))
+        buf = b""
+        deadline = time.time() + 3
+        while time.time() < deadline and len(buf) < 8192:
+            try:
+                chunk = s.recv(4096)
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+            buf += chunk
+            low = buf.decode("utf-8", "replace").lower()
+            if "success" in low or "error" in low or "not found" in low:
+                break
+        text = buf.decode("utf-8", "replace").lower()
+    except Exception:
+        text = ""
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+    return ("success" in text) or ("not found" in text)
 
 
 def env_check():

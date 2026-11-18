@@ -343,8 +343,10 @@ def action_kick_user(p):
     name = p.get("username", "")
     if not core.valid_username(name):
         raise ValueError("用户名非法")
-    core.mgmt_kill(name)
-    log("已踢下线: %s" % name)
+    if not core.mgmt_kill(name):
+        raise RuntimeError("踢下线失败：management 接口 127.0.0.1:7505 无响应，"
+                           "先确认 OpenVPN 服务在运行")
+    log("已踢下线: %s（客户端通常会自动重连）" % name)
 
 
 DISPATCH = {
