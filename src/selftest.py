@@ -133,6 +133,9 @@ def main():
     H = {"X-CSRF-Token": lr.get_json()["csrf"]}
     def P(path, body=None):
         return c.post(path, json=body or {}, headers=H)
+    _h = c.get("/")
+    check("首页 HTML 不缓存（避免看到旧界面）",
+          "no-store" in (_h.headers.get("Cache-Control") or ""), _h.headers.get("Cache-Control"))
     check("缺 CSRF 被拒", c.post("/api/users", json={}).status_code == 403)
     check("带 CSRF 通过", c.get("/api/state").status_code == 200)
     check("登录后操作者名称默认不是写死的 admin", core.admin_name() not in ("", "admin"),
@@ -163,6 +166,53 @@ def main():
         check("拒绝非法账号名 %r" % bad, not core.valid_username(bad))
     core.update_user("lisi", dept="审计部")
     check("部门可改", [u for u in core.list_users() if u["username"] == "lisi"][0]["dept"] == "审计部")
+
+    # ---- 改账号名：主键 + 用户组成员 + 资产授权 + 互访授权 + ccd 文件名要一起搬 ----
+    ag = core.add_asset_group("改名验证组", items=[("10.20.0.0/24", "tcp", "22")])
+    core.add_user_group("改名验证用户组", members=["lisi"])
+    core.add_grant("user", "lisi", ag["id"])
+    core.add_peer_grant("lisi", "zhangsan")
+    core.rebuild_ccd()
+    core.update_user("lisi", new_username="lisi-new")
+    names = [u["username"] for u in core.list_users()]
+    check("改名后旧名消失、新名在册", "lisi" not in names and "lisi-new" in names, names)
+    con = core.db()
+    mem = [r[0] for r in con.execute(
+        "SELECT username FROM user_group_members WHERE username='lisi-new'")]
+    acl = [r[0] for r in con.execute(
+        "SELECT subject FROM acl_grants WHERE subject_type='user' AND subject='lisi-new'")]
+    peer = con.execute("SELECT COUNT(*) FROM peer_grants WHERE src_username='lisi-new'").fetchone()[0]
+    con.close()
+    check("用户组成员跟着改名", len(mem) == 1, mem)
+    check("资产授权跟着改名", acl == ["lisi-new"], acl)
+    check("客户端互访授权跟着改名", peer == 1)
+    core.rebuild_ccd()
+    check("改名后 ccd 换新名、旧文件已清",
+          os.path.exists(os.path.join(core.CCD, "lisi-new")) and
+          not os.path.exists(os.path.join(core.CCD, "lisi")))
+    try:
+        core.update_user("zhangsan", new_username="lisi-new")
+        check("拒绝改成已存在的账号", False)
+    except ValueError:
+        check("拒绝改成已存在的账号", True)
+    for bad in ("a/b", "张 三", ".."):
+        try:
+            core.update_user("lisi-new", new_username=bad)
+            check("拒绝把账号改成 %r" % bad, False)
+        except ValueError:
+            check("拒绝把账号改成 %r" % bad, True)
+    core.update_user("lisi-new", new_username="lisi")
+    # 收拾掉改名用例造的授权/组，别让它们污染后面的 ACL 断言
+    for pg in core.list_peer_grants():
+        if "lisi" in (pg["src_username"], pg["dst_username"]):
+            core.delete_peer_grant(pg["id"])
+    for gr in core.list_grants():
+        if gr.get("subject") == "lisi" and gr.get("subject_type") == "user":
+            core.delete_grant(gr["id"])
+    for ug in core.list_user_groups():
+        if ug["name"] == "改名验证用户组":
+            core.delete_user_group(ug["id"])
+    core.delete_asset_group(ag["id"])
     for bad, why in (("10.8.0.11", "IP 冲突"), ("10.8.0.1", "服务端自己"), ("10.9.0.20", "网段外")):
         try:
             core.add_user("baduser", bad); check("拒绝" + why, False)
@@ -325,7 +375,8 @@ def main():
     check("用户组授权展开到每个成员", "-s 10.8.0.13 -d 10.10.2.11/32 -p tcp --dport 80" in rr4
           and "-s 10.8.0.15 -d 10.10.2.13/32 -p tcp --dport 80" in rr4)
     check("2 条授权展开成 7 条规则", len(core.active_grants()) == 2 and len(core.expand_grants()) == 7)
-    core.update_user_group(1, members=["zhaoliu"])
+    core.update_user_group([g for g in core.list_user_groups()
+                            if g["name"] == "运维组"][0]["id"], members=["zhaoliu"])
     rr5 = core.render_rules(core.cfg())
     check("移出成员后旧权限不残留", "-s 10.8.0.13 -d 10.10.2.11" not in rr5
           and "-s 10.8.0.15 -d 10.10.2.11" in rr5)

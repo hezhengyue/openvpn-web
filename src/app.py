@@ -88,6 +88,21 @@ def client_ip():
     return ra
 
 
+@app.after_request
+def no_cache_html(resp):
+    """HTML 一律不缓存。
+
+    前端是单文件 index.html（内联 CSS/JS），改完只换磁盘上这一个文件。
+    浏览器若拿缓存里的旧页面，就会出现"代码明明删了、用户那里还在"的错觉
+    （实际踩过：台账页的「踢」按钮和英文审计动作都是这么来的）。
+    """
+    if resp.mimetype == "text/html":
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+    return resp
+
+
 @app.before_request
 def guard():
     ip = client_ip()
@@ -503,6 +518,7 @@ def api_state():
     return ok({
         "initialized": bool(core.get_meta("initialized")),
         "version": vi, "cfg": c, "admin_name": core.admin_name(), "src_ip": client_ip(),
+        "web_version": core.WEB_VERSION,
         "stats": {"users": len(users), "enabled": len([u for u in users if u["enabled"]]),
                   "online": len(online), "grants": n_grants, "peers": n_peers,
                   "acl_mode": c["acl_mode"], "nat_mode": c.get("nat_mode", "nat")},
@@ -651,13 +667,18 @@ def users_add():
 @app.post("/api/users/<name>")
 def users_update(name):
     d = request.get_json(silent=True) or {}
+    new_name = (d.get("new_username") or "").strip()
+    renamed = bool(new_name and new_name != name)
     core.backup_users()
-    changes = core.update_user(name, vpn_ip=d.get("vpn_ip"), enabled=d.get("enabled"),
+    changes = core.update_user(name, new_username=new_name or None,
+                               vpn_ip=d.get("vpn_ip"), enabled=d.get("enabled"),
                                note=d.get("note"), password=d.get("password"),
                                real_name=d.get("real_name"), dept=d.get("dept"))
-    kick = any("IP " in x for x in changes) or ("enabled" in d and not d["enabled"])
+    # 改名后 management 里记的还是旧 CN，要按旧名踢，否则踢不到
+    kick = (renamed or any("IP " in x for x in changes)
+            or ("enabled" in d and not d["enabled"]))
     after_change(kick=kick, username=name if kick else None)
-    return ok({"changes": changes})
+    return ok({"changes": changes, "username": new_name or name})
 
 
 @app.delete("/api/users/<name>")

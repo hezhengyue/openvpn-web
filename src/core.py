@@ -45,7 +45,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "1.2.2"
+WEB_VERSION = "1.2.3"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -773,8 +773,29 @@ def add_user(username, vpn_ip=None, password=None, note="", real_name="", dept="
     return {"username": username, "vpn_ip": ip, "password": pw}
 
 
-def update_user(username, *, vpn_ip=None, enabled=None, note=None, password=None,
-                real_name=None, dept=None, actor="web"):
+def _rename_user(con, old, new):
+    """在同一事务里把账号名从 old 搬到 new，所有引用一起搬。
+
+    用户名不只是 users 表的主键，它同时是 ccd 文件名、ACL 授权主体（subject）、
+    用户组成员、客户端互访授权的两端。只改 users 表，这些规则就会指向一个
+    不存在的账号——表现是「人还在组里但授权全失效」，很难查。
+    """
+    if con.execute("SELECT 1 FROM users WHERE username=?", (new,)).fetchone():
+        raise ValueError("账号 %s 已存在，换个名字" % new)
+    con.execute("UPDATE users SET username=?, updated_at=? WHERE username=?",
+                (new, now(), old))
+    con.execute("UPDATE user_group_members SET username=? WHERE username=?", (new, old))
+    con.execute("UPDATE acl_grants SET subject=? WHERE subject_type='user' AND subject=?",
+                (new, old))
+    # 互访授权有源/目的两端，两个方向都得搬，否则规则会指向空账号
+    con.execute("UPDATE OR IGNORE peer_grants SET src_username=? WHERE src_username=?",
+                (new, old))
+    con.execute("UPDATE OR IGNORE peer_grants SET dst_username=? WHERE dst_username=?",
+                (new, old))
+
+
+def update_user(username, *, new_username=None, vpn_ip=None, enabled=None, note=None,
+                password=None, real_name=None, dept=None, actor="web"):
     c = cfg()
     con = db()
     row = con.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
@@ -782,6 +803,15 @@ def update_user(username, *, vpn_ip=None, enabled=None, note=None, password=None
         con.close()
         raise ValueError("账号不存在")
     changes = []
+    old_name = None
+    if new_username is not None and new_username.strip() and new_username.strip() != username:
+        renamed = new_username.strip()
+        if not valid_username(renamed):
+            con.close()
+            raise ValueError("账号只支持中文/字母/数字/点/下划线/连字符，1~32 位，不能有空格和 /")
+        _rename_user(con, username, renamed)
+        changes.append("账号 %s -> %s" % (username, renamed))
+        old_name, username = username, renamed
     if vpn_ip is not None and vpn_ip != row["vpn_ip"]:
         validate_vpn_ip(vpn_ip, c, exclude_user=username, con=con)
         changes.append("IP %s -> %s" % (row["vpn_ip"], vpn_ip))
@@ -805,6 +835,14 @@ def update_user(username, *, vpn_ip=None, enabled=None, note=None, password=None
     con.execute("UPDATE users SET %s WHERE username=?" % ",".join(fields), vals)
     con.commit()
     con.close()
+    if old_name:
+        # 旧名的 ccd 必须删：ccd-exclusive 只认文件名，留着等于旧账号还能拨进来
+        try:
+            p = os.path.join(CCD, old_name)
+            if os.path.exists(p):
+                os.remove(p)
+        except Exception:
+            pass
     log_audit(actor, "user.update", "%s: %s" % (username, "; ".join(changes) or "无变更"))
     return changes
 

@@ -294,7 +294,9 @@ async function loadState(){try{const j=await get('/api/state');S.cfg=j.cfg;S.ini
  /* 顶栏三个状态片：进程、服务端版本、配置指纹 */
  const on=!!j.vpn_alive,st=document.getElementById('vstat');
  if(st)st.innerHTML='<i class="dot" style="background:'+(on?'var(--ok)':'var(--err)')+';box-shadow:0 0 0 3px '+(on?'oklch(.6 .14 155/.16)':'oklch(.57 .2 25/.16)')+'"></i><b>'+(on?'运行中':'已停止')+'</b>';
- const ve=document.getElementById('vver');if(ve)ve.textContent='OpenVPN '+j.version.version;
+ const ve=document.getElementById('vver');
+ // 带上 Web 版本：改完刷新就能对照，避免"看到的是缓存旧页面"这种扯不清的情况
+ if(ve)ve.textContent='OpenVPN '+j.version.version+' · Web '+(j.web_version||'');
  const fp=document.getElementById('vfp');if(fp)fp.innerHTML='<b>'+(j.version.fingerprint||'—')+'</b>';
  const who=document.getElementById('vwho');if(who)who.innerHTML='<b>'+esc(j.admin_name||'管理员')+'</b> · '+esc(j.src_ip||'');
  /* 安装向导只在「还没装完」时存在：装完就藏起来，避免日常运维误点进去重跑一遍 */
@@ -666,14 +668,20 @@ function userAdd(){modal('添加认证账号',`<label class="f"><span>账号</sp
  });}
 async function fillNextIp(id){try{const j=await get('/api/users/next-ip');$('#'+id).value=j.vpn_ip;toast('已填入 '+j.vpn_ip,'ok')}catch(e){}}
 function userEdit(n){const u=U.list.find(x=>x.username===n)||{};
- modal('编辑账号 '+n,`<label class="f"><span>姓名</span><input id="u_real" value="${esc(u.real_name||'')}"></label>
+ modal('编辑账号 '+n,`<label class="f"><span>账号</span><input id="u_name" value="${esc(u.username)}"></label>
+ <div class="hint">账号可以直接改（工号写错、入职改名）。改名后旧账号立刻不能拨入，用户组、资产授权、客户端互访会自动迁到新名，不用重新配。</div>
+ <label class="f"><span>姓名</span><input id="u_real" value="${esc(u.real_name||'')}"></label>
  <label class="f"><span>部门</span><input id="u_dept" value="${esc(u.dept||'')}"></label>
  <label class="f"><span>固定 IP</span><input id="u_ip" value="${esc(u.vpn_ip||'')}">
    <button type="button" class="btn sm" onclick="fillNextIp('u_ip')">换一个</button></label>
  <label class="f"><span>备注</span><input id="u_note" value="${esc(u.note||'')}"></label>
- <div class="hint warn">改 IP 会踢该用户下线，重连后生效；ACL 会全量重建。</div>`,async()=>{
- await post('/api/users/'+encodeURIComponent(n),{vpn_ip:$('#u_ip').value.trim(),note:$('#u_note').value.trim(),
-   real_name:$('#u_real').value.trim(),dept:$('#u_dept').value.trim()});toast('已保存','ok');pgUsers()})}
+ <div class="hint warn">改 IP 会断开该用户当前连接，重连后生效；ACL 会全量重建。</div>`,async()=>{
+ const nn=$('#u_name').value.trim();
+ if(!nn){toast('账号不能为空','err');return}
+ await post('/api/users/'+encodeURIComponent(n),{new_username:nn,vpn_ip:$('#u_ip').value.trim(),
+   note:$('#u_note').value.trim(),
+   real_name:$('#u_real').value.trim(),dept:$('#u_dept').value.trim()});
+ toast(nn===n?'已保存':('已改名为 '+nn+'，请通知本人用新账号拨入'),'ok');pgUsers()})}
 function userPwd(n){modal('重置密码 · '+n,
  `<label class="f"><span>新密码</span><input id="u_pw" autocomplete="new-password" placeholder="至少 8 位"></label>
   <div class="bar"><button type="button" class="btn" onclick="document.getElementById('u_pw').value=genPw()">生成随机密码</button>
@@ -686,7 +694,7 @@ async function userToggle(n,v){await post('/api/users/'+encodeURIComponent(n),{e
 async function userDel(n){confirmAct('删除账号 · '+n,'该账号及其授权会一并删除（台账已自动备份，可回滚）。不可撤销。',
  async()=>{await del('/api/users/'+encodeURIComponent(n));toast('已删除','ok');pgUsers()},'删除账号')}
 let IMP={token:'',file:null};
-function impOpen(){IMP={token:'',file:null,changes:[]};$('#page').insertAdjacentHTML('beforeend','<div class="card" id="impbox"><h3>Excel 全量同步 <small>只有 Excel 一种表格，不再有 CSV 两套</small></h3><div class="bar"><input type="file" id="impfile" accept=".xlsx"><button class="btn pri" onclick="impPreview()">预览变更</button><button class="btn" onclick="download(\'/api/users/export\')">下载模板</button></div><div id="impres" class="muted">列：用户名 / 姓名 / 部门 / 密码 / VPN固定IP / 状态 / 备注。先点【下载模板】照格式填，再【预览变更】。</div><div class="hint">密码列规则：<b>填了就用表里的值覆盖</b>；<b>留空则保留原密码不动</b>（新账号留空会自动生成初始密码，导入完弹窗给你）。<br>如果老账号的密码已经没人知道了，勾上下面这个开关，留空也会重新生成：<label style="display:inline-block;margin-top:8px"><input type="checkbox" id="imp_reset" class="ck"> 密码列为空时也重新生成</label></div></div>');$('#impbox').scrollIntoView()}
+function impOpen(){IMP={token:'',file:null,changes:[]};$('#page').insertAdjacentHTML('beforeend','<div class="card" id="impbox"><h3>Excel 全量同步 <small>只有 Excel 一种表格，不再有 CSV 两套</small></h3><div class="bar"><input type="file" id="impfile" accept=".xlsx"><button class="btn pri" onclick="impPreview()">预览变更</button><button class="btn" onclick="download(\'/api/users/export\')">下载模板</button></div><div id="impres" class="muted">列：用户名 / 姓名 / 部门 / 密码 / VPN固定IP / 状态 / 备注。先点【下载模板】照格式填，再【预览变更】。</div><div class="hint">Excel 能改姓名、部门、固定 IP、密码、状态、备注。但<b>「用户名」是身份本身</b>：把某行的用户名改掉，等于删掉旧号、新建一个号（新号密码会重生成）。只想给某人换个账号名，请用列表里的<b>【编辑】</b>，改完授权和用户组会跟着走。</div><div class="hint">密码列规则：<b>填了就用表里的值覆盖</b>；<b>留空则保留原密码不动</b>（新账号留空会自动生成初始密码，导入完弹窗给你）。<br>如果老账号的密码已经没人知道了，勾上下面这个开关，留空也会重新生成：<label style="display:inline-block;margin-top:8px"><input type="checkbox" id="imp_reset" class="ck"> 密码列为空时也重新生成</label></div></div>');$('#impbox').scrollIntoView()}
 async function impPreview(){const f=$('#impfile').files[0];if(!f){toast('请选择文件','err');return}
  try{const j=await upload('/api/users/import',f,{step:'preview'});IMP.token=j.token;IMP.file=f;IMP.changes=j.changes;
  const dels=j.changes.filter(c=>c.op==='删除').length;

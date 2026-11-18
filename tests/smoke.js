@@ -195,6 +195,12 @@ async function waitUp() {
       // 台账页只做台账：操作列不该再有「踢」（踢下线统一放在在线用户页）
       const ubtns = [...w.document.querySelectorAll('#ubox button')].map(b => b.textContent.trim());
       if (ubtns.some(t => t === '踢')) errors.push('账号管理页操作列仍有「踢」按钮');
+      // 编辑弹窗必须能改账号名（原来只能改姓名/部门/IP，工号写错没法纠正）
+      w.userEdit('alice'); await wait(100);
+      const uname = w.document.querySelector('#u_name');
+      if (!uname) errors.push('编辑弹窗里没有「账号」输入框（应支持改名）');
+      else if (uname.value !== 'alice') errors.push('编辑弹窗的账号没有回填: ' + uname.value);
+      w.closeModal();
       w.userPwd('alice'); await wait(100);
       const inp = w.document.querySelector('#u_pw');
       if (!inp || inp.type === 'password') errors.push('改密弹窗的密码框不可见');
