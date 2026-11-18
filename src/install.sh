@@ -1,0 +1,356 @@
+#!/bin/bash
+# OpenVPN Web 一体化管理系统 —— 一键安装（在目标机上以 root 执行，全程离线）
+#
+#   ./install.sh                          # 装到 /opt/openvpn-web，默认 1194/tcp + NAT
+#   ./install.sh /srv/ovpn                # 自定义安装目录
+#   ./install.sh -- --public-addr 1.2.3.4 --port 1194 --lan 10.10.0.0/16
+#   ./install.sh -- --user alice:Passw0rd # 顺手建一个账号
+#   ./install.sh --purge                  # 卸载：停服务、拆 iptables 链、删目录/账号/规则（data 先备份到 /root）
+#
+# 它把「Web + OpenVPN 服务端 + CA + 证书 + ACL/NAT + systemd」一次装完，
+# 结束时浏览器打开就能用，不需要再点安装向导。
+#
+# 需要联网吗：不需要。python 运行时、flask/openpyxl wheel、静态 openvpn 全在包内。
+set -euo pipefail
+
+DEST="/opt/openvpn-web"
+SETUP_ARGS=()
+PURGE=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --) shift; SETUP_ARGS=("$@"); break ;;
+        -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+        --purge) PURGE=1; shift ;;
+        *) DEST="$1"; shift ;;
+    esac
+done
+
+SRC="$(cd "$(dirname "$0")" && pwd)"
+UNIT="/etc/systemd/system/openvpn-web.service"
+SUDOERS="/etc/sudoers.d/openvpn-web"
+USER="ovpnweb"
+PORT="${OVPN_WEB_PORT:-8800}"
+PY=""
+
+say() { printf '%s\n' "$*"; }
+step() { printf '\n==> %s\n' "$*"; }
+
+[ "$(id -u)" -eq 0 ] || { say "错误: 请用 root 执行"; exit 1; }
+
+# ---------------------------------------------------------------- 卸载（--purge）
+# 「删干净再重装」是运维高频动作（换版本、换机器规格、验证全新安装），
+# 所以卸载必须是一等公民：一条命令、幂等、先把台账备份走再删。
+purge_all() {
+    local IPT l cmd tbl tgt i done_any left bk r
+    IPT="$(command -v iptables || echo /usr/sbin/iptables)"
+    say "============================================================"
+    say " 卸载 OpenVPN Web    安装目录: $DEST"
+    say "============================================================"
+
+    step "[1/7] 备份台账（有就备走，不会静默丢数据）"
+    if [ -d "$DEST/data" ]; then
+        bk="/root/openvpn-web-data-$(date +%Y%m%d-%H%M%S).tar.gz"
+        if tar czf "$bk" -C "$DEST" data 2>/dev/null; then
+            say "      $bk"
+            say "      要恢复：解开后把 data/ 放回 $DEST 再装"
+        else
+            say "      备份失败，已中止。确认 $DEST/data 里没有要留的东西后再重跑。"
+            exit 1
+        fi
+    else
+        say "      没有 $DEST/data，跳过"
+    fi
+
+    step "[2/7] 停服务、删 systemd 单元"
+    for i in openvpn-web openvpn-web-replay.timer openvpn-web-replay.service; do
+        systemctl stop "$i" >/dev/null 2>&1 || true
+        systemctl disable "$i" >/dev/null 2>&1 || true
+    done
+    rm -f /etc/systemd/system/openvpn-web.service \
+          /etc/systemd/system/openvpn-web-replay.timer \
+          /etc/systemd/system/openvpn-web-replay.service
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    say "      已删 openvpn-web.service / openvpn-web-replay.*"
+
+    step "[3/7] 结束 openvpn 进程"
+    # 不能只按 server.conf 匹配：排障时常见有人手工起过客户端隧道
+    # （--config company.ovpn --dev tun1），证书删了它还占着 tun 设备，重装后会顶掉新隧道。
+    # 按二进制路径匹配，只动本系统起的实例，不误伤系统里别的 openvpn。
+    pkill -f "$DEST/bin/openvpn" >/dev/null 2>&1 || true
+    sleep 1
+    pkill -9 -f "$DEST/bin/openvpn" >/dev/null 2>&1 || true
+    say "      已结束（残留自查: ps -ef | grep openvpn）"
+
+    step "[4/7] 拆 iptables 自建链（OVPN_ACL / OVPNWEB_NAT）"
+    # 顺序很重要：链被 FORWARD / POSTROUTING 引用着，直接 -X 会失败，必须先把引用删掉。
+    # 引用里带 VPN 网段，网段可能被改过，所以不猜参数——直接把 -S 输出里的规则改 -A 为 -D 逐条删。
+    del_refs() {
+        tbl="$1"; tgt="$2"
+        for i in 1 2 3; do
+            done_any=0
+            while IFS= read -r l; do
+                case "$l" in
+                    "-A "*)
+                        cmd="-D ${l#-A }"
+                        if [ -n "$tbl" ]; then
+                            if $IPT -t "$tbl" $cmd 2>/dev/null; then done_any=1; fi
+                        else
+                            if $IPT $cmd 2>/dev/null; then done_any=1; fi
+                        fi ;;
+                esac
+            done < <( if [ -n "$tbl" ]; then $IPT -t "$tbl" -S 2>/dev/null; else $IPT -S 2>/dev/null; fi | grep -F -- "-j $tgt" )
+            [ "$done_any" = 1 ] || break
+        done
+    }
+    del_refs "" OVPN_ACL
+    del_refs nat OVPNWEB_NAT
+    $IPT -F OVPN_ACL 2>/dev/null || true
+    $IPT -X OVPN_ACL 2>/dev/null || true
+    $IPT -t nat -F OVPNWEB_NAT 2>/dev/null || true
+    $IPT -t nat -X OVPNWEB_NAT 2>/dev/null || true
+    say "      已拆两条链及其引用"
+
+    step "[5/7] 撤防火墙放行"
+    if command -v firewall-cmd >/dev/null 2>&1; then
+        firewall-cmd --permanent --list-rich-rules 2>/dev/null | grep -E "8800|1194" | while IFS= read -r r; do
+            firewall-cmd --permanent --remove-rich-rule="$r" >/dev/null 2>&1 || true
+        done || true
+        firewall-cmd --permanent --remove-port=8800/tcp >/dev/null 2>&1 || true
+        firewall-cmd --remove-port=8800/tcp >/dev/null 2>&1 || true
+        firewall-cmd --reload >/dev/null 2>&1 || true
+        say "      已撤 Web 端口放行（VPN 端口如手工加过请自行确认）"
+    else
+        say "      无 firewalld，跳过"
+    fi
+
+    step "[6/7] 删目录、sudoers、sysctl、运行账号"
+    rm -rf "$DEST"
+    rm -f /etc/sudoers.d/openvpn-web /etc/sysctl.d/99-openvpn-web.conf
+    userdel ovpnweb >/dev/null 2>&1 || true
+    say "      已删 $DEST / sudoers / sysctl 配置 / ovpnweb 账号"
+
+    step "[7/7] 残留自查"
+    left=0
+    if systemctl list-unit-files 2>/dev/null | grep -q openvpn-web; then
+        say "      仍有 unit：systemctl list-unit-files | grep openvpn-web"; left=1
+    fi
+    if $IPT -S 2>/dev/null | grep -q OVPN_ACL; then say "      仍有 OVPN_ACL 规则"; left=1; fi
+    if $IPT -t nat -S 2>/dev/null | grep -q OVPNWEB_NAT; then say "      仍有 OVPNWEB_NAT 规则"; left=1; fi
+    if [ -d "$DEST" ]; then say "      目录仍在：$DEST"; left=1; fi
+    if [ "$left" = 0 ]; then say "      干净，可以重新安装了"; fi
+
+    say ""
+    say "卸载完成。重装：解包后 ./install.sh"
+}
+
+if [ "$PURGE" = 1 ]; then
+    purge_all
+    exit 0
+fi
+
+say "============================================================"
+say " OpenVPN Web 一体化管理系统 · 一键安装（离线）"
+say " 安装目录: $DEST     Web 端口: $PORT"
+say "============================================================"
+
+case "$(uname -m)" in
+    x86_64|amd64) ;;
+    *) say "警告: 包内是 x86_64 静态二进制，当前 $(uname -m) 需要自行编译（build-offline.sh）" ;;
+esac
+
+# ---------------------------------------------------------------- 1) 落地文件
+step "[1/8] 释放程序文件"
+if [ "$SRC" != "$DEST" ]; then
+    mkdir -p "$DEST"
+    # 不用 rsync（最小化系统可能没有）；data/ 与 .git 不覆盖，保证重装不丢库
+    tar -C "$SRC" -cf - --exclude=./data --exclude=./.git --exclude=./.workbuddy . \
+        | tar -C "$DEST" -xf -
+fi
+mkdir -p "$DEST"/{bin,data/{state,ccd,tasks,snapshots,staging,backups}}
+chmod 755 "$DEST" "$DEST/bin"
+
+# 包在 Windows/网盘里滚过一圈后，python/bin 下的软链会变成 10 字节的文本文件，
+# 可执行位也可能丢，这里统一修一遍（这是踩过的真实坑，不是防御性编程）
+prepare_runtime() {
+    local d="$1" pair l t
+    [ -d "$d/bin" ] || return 0
+    chmod +x "$d/bin"/* 2>/dev/null || true
+    chmod -R a+rX "$d" 2>/dev/null || true
+    for pair in python:python3.12 python3:python3.12 2to3:2to3-3.12 idle3:idle3.12 \
+                pydoc3:pydoc3.12 python3-config:python3.12-config; do
+        l="${pair%%:*}"; t="${pair##*:}"
+        [ -L "$d/bin/$l" ] && continue
+        [ -f "$d/bin/$t" ] || continue
+        if [ "$(wc -c < "$d/bin/$l" 2>/dev/null || echo 999)" -lt 64 ]; then
+            ln -sfn "$t" "$d/bin/$l" && say "      修复软链 bin/$l -> $t"
+        fi
+    done
+    if [ -f "$d/lib/libpython3.12.so.1.0" ] && [ ! -L "$d/lib/libpython3.12.so" ]; then
+        ln -sfn libpython3.12.so.1.0 "$d/lib/libpython3.12.so" 2>/dev/null || true
+    fi
+}
+[ -d "$DEST/python" ] && prepare_runtime "$DEST/python"
+chmod +x "$DEST"/*.sh "$DEST"/*.py 2>/dev/null || true
+[ -f "$DEST/bin/openvpn" ] && chmod 755 "$DEST/bin/openvpn"
+[ -f "$DEST/bin/openssl" ] && chmod 755 "$DEST/bin/openssl"
+
+# ---------------------------------------------------------------- 2) 解释器
+step "[2/8] 选择 Python 运行时"
+if [ -x "$DEST/python/bin/python3" ] && "$DEST/python/bin/python3" -V >/dev/null 2>&1; then
+    PY="$DEST/python/bin/python3"
+    say "      使用包内离线运行时：$("$PY" -V 2>&1)"
+elif command -v python3 >/dev/null 2>&1 && python3 -c 'import flask' >/dev/null 2>&1; then
+    PY="$(command -v python3)"
+    say "      使用系统 python3：$PY（包内 python/ 缺失或不可用）"
+else
+    say "错误: 包内 python/bin/python3 不可用，系统 python3 也没有 flask。"
+    say "      请在构建机执行 ./build-offline.sh 生成完整离线目录。"
+    exit 1
+fi
+
+# ---------------------------------------------------------------- 3) 用户与权限
+step "[3/8] 创建运行账号与目录权限"
+if ! id "$USER" >/dev/null 2>&1; then
+    useradd -r -s /sbin/nologin -d "$DEST" "$USER" 2>/dev/null || \
+    useradd -r -s /usr/sbin/nologin -d "$DEST" "$USER"
+fi
+chown -R "$USER:$USER" "$DEST/data" "$DEST/bin"
+chown root:root "$DEST" "$DEST"/*.py "$DEST"/*.html "$DEST"/*.sh 2>/dev/null || true
+chmod 644 "$DEST"/*.py "$DEST"/*.html 2>/dev/null || true
+chmod 755 "$DEST"/*.sh 2>/dev/null || true
+
+# ---------------------------------------------------------------- 4) 提权白名单
+step "[4/8] 配置提权白名单（Web 只能执行 worker.py 一个命令）"
+cat > "$SUDOERS" <<EOF
+Defaults:$USER env_keep += "OVPN_WEB_ROOT OVPN_WEB_MOCK"
+# 末尾必须是 " *"：sudoers 里不带通配符的规则要求参数完全一致，
+# 而实际调用是 worker.py <32位task_id>，只写 worker.py 会导致 "sudo: a password is required"。
+# worker.py 自己校验 task_id 格式，并且动作只能从 data/tasks 里的白名单读取，不给自由参数。
+$USER ALL=(root) NOPASSWD: $PY $DEST/worker.py *
+EOF
+chmod 440 "$SUDOERS"
+if command -v visudo >/dev/null 2>&1; then
+    visudo -cf "$SUDOERS" >/dev/null || { say "错误: sudoers 语法不通过"; exit 1; }
+fi
+
+# ---------------------------------------------------------------- 5) systemd
+step "[5/8] 写 systemd unit（兼容 CentOS 7 的 systemd 219）"
+cat > "$UNIT" <<EOF
+[Unit]
+Description=OpenVPN Web 一体化管理系统
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$USER
+Group=$USER
+WorkingDirectory=$DEST
+Environment=OVPN_WEB_ROOT=$DEST
+Environment=OVPN_WEB_PORT=$PORT
+ExecStart=$PY $DEST/app.py
+Restart=always
+RestartSec=3
+LimitNOFILE=65535
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# ---------------------------------------------------------------- 6) 初始密码
+step "[6/8] 初始管理密码"
+NEWPW=0
+if [ ! -s "$DEST/data/admin_password.txt" ]; then
+    # 注意：`tr </dev/urandom | head -c N` 在 pipefail 下会因 tr 收到 SIGPIPE(141) 而整体失败，
+    # 脚本会在写完 unit 之后静默退出。改成有限输入 + cut。
+    # 字符集里 '-' 放末尾，否则 tr 当成区间（'%-_' 会带出 \ [ ] ^ 等难输入的字符）
+    PW="$(head -c 8192 /dev/urandom | tr -dc 'A-Za-z0-9!@#%_-' | cut -c1-18)"
+    printf '%s\n' "$PW" > "$DEST/data/admin_password.txt"
+    NEWPW=1
+fi
+chown "$USER:$USER" "$DEST/data/admin_password.txt"
+chmod 600 "$DEST/data/admin_password.txt"
+
+if command -v restorecon >/dev/null 2>&1; then
+    restorecon -R "$DEST" >/dev/null 2>&1 || true
+fi
+systemctl daemon-reload
+systemctl enable openvpn-web >/dev/null 2>&1 || true
+
+# ---------------------------------------------------------------- 7) 配置服务端
+step "[7/8] 配置 OpenVPN 服务端（CA / 配置 / ACL / NAT / 启动）"
+if [ ! -x "$DEST/bin/openvpn" ]; then
+    say "错误: 缺少静态二进制 $DEST/bin/openvpn"
+    say "      构建机上跑 ./build-offline.sh，或从「版本与更新」页上传编译好的静态二进制。"
+    exit 1
+fi
+export OVPN_WEB_ROOT="$DEST" OVPN_WEB_PY="$PY" OVPN_WEB_PORT="$PORT" OVPN_WEB_OWNER="$USER"
+SETUP_OUT="$("$PY" "$DEST/setup.py" "${SETUP_ARGS[@]+"${SETUP_ARGS[@]}"}")"
+printf '%s\n' "$SETUP_OUT"
+SETUP_JSON="$(printf '%s\n' "$SETUP_OUT" | tail -1)"
+vpn_field() { printf '%s' "$SETUP_JSON" | "$PY" -c "import json,sys;d=json.load(sys.stdin);print(d.get('$1',''))" 2>/dev/null || true; }
+VPN_PORT="$(vpn_field port)"; VPN_PORT="${VPN_PORT:-1194}"
+VPN_ADDR="$(vpn_field public_addr)"
+
+# ---------------------------------------------------------------- 8) 起 Web
+step "[8/8] 启动 Web 服务"
+systemctl restart openvpn-web
+ok=0
+for _ in $(seq 1 20); do
+    sleep 1
+    if curl -fsS "http://127.0.0.1:$PORT/api/session" >/dev/null 2>&1; then ok=1; break; fi
+done
+[ "$ok" = 1 ] || { say "错误: Web 未响应，执行 journalctl -u openvpn-web -n 50 查看原因"; exit 1; }
+
+IP="$("$PY" - <<'PYEOF' 2>/dev/null || true
+import subprocess, re
+try:
+    out = subprocess.run(["ip","-4","route","get","1.1.1.1"], capture_output=True, text=True).stdout
+    m = re.search(r"src (\d+\.\d+\.\d+\.\d+)", out)
+    if m: print(m.group(1))
+except Exception: pass
+PYEOF
+)"
+[ -n "$IP" ] || IP="$(ip -4 addr show scope global 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)"
+
+VERSION="$("$DEST/bin/openvpn" --version 2>/dev/null | head -1 | awk '{print $2}')"
+CLIENT_IP="$("$PY" - "$DEST" <<'PYEOF' 2>/dev/null || true
+import os, sys, json, sqlite3
+root = sys.argv[1]
+db = os.path.join(root, "data", "openvpn-web.db")
+try:
+    con = sqlite3.connect(db)
+    row = con.execute("SELECT v FROM meta WHERE k='public_addr'").fetchone()
+    print(json.loads(row[0]) if row else "")
+except Exception:
+    pass
+PYEOF
+)"
+
+cat <<EOF
+
+------------------------------------------------------------
+ 安装完成
+------------------------------------------------------------
+ 管理后台:   http://${IP:-<服务器IP>}:$PORT
+ 管理密码:   $( [ "$NEWPW" = 1 ] && echo "$PW" || echo "（沿用已有 data/admin_password.txt）" )
+ OpenVPN:    ${VERSION:-未知版本}  监听 ${CLIENT_IP:-$IP}:1194
+ 客户端配置: $DEST/data/company.ovpn   （全员共用，含 CA 与 tls-crypt）
+ 服务端配置: $DEST/data/server.conf
+ 日志:       journalctl -u openvpn-web -f   /   tail -f $DEST/data/openvpn.log
+ 规则重放:   systemctl status openvpn-web-replay.timer（firewalld reload / 重启后自动补规则）
+------------------------------------------------------------
+ 下一步: 1) 浏览器登录，在「账号」里加人（或安装时加 --user 名字:密码）
+         2) 把 company.ovpn 发给成员，用 OpenVPN 客户端导入
+         3) 内网资源授权在「ACL」页配；默认 NAT 模式开箱可用
+------------------------------------------------------------
+EOF
+
+if [ "$NEWPW" = 1 ]; then
+    say "提示: 密码只在这里和 $DEST/data/admin_password.txt 出现，登录后请立刻修改。"
+fi
+if [ "$SRC" != "$DEST" ] && [ -d "$SRC" ]; then
+    say "提示: 安装源目录 $SRC 已不再需要，可删掉腾空间（rm -rf $SRC）"
+fi

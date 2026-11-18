@@ -1,0 +1,25 @@
+# 可复现的离线目录构建环境（glibc 2.17 ABI，产物 CentOS7 ~ Ubuntu26 通吃）
+#
+# 在仓库根执行（本文件在 build/ 下，构建上下文必须是仓库根）：
+#   docker build -f build/Dockerfile.build -t ovpn-build .
+#   docker run --rm -v "$PWD:/src" ovpn-build bash -lc \
+#     'cd /src && ./build/build-offline.sh --skip-openvpn && /build/bin/openvpn --version'
+#
+# 镜像里已经把静态 openvpn 编好放到 /build/bin/openvpn，
+# build-offline.sh 会自动把它收进 dist/openvpn-web-x86_64/bin/。
+#
+# 三方件全部走仓库自带的 vendor/（源码 + wheel），镜像内不需要联网下载源码：
+#   docker build -f build/Dockerfile.build -t ovpn-build .
+#   docker run --rm -v "$PWD/dist:/out" ovpn-build cp -r /build/dist/openvpn-web-x86_64 /out/
+FROM quay.io/pypa/manylinux2014_x86_64
+
+WORKDIR /build
+COPY . /build
+
+RUN yum install -y perl-core perl-IPC-Cmd zlib-devel curl tar gzip make gcc \
+        autoconf automake libtool pkgconfig || true \
+ && PREFIX_OUT=/build/vendor/static/prefix.tar.gz \
+    bash /build/build/build-static-openvpn.sh /build/bin/openvpn \
+ && bash /build/build/build-offline.sh --skip-openvpn
+
+CMD ["/bin/bash"]

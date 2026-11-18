@@ -1,0 +1,962 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OpenVPN 管理后台</title>
+<style>
+:root{
+ --radius:.625rem;--r-sm:calc(var(--radius)*.6);--r-md:calc(var(--radius)*.8);--r-lg:var(--radius);--r-xl:calc(var(--radius)*1.4);
+ --background:oklch(.976 .004 250);--foreground:oklch(.24 .012 250);
+ --card:oklch(1 0 0);--muted:oklch(.967 .004 250);--muted-foreground:oklch(.53 .015 250);
+ --primary:oklch(.55 .185 258);--primary-hover:oklch(.50 .185 258);--primary-foreground:oklch(.995 0 0);
+ --accent:oklch(.962 .012 255);--border:oklch(.918 .006 250);--input:oklch(.90 .006 250);
+ --ring:oklch(.55 .185 258/.28);
+ --ok:oklch(.60 .14 155);--warn:oklch(.70 .15 70);--err:oklch(.57 .20 25);
+ --sidebar:oklch(.995 0 0);--sidebar-border:oklch(.925 .005 250);
+ --side-w:232px;--shadow-sm:0 1px 2px oklch(.2 .02 250/.05);
+ --shadow-md:0 4px 12px oklch(.2 .02 250/.07),0 1px 3px oklch(.2 .02 250/.06);
+ --shadow-lg:0 18px 50px oklch(.2 .02 250/.18);
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","Inter","PingFang SC","Microsoft YaHei",sans-serif;
+ color:var(--foreground);background:var(--background);-webkit-font-smoothing:antialiased}
+a{color:var(--primary);text-decoration:none}a:hover{text-decoration:underline}
+button,input,select,textarea{font-family:inherit;font-size:13px}
+::selection{background:oklch(.55 .185 258/.18)}
+*::-webkit-scrollbar{width:10px;height:10px}
+*::-webkit-scrollbar-thumb{background:oklch(.85 .008 250);border-radius:99px;border:3px solid transparent;background-clip:content-box}
+*::-webkit-scrollbar-thumb:hover{background:oklch(.78 .01 250);background-clip:content-box}
+*::-webkit-scrollbar-track{background:transparent}
+
+/* ---------- 登录 ---------- */
+#login{height:100vh;display:flex;align-items:center;justify-content:center;background:
+ radial-gradient(1200px 600px at 15% -10%,oklch(.90 .05 258/.55),transparent 60%),
+ radial-gradient(900px 500px at 100% 110%,oklch(.93 .04 200/.5),transparent 55%),var(--background)}
+.lbox{background:var(--card);padding:32px 30px;border-radius:var(--r-xl);width:352px;border:1px solid var(--border);box-shadow:var(--shadow-lg)}
+.lbox h1{font-size:18px;margin:0 0 3px;letter-spacing:-.01em}
+.lbox p{color:var(--muted-foreground);font-size:12.5px;margin:0 0 22px;line-height:1.6}
+.lbox .lm{width:38px;height:38px;border-radius:11px;background:var(--primary);display:flex;align-items:center;justify-content:center;margin-bottom:16px;box-shadow:0 6px 16px oklch(.55 .185 258/.35)}
+.lbox .lm svg{width:20px;height:20px;stroke:#fff;fill:none;stroke-width:1.9;stroke-linecap:round}
+
+/* ---------- 骨架 ---------- */
+#app{display:none;height:100vh;overflow:hidden}
+.side{position:fixed;left:0;top:0;bottom:0;width:var(--side-w);background:var(--sidebar);border-right:1px solid var(--sidebar-border);
+ display:flex;flex-direction:column;overflow-y:auto;padding-bottom:12px}
+.logo{height:60px;display:flex;align-items:center;gap:10px;padding:0 18px;color:var(--foreground);font-weight:650;font-size:14.5px;letter-spacing:-.01em;flex:0 0 auto}
+.logo i{width:26px;height:26px;border-radius:8px;background:linear-gradient(160deg,oklch(.62 .17 258),oklch(.50 .19 268));
+ display:inline-flex;align-items:center;justify-content:center;box-shadow:0 3px 8px oklch(.55 .185 258/.3)}
+.logo i svg{width:14px;height:14px;stroke:#fff;fill:none;stroke-width:1.9;stroke-linecap:round}
+.logo em{font-style:normal;font-size:11px;color:var(--muted-foreground);font-weight:400;margin-left:auto}
+.grp{padding:14px 18px 5px;font-size:11px;color:var(--muted-foreground);letter-spacing:.06em;font-weight:500}
+.nav{display:flex;align-items:center;gap:9px;padding:7px 10px;margin:1px 10px;border-radius:var(--r-md);cursor:pointer;
+ font-size:13.5px;color:oklch(.42 .015 250);transition:background .14s,color .14s}
+.nav svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;opacity:.72;flex:0 0 auto}
+.nav:hover{background:var(--muted);color:var(--foreground)}
+.nav.on{background:var(--accent);color:var(--primary);font-weight:550}
+.nav.on svg{opacity:1}
+.nav small{font-size:11px;opacity:.7;font-weight:400}
+
+.main{margin-left:var(--side-w);height:100vh;display:flex;flex-direction:column}
+.top{height:60px;background:oklch(1 0 0/.85);backdrop-filter:blur(8px);border-bottom:1px solid var(--border);
+ display:flex;align-items:center;justify-content:space-between;padding:0 24px;flex-shrink:0;gap:16px}
+.top b{font-size:15.5px;font-weight:600;letter-spacing:-.01em}
+.top .r{display:flex;gap:8px;align-items:center;color:var(--muted-foreground);font-size:12px}
+.top .r a{color:var(--muted-foreground)}
+.top .r a:hover{color:var(--primary);text-decoration:none}
+.chipv{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--border);border-radius:99px;padding:3px 9px;font-size:11.5px;
+ color:var(--muted-foreground);background:var(--card);white-space:nowrap}
+.chipv b{color:var(--foreground);font-weight:550}
+.dot{width:6px;height:6px;border-radius:99px;background:var(--ok);box-shadow:0 0 0 3px oklch(.60 .14 155/.15)}
+.content{flex:1;overflow-y:auto;padding:22px 24px 48px}
+.content>.card,.content>.row,.content>.grid,.content>.tabs,.content>.steps{max-width:1440px}
+
+/* ---------- 卡片 / 统计 ---------- */
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--r-xl);padding:18px 20px;margin-bottom:16px;box-shadow:var(--shadow-sm)}
+.card h3{margin:0 0 14px;font-size:14.5px;font-weight:600;letter-spacing:-.01em;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.card h3 small{font-weight:400;color:var(--muted-foreground);font-size:12px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(176px,1fr));gap:14px;margin-bottom:16px}
+.stat{background:var(--card);border:1px solid var(--border);border-radius:var(--r-xl);padding:16px 18px;box-shadow:var(--shadow-sm)}
+.stat .n{font-size:25px;font-weight:600;line-height:1.15;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.stat .t{color:var(--muted-foreground);font-size:12px;margin-top:5px;line-height:1.45}
+
+/* ---------- 按钮 ---------- */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:32px;padding:0 12px;border:1px solid var(--border);
+ background:var(--card);border-radius:var(--r-md);cursor:pointer;color:var(--foreground);white-space:nowrap;font-size:13px;font-weight:500;
+ transition:background .14s,border-color .14s,color .14s,box-shadow .14s;vertical-align:middle}
+.btn:hover{background:var(--muted);border-color:var(--input)}
+.btn:focus-visible{outline:none;box-shadow:0 0 0 3px var(--ring)}
+.btn.pri{background:var(--primary);border-color:var(--primary);color:var(--primary-foreground);box-shadow:0 1px 2px oklch(.55 .185 258/.25)}
+.btn.pri:hover{background:var(--primary-hover);border-color:var(--primary-hover)}
+.btn.danger{color:var(--err);border-color:oklch(.57 .20 25/.35)}
+.btn.danger:hover{background:oklch(.57 .20 25/.07);border-color:var(--err)}
+.btn.danger-solid{background:var(--err);border-color:var(--err);color:#fff}
+.btn.danger-solid:hover{background:oklch(.52 .20 25);border-color:oklch(.52 .20 25)}
+.btn.sm{height:26px;padding:0 9px;font-size:12px;border-radius:var(--r-sm)}
+.btn:disabled{opacity:.45;cursor:not-allowed;box-shadow:none}
+.bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+.bar>input,.bar>select{flex:0 0 auto;min-width:0}
+
+/* ---------- 表单 ---------- */
+input[type=text],input[type=password],input[type=number],select,textarea{border:1px solid var(--input);border-radius:var(--r-md);
+ padding:0 10px;height:34px;background:var(--card);color:var(--foreground);outline:none;max-width:100%;transition:border-color .14s,box-shadow .14s}
+textarea{height:auto;padding:8px 10px;line-height:1.6}
+input::placeholder,textarea::placeholder{color:oklch(.68 .01 250)}
+input:focus,select:focus,textarea:focus{border-color:var(--primary);box-shadow:0 0 0 3px var(--ring)}
+select{appearance:none;padding-right:28px;background-image:url("data:image/svg+xml;charset=utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+ background-repeat:no-repeat;background-position:right 9px center;background-size:13px}
+label.f{display:flex;flex-wrap:wrap;align-items:center;gap:7px;font-size:13px;margin:0 0 14px}
+label.f>span{flex:0 0 100%;color:var(--muted-foreground);font-size:12.5px;margin-bottom:-1px}
+label.f input,label.f select,label.f textarea{flex:1 1 170px;width:auto;min-width:0}
+label.f>input[type=checkbox]{flex:0 0 auto;height:15px;width:15px}
+label.f .btn{flex:0 0 auto}
+input[type=checkbox],input[type=radio]{accent-color:var(--primary);width:15px;height:15px;cursor:pointer;vertical-align:-2px}
+input[type=file]{font-size:12.5px;color:var(--muted-foreground);height:auto;padding:0;border:0;background:none}
+input[type=file]::file-selector-button{height:32px;padding:0 12px;margin-right:10px;border:1px solid var(--border);border-radius:var(--r-md);
+ background:var(--card);color:var(--foreground);cursor:pointer;font-size:13px;font-weight:500;font-family:inherit;transition:background .14s}
+input[type=file]::file-selector-button:hover{background:var(--muted)}
+
+/* ---------- 表格 ---------- */
+table{width:100%;border-collapse:separate;border-spacing:0;font-size:13px}
+th,td{padding:10px 12px;border-bottom:1px solid var(--border);text-align:left;vertical-align:middle}
+th{background:var(--muted);color:var(--muted-foreground);font-weight:550;font-size:12px;white-space:nowrap}
+td{font-variant-numeric:tabular-nums}
+tr:last-child td{border-bottom:0}
+tbody tr{transition:background .1s}
+tbody tr:hover td{background:oklch(.976 .006 255)}
+.tag{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:var(--r-sm);font-size:11.5px;font-weight:500;
+ background:var(--muted);color:oklch(.42 .015 250);white-space:nowrap}
+.tag.ok{background:oklch(.96 .04 155);color:oklch(.45 .12 155)}
+.tag.warn{background:oklch(.96 .05 80);color:oklch(.47 .12 62)}
+.tag.err{background:oklch(.96 .035 25);color:oklch(.48 .18 25)}
+.muted{color:var(--muted-foreground);font-size:12px}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;white-space:pre-wrap;word-break:break-all}
+pre{background:oklch(.235 .015 255);color:oklch(.90 .012 250);padding:14px 15px;border-radius:var(--r-lg);overflow:auto;
+ font-size:12px;line-height:1.65;margin:8px 0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+pre::-webkit-scrollbar-thumb{background:oklch(.45 .02 250);background-clip:content-box}
+
+/* ---------- 提示条（少而克制） ---------- */
+.hint{background:oklch(.975 .012 255);border:1px solid oklch(.92 .02 255);color:oklch(.40 .02 255);
+ padding:10px 12px;font-size:12.5px;border-radius:var(--r-lg);margin:12px 0;line-height:1.65}
+.hint.warn{background:oklch(.975 .035 85);border-color:oklch(.91 .05 85);color:oklch(.45 .09 70)}
+.hint.err{background:oklch(.975 .025 25);border-color:oklch(.91 .05 25);color:oklch(.45 .16 25)}
+.hint.ok{background:oklch(.975 .035 155);border-color:oklch(.91 .05 155);color:oklch(.40 .10 155)}
+.hint b{font-weight:600}
+
+/* ---------- 步骤 / 进度 ---------- */
+.steps{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
+.step{flex:1;min-width:120px;text-align:center;padding:9px 8px;background:var(--card);border:1px solid var(--border);
+ border-radius:var(--r-lg);color:var(--muted-foreground);font-size:12px;box-shadow:var(--shadow-sm)}
+.step.on{background:var(--primary);border-color:var(--primary);color:#fff;font-weight:550}
+.step.done{background:oklch(.97 .03 155);border-color:oklch(.91 .05 155);color:oklch(.42 .11 155)}
+.prog{height:6px;background:var(--muted);border-radius:99px;overflow:hidden;margin:10px 0}
+.prog i{display:block;height:100%;background:var(--primary);width:0;transition:width .35s cubic-bezier(.4,0,.2,1);border-radius:99px}
+
+/* ---------- 分段式 tabs ---------- */
+.tabs{display:inline-flex;gap:2px;padding:3px;background:var(--muted);border-radius:var(--r-lg);margin-bottom:14px;flex-wrap:wrap}
+.tab{padding:6px 13px;cursor:pointer;border-radius:var(--r-md);font-size:12.5px;color:var(--muted-foreground);transition:background .14s,color .14s,box-shadow .14s}
+.tab:hover{color:var(--foreground)}
+.tab.on{background:var(--card);color:var(--foreground);font-weight:550;box-shadow:var(--shadow-sm)}
+
+/* ---------- 弹窗 / toast ---------- */
+#mask{position:fixed;inset:0;background:oklch(.2 .02 250/.42);backdrop-filter:blur(3px);display:none;align-items:center;justify-content:center;z-index:50;padding:20px}
+.mbox{background:var(--card);border-radius:var(--r-xl);width:560px;max-width:100%;max-height:86vh;overflow:auto;padding:22px 24px;
+ box-shadow:var(--shadow-lg);border:1px solid var(--border);animation:pop .2s cubic-bezier(.2,.8,.3,1)}
+@keyframes pop{from{opacity:0;transform:translateY(8px) scale(.985)}to{opacity:1;transform:none}}
+.mbox h3{margin:0 0 16px;font-size:16px;font-weight:600;letter-spacing:-.01em}
+.mbox .foot{display:flex;justify-content:flex-end;gap:8px;margin-top:20px;padding-top:16px;border-top:1px solid var(--border)}
+#toast{position:fixed;top:16px;right:18px;z-index:99;display:flex;flex-direction:column;gap:8px;align-items:flex-end}
+.tst{background:oklch(.28 .015 255);color:#fff;padding:9px 14px;border-radius:var(--r-md);font-size:12.5px;
+ box-shadow:var(--shadow-md);animation:slide .22s cubic-bezier(.2,.8,.3,1);max-width:420px;line-height:1.5}
+.tst.ok{background:oklch(.48 .13 155)}.tst.err{background:oklch(.52 .19 25)}
+@keyframes slide{from{opacity:0;transform:translateX(12px)}to{opacity:1;transform:none}}
+
+/* ---------- 布局辅助 ---------- */
+.row{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}.row3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;align-items:start}
+.row>.card{margin-bottom:16px}
+/* 标签式多值输入 */
+.tags{display:flex;flex-wrap:wrap;gap:6px;align-items:center;border:1px solid var(--input);border-radius:var(--r-md);
+ padding:6px 8px;min-width:260px;max-width:620px;background:var(--card);transition:border-color .14s,box-shadow .14s}
+.tags:focus-within{border-color:var(--primary);box-shadow:0 0 0 3px var(--ring)}
+.tags .chip{display:inline-flex;align-items:center;gap:5px;background:var(--accent);color:var(--primary);
+ border-radius:var(--r-sm);padding:2px 7px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;font-weight:500}
+.tags .chip b{color:oklch(.62 .14 258);cursor:pointer;font-weight:600;font-size:13px;line-height:1}
+.tags .chip b:hover{color:var(--err)}
+.tags input.tagin{border:0;outline:none;flex:1;min-width:130px;padding:2px 0;background:transparent;height:24px;box-shadow:none}
+.tags input.tagin:focus{box-shadow:none}
+/* 长表格：固定高度 + 表头吸顶 */
+.tbl{max-height:480px;overflow:auto;border:1px solid var(--border);border-radius:var(--r-lg)}
+.tbl table{margin:0}
+.tbl thead th{position:sticky;top:0;z-index:2;background:oklch(.975 .004 250);border-bottom:1px solid var(--border)}
+.pager{display:flex;gap:8px;align-items:center;justify-content:flex-end;padding:10px 2px 2px;font-size:12px;color:var(--muted-foreground)}
+.cks{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:2px;max-height:300px;overflow:auto;
+ border:1px solid var(--border);border-radius:var(--r-lg);padding:8px}
+.cks label{display:flex;gap:8px;align-items:center;font-size:13px;margin:0;padding:5px 6px;border-radius:var(--r-sm);cursor:pointer}
+.cks label:hover{background:var(--muted)}
+.cks input{flex:0 0 auto}
+.sec{border:1px solid var(--border);border-radius:var(--r-lg);padding:10px 12px;margin-top:8px;background:oklch(.985 .004 250)}
+.sec .k{font-size:11.5px;color:var(--muted-foreground);margin-bottom:2px}
+/* 高级选项折叠区 */
+.adv{margin-top:14px;border:1px solid var(--border);border-radius:var(--r-lg);background:oklch(.985 .004 250);overflow:hidden}
+.adv>summary{padding:11px 14px;cursor:pointer;font-size:13px;color:var(--foreground);user-select:none;list-style:none;display:flex;gap:8px;align-items:center}
+.adv>summary::-webkit-details-marker{display:none}
+.adv>summary:before{content:"";width:0;height:0;border-left:5px solid currentColor;border-top:4px solid transparent;
+ border-bottom:4px solid transparent;opacity:.45;transition:transform .16s}
+.adv[open]>summary:before{transform:rotate(90deg)}
+.adv>summary:hover{background:var(--muted)}
+.adv[open]>summary{border-bottom:1px solid var(--border)}
+.adv>.row3{padding:14px 14px 2px}
+.adv .muted{font-weight:400}
+/* 卡内小节标题 */
+.sub{font-size:12px;color:var(--muted-foreground);margin:0 0 6px}
+@media(max-width:1100px){:root{--side-w:196px}.content{padding:16px}}
+@media(max-width:860px){:root{--side-w:0px}.side{display:none}.row,.row3{grid-template-columns:1fr}.top{padding:0 14px}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+
+<div id="login"><div class="lbox">
+  <div class="lm"><svg viewBox="0 0 24 24"><rect x="4.8" y="10.4" width="14.4" height="9.6" rx="2.6"/><path d="M8.2 10.4V8a3.8 3.8 0 0 1 7.6 0v2.4"/><circle cx="12" cy="15.2" r="1.15" fill="currentColor" stroke="none"/></svg></div>
+  <h1>OpenVPN 管理后台</h1><p>账号接入 · 访问控制 · 审计一体化</p>
+  <label class="f"><span>管理密码</span><input type="password" id="lp" style="width:100%" onkeydown="if(event.key==='Enter')doLogin()"></label>
+  <button class="btn pri" style="width:100%;height:36px" onclick="doLogin()">登录</button>
+  <p style="margin:16px 0 0">初始密码见 <span class="mono">data/admin_password.txt</span></p>
+</div></div>
+
+<div id="app">
+ <div class="side">
+  <div class="logo"><i><svg viewBox="0 0 24 24"><rect x="4.8" y="10.4" width="14.4" height="9.6" rx="2.6"/><path d="M8.2 10.4V8a3.8 3.8 0 0 1 7.6 0v2.4"/><circle cx="12" cy="15.2" r="1.15" fill="currentColor" stroke="none"/></svg></i>OpenVPN</div>
+  <div class="grp">系统</div>
+  <a class="nav" data-p="overview"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.6"/><rect x="14" y="3" width="7" height="7" rx="1.6"/><rect x="3" y="14" width="7" height="7" rx="1.6"/><rect x="14" y="14" width="7" height="7" rx="1.6"/></svg>系统概览</a>
+  <a class="nav" data-p="wizard" id="navWizard" style="display:none"><svg viewBox="0 0 24 24"><path d="M12 3l1.7 4.6 4.6 1.7-4.6 1.7L12 15.6l-1.7-4.6L5.7 9.3l4.6-1.7z"/><path d="M18.5 15.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg>安装向导 <small>未装完</small></a>
+  <div class="grp">接入控制</div>
+  <a class="nav" data-p="online"><svg viewBox="0 0 24 24"><path d="M4.5 12a7.5 7.5 0 0 1 15 0"/><path d="M8 14.6a4.2 4.2 0 0 1 8 0"/><circle cx="12" cy="18" r="1.5"/></svg>在线用户</a>
+  <a class="nav" data-p="users"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 19c0-3 2.5-5 5.5-5s5.5 2 5.5 5"/><path d="M16.2 5.4a3.2 3.2 0 0 1 0 5.4M17.8 14.3c1.9.6 3.2 2.2 3.2 4.2"/></svg>认证账号</a>
+  <a class="nav" data-p="acl"><svg viewBox="0 0 24 24"><path d="M12 3l7 3v5.5c0 4.3-2.9 7.6-7 9-4.1-1.4-7-4.7-7-9V6z"/><path d="M9.2 12.2l2 2 3.6-3.9"/></svg>资产与授权</a>
+  <a class="nav" data-p="settings"><svg viewBox="0 0 24 24"><path d="M4 7h9M17.5 7H20M4 17h3M11 17h9"/><circle cx="15.2" cy="7" r="2.3"/><circle cx="8.8" cy="17" r="2.3"/></svg>服务端设置</a>
+  <div class="grp">运维</div>
+  <a class="nav" data-p="update"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.6-5.9"/><path d="M20.2 4.2v4.6h-4.6"/></svg>版本与更新</a>
+  <a class="nav" data-p="logs"><svg viewBox="0 0 24 24"><path d="M6 3.5h7.5L18 8v12.5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-16a1 1 0 0 1 1-1z"/><path d="M13.2 3.6V8H18M8.5 12.5h7M8.5 16h4.5"/></svg>日志审计</a>
+  <a class="nav" data-p="route"><svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.2"/><circle cx="18" cy="18" r="2.2"/><path d="M8.2 6H13a3.5 3.5 0 0 1 0 7h-2a3.5 3.5 0 0 0 0 7h4.8"/></svg>回程路由 / 自检</a>
+  <a class="nav" data-p="security"><svg viewBox="0 0 24 24"><rect x="4.5" y="10" width="15" height="10" rx="2.4"/><path d="M8 10V7.6a4 4 0 0 1 8 0V10"/></svg>管理密码与安全</a>
+ </div>
+ <div class="main">
+  <div class="top"><b id="ttl">系统概览</b><div class="r">
+    <span class="chipv" id="vstat"><i class="dot"></i><b>—</b></span>
+    <span class="chipv" id="vver">—</span>
+    <span class="chipv" id="vfp">—</span>
+    <a class="btn sm" href="javascript:logout()">退出</a></div></div>
+  <div class="content" id="page"></div>
+ </div>
+</div>
+
+<div id="mask"><div class="mbox"><h3 id="mtitle"></h3><div id="mbody"></div>
+ <div class="foot"><button class="btn" onclick="closeModal()">取消</button><button class="btn pri" id="mok">确定</button></div></div></div>
+<div id="toast"></div>
+
+<script>
+const S={csrf:'',logged:false,cfg:null,page:'overview',task:null};
+const $=s=>document.querySelector(s);
+const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function toast(m,t){const d=document.createElement('div');d.className='tst '+(t||'');d.textContent=m;$('#toast').appendChild(d);setTimeout(()=>d.remove(),3600)}
+async function api(path,opt={}){
+  const h={'X-CSRF-Token':S.csrf};
+  let body=opt.body;
+  if(body && !(body instanceof FormData)){h['Content-Type']='application/json';body=JSON.stringify(body)}
+  const r=await fetch(path,{method:opt.method||'GET',headers:h,body,credentials:'same-origin'});
+  let j;try{j=await r.json()}catch(e){j={ok:false,msg:'HTTP '+r.status}}
+  if(r.status===401||j.need_login){S.logged=false;showLogin();throw new Error('请先登录')}
+  if(!r.ok||!j.ok){toast(j.msg||('HTTP '+r.status),'err');throw new Error(j.msg||'HTTP '+r.status)}
+  return j;
+}
+function get(p){return api(p)}function post(p,b){return api(p,{method:'POST',body:b||{}})}
+function del(p){return api(p,{method:'DELETE'})}
+async function upload(p,file,extra={}){const f=new FormData();f.append('file',file);for(const k in extra)f.append(k,extra[k]);return await api(p,{method:'POST',body:f})}
+function download(p){window.open(p,'_blank')}
+/* 前端直接生成小文本文件下载（初始密码清单等，不经过服务器） */
+function downloadText(name,text){
+ const b=new Blob(['\ufeff'+text],{type:'text/plain;charset=utf-8'});
+ const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=name;
+ document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},500)}
+function showLogin(){$('#login').style.display='flex';$('#app').style.display='none'}
+function showApp(){$('#login').style.display='none';$('#app').style.display='block'}
+async function doLogin(){
+  try{const j=await api('/api/login',{method:'POST',body:{password:$('#lp').value}});
+    S.csrf=j.csrf;S.logged=true;showApp();await loadState();
+    go(S.initialized?(location.hash.slice(2)||'overview'):'wizard');
+  }catch(e){}
+}
+async function logout(){try{await post('/api/logout')}catch(e){}S.logged=false;showLogin()}
+async function loadState(){try{const j=await get('/api/state');S.cfg=j.cfg;S.initialized=j.initialized;
+ /* 顶栏三个状态片：进程、服务端版本、配置指纹 */
+ const on=!!j.vpn_alive,st=document.getElementById('vstat');
+ if(st)st.innerHTML='<i class="dot" style="background:'+(on?'var(--ok)':'var(--err)')+';box-shadow:0 0 0 3px '+(on?'oklch(.6 .14 155/.16)':'oklch(.57 .2 25/.16)')+'"></i><b>'+(on?'运行中':'已停止')+'</b>';
+ const ve=document.getElementById('vver');if(ve)ve.textContent='OpenVPN '+j.version.version;
+ const fp=document.getElementById('vfp');if(fp)fp.innerHTML='<b>'+(j.version.fingerprint||'—')+'</b>';
+ /* 安装向导只在「还没装完」时存在：装完就藏起来，避免日常运维误点进去重跑一遍 */
+ const nw=document.getElementById('navWizard');if(nw)nw.style.display=j.initialized?'none':'';
+}catch(e){}}
+function nav(p){document.querySelectorAll('.nav').forEach(n=>n.classList.toggle('on',n.dataset.p===p));$('#ttl').textContent=({overview:'系统概览',wizard:'安装向导',online:'在线用户',users:'认证账号管理',acl:'资产与授权（访问控制）',settings:'OpenVPN 服务端设置',update:'版本与更新',logs:'日志与审计',route:'回程路由与自检',security:'管理密码与安全'})[p]}
+function go(p){S.page=p;nav(p);location.hash='#/'+p;const R={overview:pgOverview,wizard:pgWizard,online:pgOnline,users:pgUsers,acl:pgAcl,settings:pgSettings,update:pgUpdate,logs:pgLogs,route:pgRoute,security:pgSecurity};$('#page').innerHTML='<div class="card">加载中…</div>';(R[p]||pgOverview)()}
+window.addEventListener('hashchange',()=>{const p=location.hash.slice(2);if(S.logged&&p&&p!==S.page)go(p)});
+document.querySelectorAll('.nav').forEach(n=>n.onclick=()=>go(n.dataset.p));
+
+function modal(title,body,onOk,okText,danger){
+  $('#mtitle').textContent=title;$('#mbody').innerHTML=body;
+  const b=$('#mok');b.textContent=okText||'确定';
+  b.className=danger?'btn danger-solid':'btn pri';
+  $('#mask').style.display='flex';
+  b.onclick=async()=>{try{await onOk();closeModal()}catch(e){}}
+}
+function closeModal(){$('#mask').style.display='none'}
+/* 所有高危/不可逆操作统一走「弹窗说明 + 点按钮确认」，不再要求手动输入确认词 */
+function confirmAct(title,detail,onOk,okText){
+  modal(title,'<div class="hint err">'+detail+'</div>',onOk,okText||'确认执行',true)
+}
+function genPw(){ // 一键生成随机密码，省得手输
+  const cs='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#%-_';
+  const a=new Uint32Array(16);crypto.getRandomValues(a);
+  return Array.from(a,x=>cs[x%cs.length]).join('')
+}
+function expBtn(target){ // 到期时间快捷按钮，减少手输
+  return '<span class="muted">快捷：</span>'
+    +[[120,'2小时'],[1440,'1天'],[10080,'7天'],[43200,'30天']].map(x=>
+      `<button type="button" class="btn sm" onclick="(function(){const d=new Date(Date.now()+${x[0]}*60000);const z=n=>String(n).padStart(2,'0');document.getElementById('${target}').value=d.getFullYear()+'-'+z(d.getMonth()+1)+'-'+z(d.getDate())+' '+z(d.getHours())+':'+z(d.getMinutes())})()">${x[1]}</button>`).join(' ')
+    +`<button type="button" class="btn sm" onclick="document.getElementById('${target}').value=''">清除</button>`;
+}
+function tbl(cols,rows,empty){if(!rows||!rows.length)return '<div class="muted" style="padding:14px">'+(empty||'暂无数据')+'</div>';
+ return '<div class="tbl"><table><thead><tr>'+cols.map(c=>'<th>'+esc(c)+'</th>').join('')+'</tr></thead><tbody>'+rows.map(r=>'<tr>'+r.map(x=>'<td>'+x+'</td>').join('')+'</tr>').join('')+'</tbody></table></div>'}
+function badge(t,cls){return '<span class="tag '+(cls||'')+'">'+esc(t)+'</span>'}
+function chips(list,max){max=max||4;const a=(list||[]).map(x=>[x]);if(!a.length)return '<span class="muted">空</span>';
+ const shown=a.slice(0,max).map(x=>'<span class="tag" style="margin:1px 2px">'+esc(x[0])+'</span>').join('');
+ return shown+(a.length>max?' <span class="muted">+'+(a.length-max)+'</span>':'')}
+
+/* ---------------- 标签式多值输入 ---------------- */
+const TAGS={};
+function tagInit(id,vals){TAGS[id]=(vals||[]).slice()}
+function tagHtml(id,ph){return `<div class="tags" id="tg_${id}"><span id="tgchip_${id}">${tagChips(id)}</span>
+ <input class="tagin" placeholder="${esc(ph||'输入后回车')}" onkeydown="tagKey(event,'${id}')" onblur="tagBlur('${id}',this)">
+ <button type="button" class="btn sm" onclick="tagBulk('${id}')">批量</button></div>`}
+function tagChips(id){const a=TAGS[id]||[];
+ return a.map((v,i)=>`<span class="chip">${esc(v)}<b onclick="tagDel('${id}',${i})">×</b></span>`).join('')
+  +'<span class="muted" style="font-size:11px;margin-left:2px">'+(a.length?a.length+' 条':'')+'</span>'}
+function tagRender(id){const e=document.getElementById('tgchip_'+id);if(e)e.innerHTML=tagChips(id)}
+function tagKey(e,id){if(e.key==='Enter'||e.key===','||e.key==='，'){e.preventDefault();tagBlur(id,e.target)}}
+function tagBlur(id,el){const v=(el.value||'').replace(/[,，\s]/g,'');el.value='';if(v)tagAdd(id,v)}
+function tagAdd(id,v){const a=TAGS[id]||(TAGS[id]=[]);if(!a.includes(v))a.push(v);tagRender(id)}
+function tagDel(id,i){(TAGS[id]||[]).splice(i,1);tagRender(id)}
+function tagBulk(id){modal('批量粘贴 · '+(TAGS[id]||[]).length+' 条',
+ `<div class="hint">一行一个，支持逗号/空格分隔。写错的行在保存时会报出来。</div>
+  <textarea id="tbk" style="width:100%;height:220px;font-family:ui-monospace,Menlo,Consolas,monospace" placeholder="10.10.1.0/24&#10;10.10.2.0/24">${esc((TAGS[id]||[]).join('\n'))}</textarea>`,
+ ()=>{const t=$('#tbk').value.split(/[\s,，]+/).filter(Boolean);TAGS[id]=[...new Set(t)];tagRender(id)},'替换列表')}
+
+/* ---------------- 分页 / 复制 / 明文密码 ---------------- */
+const PG={users:0,ag:0,grants:0};
+function setPage(k,n,fn){PG[k]=Math.max(0,n);window[fn]()}
+function pager(k,total,size,fn){const pages=Math.max(1,Math.ceil(total/size));const p=Math.min(PG[k]||0,pages-1);
+ if(total<=size)return `<div class="pager">共 ${total} 条</div>`;
+ return `<div class="pager">共 ${total} 条 · 第 ${p+1}/${pages} 页
+  <button class="btn sm" ${p<=0?'disabled':''} onclick="setPage('${k}',${p-1},'${fn}')">上一页</button>
+  <button class="btn sm" ${p>=pages-1?'disabled':''} onclick="setPage('${k}',${p+1},'${fn}')">下一页</button></div>`}
+function pageOf(k,list,size){const pages=Math.max(1,Math.ceil(list.length/size));const p=Math.min(PG[k]||0,pages-1);
+ if(PG[k]!==p)PG[k]=p;return list.slice(p*size,(p+1)*size)}
+function copyText(t){const done=()=>toast('已复制到剪贴板','ok');
+ if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t).then(done,()=>fb())}else fb();
+ function fb(){const ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.opacity='0';
+  document.body.appendChild(ta);ta.select();try{document.execCommand('copy');done()}catch(e){toast('复制失败，请手动选中','err')}ta.remove()}}
+/* 生成/重置后的密码必须能看见：弹窗大字显示 + 一键复制 */
+function showSecret(title,name,pw){
+ modal(title,`<div class="hint">密码只在这里显示一次，关闭后请自行保存（台账里只存哈希，查不回来）。</div>
+  <div class="sec"><div class="k">账号</div><div class="mono" style="font-size:14px">${esc(name)}</div>
+  <div class="k" style="margin-top:10px">密码</div>
+  <div class="mono" style="font-size:18px;color:var(--primary);letter-spacing:.5px">${esc(pw)}</div></div>
+  <div class="bar" style="margin-top:10px"><button class="btn" onclick="copyText(window.__pw||'')">复制密码</button></div>`,
+ ()=>{},'知道了');window.__pw=pw}
+
+/* 批量导入后：本次生成的所有初始密码必须能看见、能一次复制走 */
+function showBatchSecret(list,kept){
+ const txt=list.map(x=>x.username+'\t'+x.password).join('\n');
+ modal('本次生成的初始密码（'+list.length+' 个）',
+  `<div class="hint">密码只在这里显示一次，台账里只存哈希，查不回来。请先复制或下载，再关闭。</div>
+   <div class="sec" style="max-height:320px;overflow:auto">
+   ${list.map(x=>`<div style="display:flex;gap:10px;padding:4px 0;border-bottom:1px dashed var(--border)">
+     <div class="mono" style="min-width:140px">${esc(x.username)}</div>
+     <div class="mono" style="color:var(--primary);letter-spacing:.5px">${esc(x.password)}</div></div>`).join('')}
+   </div>
+   ${kept&&kept.length?`<div class="hint warn">另有 ${kept.length} 个账号的密码保持不变（表里密码列为空）：${esc(kept.slice(0,12).join('、'))}${kept.length>12?' 等':''}。如果这些账号的原密码已经没人知道，可勾选「空密码也重置」重新导入一次。</div>`:''}
+   <div class="bar" style="margin-top:10px"><button class="btn" onclick="copyText(window.__pwall||'')">全部复制</button>
+    <button class="btn" onclick="downloadText('初始密码.txt',window.__pwall||'')">下载为 txt</button></div>`,
+  ()=>{},'知道了');window.__pwall=txt}
+
+/* ---------------- 任务轮询 ---------------- */
+function taskBox(){return '<div class="card"><h3>执行进度 <small id="tstat"></small></h3><div class="prog"><i id="tprog"></i></div><pre id="tlog" style="height:220px"></pre></div>'}
+function pollTask(tid,done){
+  let off=0;S.task=tid;
+  const tick=async()=>{
+    if(S.task!==tid)return;
+    try{
+      const j=await get('/api/task/'+tid),l=await get('/api/task/'+tid+'/log?offset='+off);
+      const st=$('#tstat'),pb=$('#tprog'),lg=$('#tlog');
+      if(st)st.textContent=j.status==='running'?'执行中：'+esc(j.msg):(j.status==='done'?'已完成':'失败：'+esc(j.msg));
+      if(pb)pb.style.width=j.progress+'%';
+      if(lg&&l.text){lg.textContent+=l.text;lg.scrollTop=lg.scrollHeight;off=l.offset}
+      if(j.status==='running'){setTimeout(tick,700);return}
+      if(j.status==='unknown'){toast(j.msg,'err');if(done)done(false);return}
+      toast(j.status==='done'?'任务完成':'任务失败：'+j.msg,j.status==='done'?'ok':'err');
+      if(done)done(j.status==='done');
+    }catch(e){setTimeout(tick,1200)}
+  };tick();
+}
+
+/* ---------------- 概览 ---------------- */
+async function pgOverview(){
+  const j=await get('/api/state');const s=j.stats,v=j.version;
+  $('#page').innerHTML=`
+  <div class="grid">
+    <div class="stat"><div class="n">${s.users}</div><div class="t">认证账号（启用 ${s.enabled}）</div></div>
+    <div class="stat"><div class="n">${s.online}</div><div class="t">当前在线</div></div>
+    <div class="stat"><div class="n">${s.grants} / ${s.peers||0}</div><div class="t">服务器授权 / 客户端互访</div></div>
+    <div class="stat"><div class="n">${s.acl_mode==='enforce'?'强制':'观察'}</div><div class="t">ACL 模式</div></div>
+    <div class="stat"><div class="n">${s.nat_mode==='no-nat'?'溯源':'NAT'}</div><div class="t">网络模式（无 NAT 溯源${s.nat_mode==='no-nat'?'已开启':'默认关闭'}）</div></div>
+  </div>
+  <div class="hint ${s.nat_mode==='no-nat'?'':'warn'}">${s.nat_mode==='no-nat'
+    ?'无 NAT 溯源：内网日志里的源 IP 就是账号固定 IP（需网关已配回程路由）。'
+    :'NAT 模式：开箱可用，但内网日志里的源 IP 是服务器自己。'}
+    <button class="btn sm" style="margin-left:8px" onclick="natToggle('${s.nat_mode==='no-nat'?'nat':'no-nat'}')">${s.nat_mode==='no-nat'?'切回 NAT':'开启无 NAT 溯源'}</button></div>
+  <div class="row"><div class="card"><h3>服务状态</h3>
+    ${tbl(['项目','值'],[
+      ['初始化',j.initialized?badge('已完成','ok'):badge('未完成','warn')+' <button class="btn sm" onclick="go(\'wizard\')">去安装</button>'],
+      ['OpenVPN 进程',j.vpn_alive?badge('运行中','ok'):badge('未运行','err')],
+      ['服务端版本',esc(v.version)+' '+(v.secure?badge('≥ 安全线','ok'):badge('低于安全线','err'))],
+      ['分支 EOL',esc(v.eol)],['配置指纹','<span class="mono">'+esc(v.fingerprint||'—')+'</span>'],
+      ['网段 / 端口',esc(j.cfg.vpn_cidr)+' · '+esc(j.cfg.proto)+'/'+esc(j.cfg.port)],
+    ])}
+    <div class="bar" style="margin-top:12px"><button class="btn" onclick="restartSvc()">重启服务</button>
+    <button class="btn pri" onclick="download('/api/client.ovpn')">导出 company.ovpn</button></div>
+  </div>
+  <div class="card"><h3>最近认证</h3>${tbl(['时间','账号','来源公网 IP','结果','原因'],j.recent_auth.map(r=>[esc(r.ts),esc(r.username),esc(r.src_ip),r.result==='OK'?badge('成功','ok'):badge('失败','err'),esc(r.reason)]))}
+  </div></div>`;
+}
+async function restartSvc(){confirmAct('重启 OpenVPN 服务','会断开所有在线连接，客户端会自动重连。',
+  async()=>{const j=await post('/api/service/restart');toast(j.msg,'ok')},'重启服务')}
+function natToggle(mode){
+ if(mode==='no-nat'){
+  confirmAct('开启无 NAT 溯源',
+   '开启后内网服务器日志里的源 IP 变成各账号固定 IP。<br><b>但必须先在机房核心网关配好 VPN 网段回程静态路由</b>，否则客户端连上隧道也 ping 不通任何内网服务器。命令见「回程路由 / 自检」页。<br>切换只重建规则：不重启 OpenVPN、不断线、company.ovpn 不用重发，随时可切回。',
+   async()=>{const j=await post('/api/network/nat',{mode:'no-nat'});toast(j.msg,'ok');go(S.page)},'确认开启');
+ }else{
+  confirmAct('切回 NAT 模式','切回后内网服务器日志将只看到 VPN 服务器自己，无法再按固定 IP 溯源到人；好处是不再依赖网关回程路由。',
+   async()=>{const j=await post('/api/network/nat',{mode:'nat'});toast(j.msg,'ok');go(S.page)},'确认切回');
+ }
+}
+
+/* ---------------- 安装向导 ---------------- */
+let W={step:1,items:[],ver:''};
+async function pgWizard(){
+  let init=false;try{init=(await get('/api/wizard/steps')).initialized}catch(e){}
+  const st=(n,t)=>'<div class="step '+(W.step>n?'done':W.step===n?'on':'')+'">'+n+'. '+t+'</div>';
+  $('#page').innerHTML=`
+  <div class="steps">${st(1,'环境自检')}${st(2,'放置二进制')}${st(3,'填写参数')}${st(4,'执行安装')}${st(5,'交付')}</div>
+  ${init?'<div class="hint warn">已安装。重跑向导会重签 CA，全员现有 ovpn 立即失效。</div>':''}
+  <div class="card"><h3>第 1 步 · 环境自检</h3>
+    <div class="bar"><button class="btn pri" onclick="wCheck()">重新检测</button><span class="muted">x86_64 / tun / 静态二进制 / 端口 / openssl / iptables</span></div>
+    <div id="witems">${tbl(['检查项','结果','说明'],W.items.map(i=>[esc(i.name),i.ok?badge('通过','ok'):badge(i.fatal?'不通过':'注意',i.fatal?'err':'warn'),esc(i.detail)]),'点【重新检测】开始')}</div></div>
+  <div class="card"><h3>第 2 步 · 放置 openvpn 静态二进制 <small>≥ 2.6.23，glibc 2.17 ABI</small></h3>
+    <div class="hint">包内已自带 <span class="mono">bin/openvpn</span>；缺失时可在此上传，校验项与自动编译一致。</div>
+    <div class="bar"><input type="file" id="wbin"><button class="btn pri" onclick="wUpload()">上传并校验</button><span id="wver" class="muted">${esc(W.ver)}</span></div></div>
+  <div class="card"><h3>第 3 步 · 参数</h3>${cfgForm()}
+   <label class="f" style="margin-top:8px"><span>网络模式</span><select id="w_nat">
+     <option value="nat" ${(S.cfg&&S.cfg.nat_mode==='no-nat')?'':'selected'}>NAT（默认）· 开箱可用，不需要网关回程路由，但内网日志不可溯源到人</option>
+     <option value="no-nat" ${(S.cfg&&S.cfg.nat_mode==='no-nat')?'selected':''}>无 NAT 溯源 · 内网服务器看到账号固定 IP，需先配网关回程路由</option>
+   </select></label>
+   <div class="hint">可随时在「服务端设置」里切换，只重建规则，不重启服务。</div>
+   <div class="bar"><button class="btn pri" onclick="wParams()">保存参数</button></div></div>
+  <div class="card"><h3>第 4 步 · 执行安装</h3>
+    <div class="hint warn">将签发 CA、写配置、下发规则并启动服务，在线连接会断。</div>
+    <div class="bar"><button class="btn pri" onclick="wExec()">开始安装</button></div>
+    <div id="wtask"></div></div>
+  <div class="card"><h3>第 5 步 · 交付</h3>
+    <div class="bar"><button class="btn pri" onclick="download('/api/client.ovpn')">下载 company.ovpn（全员共用）</button>
+    <button class="btn" onclick="go('route')">查看回程路由命令</button></div>
+    <div class="hint">${(S.cfg&&S.cfg.nat_mode==='no-nat')
+      ?'已选「无 NAT 溯源」：回程静态路由必须先配好，否则客户端 ping 不通内网。'
+      :'当前 NAT 模式，开箱可用。'}<br>客户端需 OpenVPN ≥ 2.4；账号在「认证账号」里建，互访在「资产与授权」里授。</div></div>`;
+  if(W.step===1)wCheck();
+}
+const CIPHERS=[['AES-256-GCM','AES-256-GCM','首选。有 AES-NI 的 x86 服务器上最快'],
+ ['AES-128-GCM','AES-128-GCM','老 CPU 上略省算力，安全性仍足够'],
+ ['CHACHA20-POLY1305','CHACHA20-POLY1305','手机 / ARM 无 AES 加速时更快'],
+ ['AES-256-CBC','AES-256-CBC','仅救急：给不认识 GCM 的老客户端兜底，弱']];
+function cfgForm(c){c=c||S.cfg||{};const v=(k,d)=>esc(c[k]==null?(d||''):c[k]);
+ const have=(c.data_ciphers||'AES-256-GCM:CHACHA20-POLY1305').split(':').filter(Boolean);
+ const extra=have.filter(x=>!CIPHERS.some(y=>y[0]===x));
+ tagInit('extra_routes',c.extra_routes||[]);
+ return `<div class="row3">
+  <label class="f"><span>对外地址/域名</span><input id="c_public_addr" value="${v('public_addr')}" placeholder="vpn.example.com"></label>
+  <label class="f"><span>服务端口</span><input type="number" id="c_port" value="${v('port',1194)}"></label>
+  <label class="f"><span>隧道协议</span><select id="c_proto"><option value="tcp" ${(c.proto||'tcp')==='tcp'?'selected':''}>TCP（默认，穿透性最好）</option><option value="udp" ${c.proto==='udp'?'selected':''}>UDP（延迟低，被限 UDP 时不通）</option></select></label>
+  <label class="f"><span>VPN 网段</span><input id="c_vpn_cidr" value="${v('vpn_cidr','10.8.0.0/24')}"></label>
+  <label class="f"><span>tun-mtu</span><input type="number" id="c_tun_mtu" value="${v('tun_mtu',1400)}"></label>
+  <label class="f"><span>最大客户端</span><input type="number" id="c_max_clients" value="${v('max_clients',200)}">
+   <button type="button" class="btn sm" onclick="autoMax()">按台账自动算</button></label>
+ </div>
+ <div class="sub">并发上限取决于「最大客户端」；地址池 .2~.9 只是兜底，每个账号的 IP 由台账固定下发（.10~.254）。</div>
+ <div style="margin:0 0 14px">
+  <div class="sub">附加推送路由 <span style="opacity:.7">· 回车加入，可粘贴多行</span></div>
+  ${tagHtml('extra_routes','例如 10.20.0.0/16')}
+  <div class="sub" style="margin-top:6px">VPN 网段 <b class="mono">${esc(c.vpn_cidr||'10.8.0.0/24')}</b> 自动下发，不用手工加。</div>
+ </div>
+ <div class="row3">
+  <label class="f"><span>DNS 例外</span><input id="c_dns" value="${c.dns?esc(c.dns.join(',')):''}" placeholder="只放通这些 IP 的 53 端口"></label>
+  <label class="f"><span>NTP 例外</span><input id="c_ntp" value="${c.ntp?esc(c.ntp.join(',')):''}" placeholder="只放通这些 IP 的 123 端口"></label>
+ </div>
+ <div class="sec"><div class="k">数据加密套件 <span style="color:var(--muted-foreground);opacity:.8">· 勾选的是「协商顺序表」，每条连接最终只用其中一个</span></div>
+  <div class="cks">${CIPHERS.concat(extra.map(x=>[x,x,'自定义（保留原值）'])).map(([val,label,tip])=>
+   `<label title="${esc(tip)}"><input type="checkbox" class="cck" value="${esc(val)}" ${have.includes(val)?'checked':''}> ${esc(label)}</label>`).join('')}</div></div>
+ <details class="adv"${c.__adv?' open':''}>
+  <summary>高级选项 <span class="muted">默认值通常不用动</span></summary>
+  <div class="row3" style="margin-top:12px">
+   <label class="f"><span>最低 TLS</span><select id="c_tls_min">
+     <option value="1.2" ${(c.tls_min||'1.2')==='1.2'?'selected':''}>TLS 1.2（推荐，兼容 2.4 以上客户端）</option>
+     <option value="1.3" ${c.tls_min==='1.3'?'selected':''}>TLS 1.3（更严，老客户端会连不上）</option>
+     ${(c.tls_min&&['1.2','1.3'].indexOf(c.tls_min)<0)?`<option value="${esc(c.tls_min)}" selected>TLS ${esc(c.tls_min)}（当前值，非推荐）</option>`:''}
+    </select>
+    </label>
+   <label class="f"><span>压缩</span><select id="c_compress">
+     <option value="off" ${(c.compress||'off')==='off'?'selected':''}>关闭（默认，推荐）</option>
+     <option value="lz4-v2" ${c.compress==='lz4-v2'?'selected':''}>LZ4（只在链路确实窄时开）</option>
+     <option value="lzo" ${c.compress==='lzo'?'selected':''}>LZO（老客户端兼容，已废弃）</option></select>
+    </label>
+  </div>
+ </details>`}
+
+function readCfg(){const g=id=>($('#'+id)||{}).value?$('#'+id).value.trim():'';
+ const lst=id=>g(id)?g(id).split(/[,，\s]+/).filter(Boolean):[];
+ const ck=[...document.querySelectorAll('.cck:checked')].map(x=>x.value);
+ return {public_addr:g('c_public_addr'),port:parseInt(g('c_port')),proto:g('c_proto'),vpn_cidr:g('c_vpn_cidr'),
+  extra_routes:(TAGS.extra_routes||[]).slice(),dns:lst('c_dns'),ntp:lst('c_ntp'),
+  tun_mtu:parseInt(g('c_tun_mtu')),compress:g('c_compress'),data_ciphers:ck.join(':'),
+  tls_min:g('c_tls_min'),max_clients:parseInt(g('c_max_clients'))}}
+async function autoMax(){try{const j=await get('/api/settings/capacity');$('#c_max_clients').value=j.suggest;toast(j.msg,'ok')}catch(e){}}
+async function wCheck(){try{const j=await post('/api/wizard/check');W.items=j.items;
+ $('#witems').innerHTML=tbl(['检查项','结果','说明'],W.items.map(i=>[esc(i.name),i.ok?badge('通过','ok'):badge(i.fatal?'不通过':'注意',i.fatal?'err':'warn'),esc(i.detail)]));
+ const bad=W.items.filter(i=>i.fatal&&!i.ok);if(!bad.length){W.step=2;pgWizard()}else toast('存在 '+bad.length+' 项致命检查未通过','err')}catch(e){}}
+async function wUpload(){const f=$('#wbin').files[0];if(!f){toast('请选择文件','err');return}
+ try{const j=await upload('/api/wizard/binary',f);W.ver='已放置 '+j.version+'（'+j.branch+'）';$('#wver').textContent=W.ver;toast(j.msg,'ok');W.step=3;pgWizard()}catch(e){}}
+async function wParams(){try{await post('/api/wizard/params',Object.assign(readCfg(),{nat_mode:$('#w_nat').value}));toast('参数已保存','ok');W.step=4;await loadState();pgWizard()}catch(e){}}
+async function wExec(){
+ confirmAct('执行安装',
+   '将签发 CA 与服务端证书、写配置、下发防火墙规则并启动 OpenVPN。若已存在旧配置会先做快照；在线连接会断开。',
+   async()=>{const j=await post('/api/wizard/execute',{});W.step=4;$('#wtask').innerHTML=taskBox();
+    pollTask(j.task_id,ok=>{if(ok){W.step=5;toast('安装完成，请下载 company.ovpn','ok');loadState()}})},
+   '开始安装');
+}
+
+/* ---------------- 在线用户 ---------------- */
+async function pgOnline(){const j=await get('/api/online');
+ $('#page').innerHTML=`<div class="card"><h3>在线会话 <small>同账号只允许一处在线</small></h3>
+ <div class="bar"><button class="btn" onclick="pgOnline()">刷新</button><span class="muted">状态日志中的 Common Name 即账号名</span></div>
+ ${tbl(['账号','台账固定 IP','来源公网 IP','接收','发送','连接时间','操作'],j.users.map(u=>[
+  esc(u.username),u.vpn_ip==='未登记'?badge('未登记告警','err'):'<span class="mono">'+esc(u.vpn_ip)+'</span>',
+  esc(u.real_addr),esc(u.bytes_recv),esc(u.bytes_sent),esc(u.since),
+  '<button class="btn sm danger" onclick="kick(\''+esc(u.username)+'\')">踢下线</button>']))}
+ </div>`}
+async function kick(n){confirmAct('踢下线 · '+n,'该账号当前连接会立即断开，需重新拨入。',
+ async()=>{await post('/api/users/kick',{username:n});toast('已踢下线','ok');pgOnline()},'踢下线')}
+
+/* ---------------- 账号管理 ---------------- */
+let U={list:[],kw:'',state:'all'};
+async function pgUsers(){const j=await get('/api/users');U.list=j.users;
+ $('#page').innerHTML=`<div class="card"><h3>认证账号 <small>一人一账号一固定 IP；密码只存哈希，姓名/部门只用于台账与检索</small></h3>
+ <div class="bar"><input type="text" id="ukw" placeholder="搜索账号 / 姓名 / 部门 / IP" value="${esc(U.kw)}" style="width:230px" oninput="U.kw=this.value;PG.users=0;renderUsers()">
+ <select onchange="U.state=this.value;PG.users=0;renderUsers()"><option value="all">全部状态</option><option value="on" ${U.state==='on'?'selected':''}>启用</option><option value="off" ${U.state==='off'?'selected':''}>停用</option></select>
+ <button class="btn pri" onclick="userAdd()">添加账号</button><button class="btn" onclick="impOpen()">导入 Excel</button>
+ <button class="btn" onclick="download('/api/users/export')">导出 Excel</button>
+ <span class="muted">共 ${U.list.length} 个账号</span></div>
+ <div id="ubox"></div>
+ <div class="hint">固定 IP 由服务端下发，客户端改不了；改 IP 会自动重建 ACL 并踢下线。<br>
+ 员工自助改密：<span class="mono" id="selfurl"></span></div></div>`;
+ renderUsers();
+ setTimeout(function(){const e=document.getElementById('selfurl');if(e)e.textContent=location.origin+'/self'},0)}
+function renderUsers(){
+ const box=document.getElementById('ubox');if(!box)return;
+ const kw=(U.kw||'').trim().toLowerCase();
+ const all=U.list.filter(u=>(U.state==='all'||(U.state==='on'?u.enabled:!u.enabled))&&
+   (!kw||[u.username,u.real_name,u.dept,u.vpn_ip,u.note].some(x=>String(x||'').toLowerCase().includes(kw))));
+ const rows=pageOf('users',all,20);
+ box.innerHTML=tbl(['账号','姓名','部门','固定 IP','状态','备注','操作'],rows.map(u=>[
+  '<b>'+esc(u.username)+'</b>',esc(u.real_name||''),esc(u.dept||''),
+  '<span class="mono">'+esc(u.vpn_ip)+'</span>',
+  u.enabled?badge('启用','ok'):badge('停用','warn'),esc(u.note||''),
+  `<button class="btn sm" onclick="userEdit('${esc(u.username)}')">编辑</button>
+   <button class="btn sm" onclick="userPwd('${esc(u.username)}')">改密</button>
+   <button class="btn sm" onclick="userToggle('${esc(u.username)}',${u.enabled?0:1})">${u.enabled?'停用':'启用'}</button>
+   <button class="btn sm" onclick="kick('${esc(u.username)}')">踢</button>
+   <button class="btn sm danger" onclick="userDel('${esc(u.username)}')">删除</button>`]),'没有匹配的账号')
+  +pager('users',all.length,20,'renderUsers')}
+function userAdd(){modal('添加认证账号',`<label class="f"><span>账号（工号）</span><input id="u_name" placeholder="字母/数字/._-，不支持中文空格"></label>
+ <label class="f"><span>姓名</span><input id="u_real" placeholder="用于台账检索"></label>
+ <label class="f"><span>部门</span><input id="u_dept" placeholder="如 运维部"></label>
+ <label class="f"><span>固定 IP</span><input id="u_ip" placeholder="留空自动分配下一个可用">
+   <button type="button" class="btn sm" onclick="fillNextIp('u_ip')">自动分配</button></label>
+ <label class="f"><span>初始密码</span><input id="u_pw" placeholder="留空自动生成，生成后弹窗显示">
+   <button type="button" class="btn sm" onclick="document.getElementById('u_pw').value=genPw()">生成</button></label>
+ <label class="f"><span>备注</span><input id="u_note"></label>`,async()=>{
+ const j=await post('/api/users',{username:$('#u_name').value.trim(),vpn_ip:$('#u_ip').value.trim(),
+   password:$('#u_pw').value,note:$('#u_note').value.trim(),
+   real_name:$('#u_real').value.trim(),dept:$('#u_dept').value.trim()});
+ toast('账号已创建','ok');await pgUsers();showSecret('账号已创建 · '+j.username,j.username,j.password);
+ });}
+async function fillNextIp(id){try{const j=await get('/api/users/next-ip');$('#'+id).value=j.vpn_ip;toast('已填入 '+j.vpn_ip,'ok')}catch(e){}}
+function userEdit(n){const u=U.list.find(x=>x.username===n)||{};
+ modal('编辑账号 '+n,`<label class="f"><span>姓名</span><input id="u_real" value="${esc(u.real_name||'')}"></label>
+ <label class="f"><span>部门</span><input id="u_dept" value="${esc(u.dept||'')}"></label>
+ <label class="f"><span>固定 IP</span><input id="u_ip" value="${esc(u.vpn_ip||'')}">
+   <button type="button" class="btn sm" onclick="fillNextIp('u_ip')">换一个</button></label>
+ <label class="f"><span>备注</span><input id="u_note" value="${esc(u.note||'')}"></label>
+ <div class="hint warn">改 IP 会踢该用户下线，重连后生效；ACL 会全量重建。</div>`,async()=>{
+ await post('/api/users/'+encodeURIComponent(n),{vpn_ip:$('#u_ip').value.trim(),note:$('#u_note').value.trim(),
+   real_name:$('#u_real').value.trim(),dept:$('#u_dept').value.trim()});toast('已保存','ok');pgUsers()})}
+function userPwd(n){modal('重置密码 · '+n,
+ `<label class="f"><span>新密码</span><input id="u_pw" autocomplete="new-password" placeholder="至少 8 位"></label>
+  <div class="bar"><button type="button" class="btn" onclick="document.getElementById('u_pw').value=genPw()">生成随机密码</button>
+  <button type="button" class="btn" onclick="var e=document.getElementById('u_pw');e.type=e.type==='password'?'text':'password'">显示 / 隐藏</button></div>
+  <div class="hint">点【生成随机密码】会直接填进上面的输入框并显示出来，先复制再保存；保存成功后还会再弹一次，不用担心看不到。</div>`,
+ async()=>{const pw=$('#u_pw').value;if(!pw){toast('请填写新密码','err');return}
+  await post('/api/users/'+encodeURIComponent(n),{password:pw});toast('密码已重置','ok');
+  showSecret('密码已重置 · '+n,n,pw)})}
+async function userToggle(n,v){await post('/api/users/'+encodeURIComponent(n),{enabled:v});toast('状态已更新','ok');pgUsers()}
+async function userDel(n){confirmAct('删除账号 · '+n,'该账号及其授权会一并删除（台账已自动备份，可回滚）。不可撤销。',
+ async()=>{await del('/api/users/'+encodeURIComponent(n));toast('已删除','ok');pgUsers()},'删除账号')}
+let IMP={token:'',file:null};
+function impOpen(){IMP={token:'',file:null,changes:[]};$('#page').insertAdjacentHTML('beforeend','<div class="card" id="impbox"><h3>Excel 全量同步 <small>只有 Excel 一种表格，不再有 CSV 两套</small></h3><div class="bar"><input type="file" id="impfile" accept=".xlsx"><button class="btn pri" onclick="impPreview()">预览变更</button><button class="btn" onclick="download(\'/api/users/export\')">下载模板</button></div><div id="impres" class="muted">列：用户名 / 姓名 / 部门 / 密码 / VPN固定IP / 状态 / 备注。先点【下载模板】照格式填，再【预览变更】。</div><div class="hint">密码列规则：<b>填了就用表里的值覆盖</b>；<b>留空则保留原密码不动</b>（新账号留空会自动生成初始密码，导入完弹窗给你）。<br>如果老账号的密码已经没人知道了，勾上下面这个开关，留空也会重新生成：<label style="display:inline-block;margin-top:8px"><input type="checkbox" id="imp_reset" class="ck"> 密码列为空时也重新生成</label></div></div>');$('#impbox').scrollIntoView()}
+async function impPreview(){const f=$('#impfile').files[0];if(!f){toast('请选择文件','err');return}
+ try{const j=await upload('/api/users/import',f,{step:'preview'});IMP.token=j.token;IMP.file=f;IMP.changes=j.changes;
+ const dels=j.changes.filter(c=>c.op==='删除').length;
+ $('#impres').innerHTML=tbl(['操作','账号','说明'],j.changes.map(c=>[badge(c.op,c.op==='删除'?'err':c.op==='新增'?'ok':'warn'),esc(c.username),esc(c.detail)]),'无任何变更')
+  +'<div class="hint warn">这是<b>全量同步</b>：表里没有的账号 = 删除'+(dels?'（本次将删除 '+dels+' 个）':'')+'。预览 5 分钟内有效，提交前会自动备份台账。</div>'
+  +'<div class="bar"><button class="btn pri" onclick="impApply()">确认全量同步（'+j.changes.length+' 项变更）</button></div>';
+ }catch(e){}}
+function impApply(){
+ const dels=IMP.changes.filter(c=>c.op==='删除').length;
+ const rst=!!($('#imp_reset')&&$('#imp_reset').checked);
+ confirmAct('确认 Excel 全量同步',
+   '将按预览清单写入 '+IMP.changes.length+' 项变更'+(dels?'，其中<b>删除 '+dels+' 个账号</b>':'')+'。表里没有的账号都会被删除；提交前会自动备份台账，误删可用备份回滚。'
+   +(rst?'<br><b>已勾选「空密码也重新生成」</b>：密码列为空的账号密码会被换掉。':''),
+   async()=>{const j=await upload('/api/users/import',IMP.file,{step:'apply',token:IMP.token,reset_empty:rst?'1':''});
+    toast('已同步 '+j.count+' 个账号，备份：'+j.backup,'ok');pgUsers();
+    if((j.initial||[]).length){showBatchSecret(j.initial,j.kept)}else{toast('密码均按原样保留，未产生新密码','ok')}},'确认同步');
+}
+
+/* ---------------- 资产与授权（用户组 / 资产组 / 授权） ---------------- */
+let A={ag:[],ug:[],grants:[],peers:[],users:[],expanded:0,mode:'observe',nat_mode:'nat',tab:'ag',kw:'',gkw:''};
+async function pgAcl(){const j=await get('/api/acl');
+ A.ag=j.asset_groups||[];A.ug=j.user_groups||[];A.grants=j.grants||[];A.peers=j.peers||[];
+ A.users=j.users||[];A.expanded=j.expanded||0;A.mode=j.mode;A.nat_mode=j.nat_mode;renderAcl()}
+function renderAcl(){
+ const tabs=[['ag','资产组'],['ug','用户组'],['gr','授权'],['p2p','客户端互访']];
+ $('#page').innerHTML=`<div class="card"><h3>访问控制模式</h3>
+  <div class="bar"><span>当前：${A.mode==='enforce'?badge('强制 · 默认拒绝','err'):badge('观察 · 只记录不拦截','warn')}</span>
+  <button class="btn" onclick="aclMode('observe')">切到观察模式</button>
+  <button class="btn danger" onclick="aclMode('enforce')">启用强制（默认拒绝）</button>
+  <span class="muted">${A.grants.length} 条授权 → 展开成 ${A.expanded} 条防火墙规则</span></div>
+  <div class="hint">顺序：<b>资产组</b>（几个 IP 一组）→ <b>用户组</b>（几个人一组）→ <b>授权</b>（组 → 组）。加减人或 IP 只改组，权限自动跟随。</div></div>
+ <div class="tabs">${tabs.map(t=>`<div class="tab ${A.tab===t[0]?'on':''}" onclick="aclTab('${t[0]}')">${t[1]}${t[0]==='ag'?' ('+A.ag.length+')':t[0]==='ug'?' ('+A.ug.length+')':t[0]==='gr'?' ('+A.grants.length+')':''}</div>`).join('')}</div>
+ <div id="aclbox"></div>`;
+ renderAclBox()}
+function aclTab(t){A.tab=t;A.kw='';PG.ag=0;PG.grants=0;renderAcl()}
+function renderAclBox(){const b=$('#aclbox');if(!b)return;
+ b.innerHTML=A.tab==='ag'?agHtml():A.tab==='ug'?ugHtml():A.tab==='gr'?grHtml():p2pHtml()}
+function keepFocus(id){setTimeout(function(){const e=document.getElementById(id);if(e&&e.focus){e.focus();try{e.setSelectionRange(e.value.length,e.value.length)}catch(x){}}},0)}
+
+/* ---- 资产组 ---- */
+function agHtml(){
+ const kw=(A.kw||'').toLowerCase();
+ const hit=g=>!kw||[g.name,g.note].some(x=>String(x||'').toLowerCase().includes(kw))
+   || g.items.some(i=>String(i.cidr).includes(kw));
+ const list=A.ag.filter(hit),rows=pageOf('ag',list,10);
+ const totalItems=A.ag.reduce((s,g)=>s+g.items.length,0);
+ return `<div class="card"><h3>资产组 <small>一组装多个目标，授权时整组给</small></h3>
+ <div class="bar"><input id="agkw" placeholder="搜索组名 / 目标 IP" value="${esc(A.kw)}" style="width:220px"
+   oninput="A.kw=this.value;PG.ag=0;renderAclBox();keepFocus('agkw')">
+  <button class="btn pri" onclick="agNew()">新建资产组</button>
+  <span class="muted">共 ${A.ag.length} 组 · ${totalItems} 条目标</span></div>
+ ${tbl(['资产组','包含的目标','条目','操作'],rows.map(g=>[
+   '<b>'+esc(g.name)+'</b>'+(g.note?'<div class="muted">'+esc(g.note)+'</div>':''),
+   `<a href="javascript:agItems(${g.id})">${chips(g.items.map(i=>i.cidr+' '+i.proto+(i.ports?' '+i.ports:'')),3)}</a>`,
+   '<b>'+g.items.length+'</b>',
+   `<button class="btn sm" onclick="agItems(${g.id})">管理条目</button>
+    <button class="btn sm" onclick="agRename(${g.id})">改名</button>
+    <button class="btn sm danger" onclick="agDel(${g.id})">删除</button>`]),'还没有资产组，点【新建资产组】把要放行的 IP 一次贴进去')}
+ ${pager('ag',list.length,10,'renderAclBox')}
+ <div class="hint">同一个「目标 + 协议 + 端口」只允许存在一条：重复添加会被拒绝，并告诉你在哪个组里已经有了。目标可以写单个 IP（自动补 /32）或网段。</div></div>`}
+function agNew(){modal('新建资产组',
+ `<label class="f"><span>组名</span><input id="agn" placeholder="如 核心数据库"></label>
+  <div class="muted" style="margin-bottom:5px">目标清单 <span style="color:var(--muted-foreground);opacity:.8">· 一行一条，可一次贴 3 个 IP</span></div>
+  <textarea id="agl" style="width:100%;height:150px;font-family:ui-monospace,Menlo,Consolas,monospace" placeholder="10.10.1.11 tcp 3306&#10;10.10.1.12 tcp 3306&#10;10.10.1.13 tcp 3306"></textarea>
+  <div class="hint">格式：<span class="mono">目标 [协议] [端口]</span>。协议 tcp/udp/icmp/any，省略默认 any（全部协议、全部端口）；端口可写 <span class="mono">22,3389</span> 或 <span class="mono">8000-9000</span>。</div>
+  <label class="f"><span>备注</span><input id="agnote"></label>`,
+ async()=>{const j=await post('/api/asset-groups',{name:$('#agn').value.trim(),lines:$('#agl').value,note:$('#agnote').value.trim()});
+  toast('已创建，共 '+j.count+' 条目标','ok');await pgAcl()},'创建')}
+function agItems(id){const g=A.ag.find(x=>x.id===id);if(!g)return;
+ const rows=g.items.map(i=>[ '<span class="mono">'+esc(i.cidr)+'</span>',esc(i.proto),esc(i.ports||'全部'),
+   `<button class="btn sm danger" onclick="agItemDel(${i.id})">删除</button>`]);
+ modal('条目管理 · '+g.name,
+  tbl(['目标','协议','端口','操作'],rows,'这个组还是空的，加一条吧')
+  +`<div class="bar" style="margin-top:10px;flex-wrap:wrap"><input id="ni_cidr" placeholder="10.10.1.20 或 10.10.2.0/24" style="width:200px">
+   <select id="ni_proto" style="width:90px"><option>any</option><option>tcp</option><option>udp</option><option>icmp</option></select>
+   <input id="ni_ports" placeholder="端口，如 22,3389" style="width:150px">
+   <button class="btn pri" onclick="agItemAdd(${id})">添加条目</button></div>
+   <div class="hint">同一「目标+协议+端口」不允许重复；端口先后顺序无所谓（80,22 与 22,80 视为同一条）。</div>`,
+  async()=>{},'关闭')}
+async function agItemAdd(id){try{await post('/api/asset-groups/'+id+'/items',
+  {cidr:$('#ni_cidr').value.trim(),proto:$('#ni_proto').value,ports:$('#ni_ports').value.trim()});
+  toast('已添加','ok');await pgAcl();agItems(id)}catch(e){}}
+async function agItemDel(iid){confirmAct('删除条目','该条目会从资产组里移除，所有通过这个组的授权立即失效对应规则。',
+ async()=>{await del('/api/asset-items/'+iid);toast('已删除','ok');await pgAcl()},'删除')}
+function agRename(id){const g=A.ag.find(x=>x.id===id)||{};
+ modal('改名 / 备注',`<label class="f"><span>组名</span><input id="agn" value="${esc(g.name||'')}"></label>
+  <label class="f"><span>备注</span><input id="agnote" value="${esc(g.note||'')}"></label>`,
+ async()=>{await post('/api/asset-groups/'+id,{name:$('#agn').value.trim(),note:$('#agnote').value.trim()});
+  toast('已保存','ok');await pgAcl()})}
+function agDel(i){confirmAct('删除资产组','挂在这个组上的所有授权会一并删除（覆盖的账号会立刻失去访问权），规则立即重建。',
+ async()=>{await del('/api/asset-groups/'+i);toast('已删除','ok');await pgAcl()},'删除')}
+
+/* ---- 用户组 ---- */
+function ugHtml(){
+ const kw=(A.gkw||'').toLowerCase();
+ const list=A.ug.filter(g=>!kw||[g.name,g.note].some(x=>String(x||'').toLowerCase().includes(kw))
+   || g.members.some(m=>String(m.username).includes(kw)||String(m.real_name||'').includes(kw)));
+ return `<div class="card"><h3>用户组 <small>把几个人划成一组，授权时按组给</small></h3>
+ <div class="bar"><input id="ugkw" placeholder="搜索组名 / 成员" value="${esc(A.gkw)}" style="width:220px"
+   oninput="A.gkw=this.value;renderAclBox();keepFocus('ugkw')">
+  <button class="btn pri" onclick="ugNew()">新建用户组</button>
+  <span class="muted">共 ${A.ug.length} 组</span></div>
+ ${tbl(['用户组','成员','人数','操作'],list.map(g=>[
+   '<b>'+esc(g.name)+'</b>'+(g.note?'<div class="muted">'+esc(g.note)+'</div>':''),
+   chips(g.members.map(m=>m.username+(m.real_name?'('+m.real_name+')':'')),5),
+   '<b>'+g.count+'</b>',
+   `<button class="btn sm" onclick="ugEdit(${g.id})">编辑成员</button>
+    <button class="btn sm" onclick="ugRename(${g.id})">改名</button>
+    <button class="btn sm danger" onclick="ugDel(${g.id})">删除</button>`]),'还没有用户组，点【新建用户组】勾几个账号')}
+ <div class="hint">组内成员变动后，所有「组 → 资产组」的授权自动跟着变，不需要重新配权限。停用的账号不会产生规则，重新启用后自动恢复。</div></div>`}
+function userChecks(sel){
+ return A.users.map(u=>`<label><input type="checkbox" class="mck" value="${esc(u.username)}" ${sel.includes(u.username)?'checked':''}>
+  <span>${esc(u.username)}${u.real_name?' · '+esc(u.real_name):''}<span class="muted"> ${esc(u.vpn_ip)}${u.enabled?'':' · 停用'}</span></span></label>`).join('')
+  || '<div class="muted">暂无账号，请先到「认证账号」里添加</div>'}
+function ugNew(){modal('新建用户组',`<label class="f"><span>组名</span><input id="ugn" placeholder="如 财务部 / 外包运维"></label>
+ <div class="muted" style="margin-bottom:5px">选择成员</div><div class="cks" id="ugcks">${userChecks([])}</div>
+ <label class="f" style="margin-top:10px"><span>备注</span><input id="ugnote"></label>`,
+ async()=>{const ms=[...document.querySelectorAll('.mck:checked')].map(x=>x.value);
+  const j=await post('/api/user-groups',{name:$('#ugn').value.trim(),members:ms,note:$('#ugnote').value.trim()});
+  toast('已创建，'+j.count+' 人','ok');await pgAcl()},'创建')}
+function ugEdit(id){const g=A.ug.find(x=>x.id===id);if(!g)return;
+ modal('编辑成员 · '+g.name,`<div class="muted" style="margin-bottom:5px">勾选即加入，取消即移出（共 ${A.users.length} 个账号）</div>
+  <div class="cks" id="ugcks">${userChecks(g.members.map(m=>m.username))}</div>`,
+ async()=>{const ms=[...document.querySelectorAll('.mck:checked')].map(x=>x.value);
+  await post('/api/user-groups/'+id,{members:ms});toast('成员已更新，规则已重建','ok');await pgAcl()})}
+function ugRename(id){const g=A.ug.find(x=>x.id===id)||{};
+ modal('改名 / 备注',`<label class="f"><span>组名</span><input id="ugn" value="${esc(g.name||'')}"></label>
+  <label class="f"><span>备注</span><input id="ugnote" value="${esc(g.note||'')}"></label>`,
+ async()=>{await post('/api/user-groups/'+id,{name:$('#ugn').value.trim(),note:$('#ugnote').value.trim()});
+  toast('已保存','ok');await pgAcl()})}
+function ugDel(i){confirmAct('删除用户组','「组 → 资产组」的授权会一并删除（组内成员会立刻失去这部分访问权）。账号本身不受影响。',
+ async()=>{await del('/api/user-groups/'+i);toast('已删除','ok');await pgAcl()},'删除')}
+
+/* ---- 授权 ---- */
+function grHtml(){
+ const kw=(A.gkw||'').toLowerCase();
+ const list=A.grants.filter(g=>!kw||[g.subject,g.asset_group].some(x=>String(x||'').toLowerCase().includes(kw)));
+ const rows=pageOf('grants',list,12);
+ const agopt=A.ag.map(g=>`<option value="${g.id}">${esc(g.name)}（${g.items.length} 条）</option>`).join('');
+ const subj=A.users.map(u=>`<option value="${esc(u.username)}">${esc(u.username)}${u.real_name?' · '+esc(u.real_name):''} (${esc(u.vpn_ip)})</option>`).join('');
+ return `<div class="card"><h3>授权 <small>「账号 或 用户组」→「资产组」，一次授一整组</small></h3>
+ <div class="bar"><select id="g_type" onchange="syncSubj()" style="width:118px">
+   <option value="user">单个账号</option><option value="group">用户组</option></select>
+  <select id="g_subject" style="min-width:200px">${subj}</select>
+  <span class="muted">→</span>
+  <select id="g_ag" style="min-width:200px">${agopt||'<option value="">（先建资产组）</option>'}</select>
+  <button class="btn pri" onclick="grantAdd()">添加授权</button></div>
+ <div class="bar"><input id="g_exp" placeholder="到期时间，留空为长期" style="width:200px">${expBtn('g_exp')}</div>
+ <div class="bar"><input id="gkw" placeholder="搜索主体 / 资产组" value="${esc(A.gkw)}" style="width:200px"
+   oninput="A.gkw=this.value;PG.grants=0;renderAclBox();keepFocus('gkw')">
+  <span class="muted">共 ${A.grants.length} 条授权 · 展开后 ${A.expanded} 条规则</span></div>
+ ${tbl(['主体','类型','资产组','目标','覆盖账号','到期','操作'],rows.map(g=>[
+   '<b>'+esc(g.subject)+'</b>',
+   g.subject_type==='group'?badge('用户组','warn'):badge('账号',''),
+   esc(g.asset_group)+'<div class="muted">'+g.items+' 条目标</div>',
+   `<a href="javascript:void(0)" title="${esc((g.targets||[]).join('\n'))}">${chips(g.targets||[],2)}</a>`,
+   g.subject_type==='group'?('<span class="mono">'+esc((g.members||[]).join('、'))+'</span><div class="muted">'+g.scope+' 个账号</div>')
+     :'<span class="mono">'+esc(g.vpn_ip||'')+'</span>',
+   g.expires_at?esc(g.expires_at):badge('长期','ok'),
+   `<button class="btn sm danger" onclick="grantDel(${g.id})">删除</button>`]),'还没有授权：上面选主体和资产组，点【添加授权】')}
+ ${pager('grants',list.length,12,'renderAclBox')}
+ <div class="hint">临时授权到期自动失效；每次变更全量重建 iptables 链，立即生效、无需重连。<b>授权可以叠加</b>：一个人既在组里又被单独授权，取并集。</div></div>`}
+function syncSubj(){
+ const t=$('#g_type').value,el=$('#g_subject');if(!el)return;
+ el.innerHTML=t==='group'
+  ?(A.ug.map(g=>`<option value="${esc(g.name)}">${esc(g.name)}（${g.count} 人）</option>`).join('')||'<option value="">（先建用户组）</option>')
+  :(A.users.map(u=>`<option value="${esc(u.username)}">${esc(u.username)}${u.real_name?' · '+esc(u.real_name):''} (${esc(u.vpn_ip)})</option>`).join('')||'<option value="">（先建账号）</option>')}
+async function grantAdd(){
+ const t=$('#g_type').value,s=$('#g_subject').value,a=$('#g_ag').value;
+ if(!s){toast(t==='group'?'请先建用户组':'请先建账号','err');return}
+ if(!a){toast('请先建资产组','err');return}
+ const j=await post('/api/grants',{subject_type:t,subject:s,asset_group_id:parseInt(a),expires_at:$('#g_exp').value.trim()});
+ toast(j.exists?'授权已更新（原来就有，改成新到期时间）':'授权已生效，规则已重建','ok');await pgAcl()}
+function grantDel(i){confirmAct('删除授权','该主体将立刻失去对这个资产组的访问权限（强制模式下直接被 DROP）。',
+ async()=>{await del('/api/grants/'+i);toast('已删除','ok');await pgAcl()},'删除')}
+
+/* ---- 客户端互访 ---- */
+function p2pHtml(){const uopt=A.users.map(u=>`<option value="${esc(u.username)}">${esc(u.username)} (${esc(u.vpn_ip)})</option>`).join('');
+ return `<div class="card"><h3>客户端互访（P2P） <small>两个 VPN 客户端之间直接访问</small></h3>
+  <div class="hint">不开 <span class="mono">client-to-client</span>：让客户端间流量照旧经过 FORWARD，按「固定 IP → 固定 IP」放行，纳入同一套授权与越权日志。</div>
+  ${tbl(['源账号','目标账号','协议','端口','到期','操作'],(A.peers||[]).map(p=>[
+    esc(p.src_username),esc(p.dst_username),esc(p.proto),esc(p.ports||'全部'),esc(p.expires_at||'长期'),
+    `<button class="btn sm danger" onclick="peerDel(${p.id})">删除</button>`]),'还没有互访授权')}
+  <div class="bar" style="margin-top:10px"><select id="p_src">${uopt}</select><span>→</span><select id="p_dst">${uopt}</select>
+   <select id="p_proto" style="width:80px"><option>any</option><option>tcp</option><option>udp</option><option>icmp</option></select>
+   <input id="p_ports" placeholder="端口，留空全部" style="width:130px">
+   <input id="p_exp" placeholder="到期（可选）" style="width:170px">
+   <button class="btn pri" onclick="peerAdd()">添加互访</button></div>
+  <div class="bar">${expBtn('p_exp')}</div></div>`}
+async function peerAdd(){await post('/api/peers',{src:$('#p_src').value,dst:$('#p_dst').value,
+ proto:$('#p_proto').value,ports:$('#p_ports').value.trim(),expires_at:$('#p_exp').value.trim()});
+ toast('客户端互访已授权，规则已重建','ok');pgAcl()}
+async function peerDel(i){confirmAct('删除客户端互访','两个账号之间将不能再互访，规则立即重建。',
+ async()=>{await del('/api/peers/'+i);toast('已删除','ok');pgAcl()},'删除')}
+function aclMode(m){
+ if(m==='enforce'){
+  confirmAct('启用强制模式（默认拒绝）','启用后所有未授权访问将被 DROP（越权尝试会记入日志）。请先确认授权已配齐，否则可能把业务访问一起挡掉。',
+   async()=>{await post('/api/acl/mode',{mode:'enforce'});toast('已启用强制模式','ok');pgAcl()},'启用强制');
+ }else{
+  confirmAct('切回观察模式','切回后未授权访问只记录、不拦截，防护等级降低；适合调试授权清单。',
+   async()=>{await post('/api/acl/mode',{mode:'observe'});toast('已切回观察模式','ok');pgAcl()},'切回观察');
+ }
+}
+
+/* ---------------- 服务端设置 ---------------- */
+async function pgSettings(){const j=await get('/api/settings'),p=(await get('/api/pki')).items||[];S.cfg=j.cfg;
+ $('#page').innerHTML=`<div class="card"><h3>OpenVPN 服务端 <small>保存会重启服务，在线连接断开</small></h3>
+  ${cfgForm(S.cfg)}
+  <div class="bar" style="margin-top:14px"><button class="btn pri" onclick="settingsSave()">保存并重启</button>
+  <button class="btn" onclick="settingsPreview()">预览 server.conf</button>
+  <button class="btn" onclick="download('/api/client.ovpn')">导出 company.ovpn</button>
+  <button class="btn" onclick="rebuild()">重建规则</button></div>
+  <div id="setres"></div></div>
+  <div class="card"><h3>网络模式</h3>
+   <div class="bar"><span>当前：${S.cfg.nat_mode==='no-nat'?badge('无 NAT 溯源','ok'):badge('NAT','warn')}</span>
+   <button class="btn pri" onclick="natToggle('no-nat')" ${S.cfg.nat_mode==='no-nat'?'disabled':''}>开启无 NAT 溯源</button>
+   <button class="btn" onclick="natToggle('nat')" ${S.cfg.nat_mode==='nat'?'disabled':''}>切回 NAT</button></div>
+   <div class="row"><div class="hint"><b>NAT</b>：开箱可用，不用网关配回程路由；但内网日志里的源 IP 是服务器自己。</div>
+   <div class="hint warn"><b>无 NAT 溯源</b>：内网日志能看到账号固定 IP，前提是网关已配好回程路由，否则连上也 ping 不通。</div></div></div>
+  <div class="card"><h3>证书 <small>只读 · 私钥永不出后台</small></h3>
+   ${p.length?tbl(['证书','主体','生效时间','到期时间','剩余','指纹 SHA256','操作'],p.map(c=>[esc(c.title),
+     '<span class="mono">'+esc(c.subject)+'</span>',esc(c.not_before),esc(c.not_after),daysBadge(c.days_left),
+     '<span class="mono">'+esc((c.fingerprint||'').split('=').pop().trim().slice(0,29))+'…</span>',
+     '<button class="btn sm" onclick="download(\'/api/pki/'+esc(c.name)+'\')">下载 PEM</button>'])):'<div class="hint warn">尚未生成证书，请先执行安装向导。</div>'}</div>
+  <div class="row"><div class="card"><h3>恢复默认参数</h3><div class="hint warn">会清空对外地址等参数。</div>
+   <button class="btn danger" onclick="restoreDefault()">恢复默认</button></div>
+  <div class="card"><h3>重新初始化 CA / tls-crypt</h3><div class="hint err">全员现有 company.ovpn 立即失效，必须重新分发。</div>
+   <button class="btn danger" onclick="reinitCA()">重新签发</button></div></div>`}
+function daysBadge(d){if(d===null||d===undefined)return '—';if(d<0)return badge('已过期','err');if(d<30)return badge(d+' 天','err');if(d<90)return badge(d+' 天','warn');return badge(d+' 天','ok')}
+async function settingsSave(){
+ confirmAct('保存服务端设置并重启','应用新配置会<b>重启 OpenVPN，所有在线连接断开并自动重连</b>。若改了端口/协议/CA/加密套件，还需重新导出并全员替换 company.ovpn。',
+ async()=>{const j=await post('/api/settings',readCfg());
+  const w=(j.warnings&&j.warnings.length)?'<div class="hint warn"><b>路由检查有 '+j.warnings.length+' 条提醒：</b><br>'+j.warnings.map(esc).join('<br>')+'</div>':'';
+  $('#setres').innerHTML='<div class="hint '+(j.need_redistribute?'err':'ok')+'">'+esc(j.msg)+'<br><b>'+(j.need_redistribute?'配置指纹已变化：必须重新导出并全员替换 company.ovpn':'配置指纹未变：无需重新分发')+'</b></div>'+w;
+  toast('已保存并重启','ok');loadState()},'保存并重启');
+}
+async function settingsPreview(){const j=await get('/api/settings/preview');
+ const w=(j.warnings&&j.warnings.length)?'<div class="hint warn">'+j.warnings.map(esc).join('<br>')+'</div>':'';
+ const r=j.routes&&j.routes.length?'<div class="hint">实际下发给客户端的路由：<b>'+j.routes.map(esc).join('、')+'</b></div>':'';
+ modal('server.conf 预览',r+w+'<pre style="max-height:55vh">'+esc(j.text)+'</pre>',()=>{},'关闭')}
+async function rebuild(){const j=await post('/api/settings/rebuild');toast(j.msg,'ok')}
+function restoreDefault(){confirmAct('恢复默认参数','会清空对外地址等参数，需重新填写后再应用。操作前会自动做快照。',
+ async()=>{await post('/api/settings/restore-default',{});toast('已恢复默认','ok');pgSettings()},'恢复默认')}
+async function reinitCA(){confirmAct('重新初始化 CA / tls-crypt',
+ '<b>高危</b>：全员现有 company.ovpn 立即失效，必须重新导出并分发给所有人。仅用于密钥疑似泄露。',
+ async()=>{const j=await post('/api/settings/reinit-ca',{});$('#setres').innerHTML=taskBox();
+  pollTask(j.task_id,ok=>{if(ok)toast('已重签，请重新导出 company.ovpn 并全员替换','ok')})},'确认重新签发')}
+
+/* ---------------- 版本与更新 ---------------- */
+async function pgUpdate(){const v=await get('/api/version'),b=await get('/api/backups'),be=(await get('/api/update/build-env')).env;
+ $('#page').innerHTML=`<div class="grid">
+  <div class="stat"><div class="n">${esc(v.version)}</div><div class="t">服务端版本</div></div>
+  <div class="stat"><div class="n">${v.secure?'达标':'偏低'}</div><div class="t">安全线 ≥ ${esc(v.min_secure)}</div></div>
+  <div class="stat"><div class="n">${esc(v.eol)}</div><div class="t">分支 EOL</div></div>
+  <div class="stat"><div class="n">${esc(v.web_version)}</div><div class="t">Web 版本</div></div></div>
+ <div class="row"><div class="card"><h3>升级 OpenVPN <small>上传官方源码包，本机编译</small></h3>
+  <div class="bar">${be.ok?badge('编译环境可用','ok'):badge('编译环境不完整','warn')}
+   <span class="muted">${be.ok?'gcc / make / pkg-config 齐备，约 1~3 分钟':'缺 '+be.missing.join('、')}</span></div>
+  ${be.ok?`<div class="bar"><input type="file" id="upsrc" accept=".gz,.tgz"></div>
+   <div class="bar"><label style="font-size:12px"><input type="checkbox" id="upsrcmajor"> 允许跨大版本</label>
+    <button class="btn pri" onclick="upSource()">编译并更新</button></div><div id="uptask2"></div>`
+   :'<div class="hint warn">本机没有编译器：请在构建机上用 build/build-static-openvpn.sh 编好后，替换 <span class="mono">bin/openvpn</span> 再重启服务。</div>'}
+  <div class="muted">只换二进制不改配置指纹，客户端不用重新分发；编译失败自动回滚。最近更新：${esc(v.last_update||'无')}</div></div>
+ <div class="card"><h3>快照与回滚 <small>完整备份</small></h3>
+  <div class="bar"><button class="btn pri" onclick="snapNow()">立即打一份快照</button><span class="muted">共 ${b.backups.length} 份</span></div>
+  <div class="hint">包含配置、证书私钥、ta.key、台账、ccd 与 openvpn 二进制；不含日志与在线状态（避免回滚后审计缺段）。</div>
+  ${tbl(['时间','类型','路径','操作'],b.backups.slice(0,12).map(x=>[esc(x.ts),esc(x.kind),'<span class="mono">'+esc(x.path)+'</span>',
+   `<button class="btn sm" onclick="restore('${esc(x.path)}')">恢复</button>`]))}</div></div>`}
+
+async function upSource(){const f=$('#upsrc').files[0];if(!f){toast('请选择 openvpn 源码包','err');return}
+ confirmAct('上传源码并编译','将在本机编译 OpenVPN 源码并重启服务，<b>在线连接会断开并自动重连</b>。编译失败会自动回滚到快照。',
+ async()=>{const j=await upload('/api/update/source',f,{allow_major:$('#upsrcmajor').checked?'1':'0'});
+  $('#uptask2').innerHTML=taskBox();pollTask(j.task_id,ok=>{if(ok){toast('已升级到 '+j.version,'ok');loadState()}})},'开始编译')}
+async function snapNow(){const j=await post('/api/backups',{tag:'手动'});toast('已创建快照','ok');pgUpdate()}
+function restore(p){confirmAct('恢复快照','将恢复配置、证书、台账与 ccd，并重建规则、重启服务。<b>当前状态会被覆盖</b>。',
+ async()=>{await post('/api/backups/restore',{path:p});toast('已恢复','ok');pgUpdate()},'恢复此快照')}
+
+/* ---------------- 日志 ---------------- */
+let LK='audit';
+async function pgLogs(){const j=await get('/api/logs?kind='+LK);
+ const tabs=[['auth','认证日志'],['server','服务端日志'],['audit','Web 操作审计'],['deny','越权尝试']];
+ const rows=j.rows.map(r=>{
+  if(LK==='server')return [esc(r.detail)];
+  if(LK==='deny')return [esc(r.ts||''),esc(r.mode||''),esc(r.src||''),esc(r.dst||''),esc(r.dport||''),esc(r.proto||'')];
+  if(LK==='auth')return [esc(r.ts),esc(r.username),esc(r.src_ip),r.result==='OK'?badge('成功','ok'):badge('失败','err'),esc(r.reason)];
+  return [esc(r.ts),esc(r.actor),esc(r.action),esc(r.detail)]});
+ const cols={auth:['时间','账号','来源公网 IP','结果','原因'],server:['日志'],audit:['时间','操作者','动作','详情'],
+  deny:['时间','模式','源 IP','目标','端口','协议']}[LK];
+ $('#page').innerHTML=`<div class="card"><h3>日志与审计</h3><div class="tabs">${tabs.map(t=>`<div class="tab ${LK===t[0]?'on':''}" onclick="LK='${t[0]}';pgLogs()">${t[1]}</div>`).join('')}</div>
+  <div class="bar"><button class="btn" onclick="pgLogs()">刷新</button><span class="muted">越权尝试（含观察模式）本身就是审计证据，DROP 前限流记录</span></div>
+  ${tbl(cols,rows)}</div>`}
+
+/* ---------------- 回程路由 / 自检 ---------------- */
+async function pgRoute(){const r=await get('/api/route-guide'),s=await get('/api/selfcheck');
+ $('#page').innerHTML=`<div class="card"><h3>回程静态路由 <small>${r.required?'硬前提，交给网络管理员在机房网关配':'当前 NAT 模式下不需要执行'}</small></h3>
+ <div class="hint ${r.required?'err':''}">${r.required
+  ?'不做这一步，客户端能连上隧道但 ping 不通任何内网服务器。'
+  :'当前 NAT 模式，下面命令暂不需要执行。'}</div>
+ ${[['Linux 网关',r.linux],['H3C / 华为',r.h3c],['Cisco',r.cisco],['网关改不了时：每台内网服务器都加',r.per_host]].map(x=>
+  `<div style="margin-top:10px"><b>${esc(x[0])}</b><pre>${esc(x[1])}</pre></div>`).join('')}
+ <h3 style="margin-top:18px">检查清单</h3><ul>${r.checklist.map(x=>'<li>'+esc(x)+'</li>').join('')}</ul></div>
+ <div class="card"><h3>自检 <small>库里该是什么 vs 系统里实际是什么</small></h3>
+  <div class="bar"><button class="btn" onclick="pgRoute()">重新自检</button></div>
+  ${tbl(['检查项','结果','说明'],s.items.map(i=>[esc(i.name),i.ok?badge('正常','ok'):badge('异常','err'),esc(i.detail)]))}</div>`}
+
+/* ---------------- 安全 ---------------- */
+async function pgSecurity(){const b=await get('/api/backups');
+ $('#page').innerHTML=`<div class="row"><div class="card"><h3>修改管理密码</h3>
+  <label class="f"><span>原密码</span><input type="password" id="op"></label>
+  <label class="f"><span>新密码（≥8位）</span><input type="password" id="np"></label>
+  <button class="btn pri" onclick="chPwd()">修改</button></div>
+ <div class="card"><h3>台账备份 <small>每次账号变更自动生成，误删可直接把备份当台账导入回滚</small></h3>
+  ${tbl(['时间','类型','文件'],b.backups.filter(x=>x.kind==='users').slice(0,12).map(x=>[esc(x.ts),esc(x.kind),'<span class="mono">'+esc(x.path)+'</span>']))}</div></div>
+ <div class="card"><h3>安全边界</h3><ul class="muted" style="line-height:1.9;padding-left:18px;margin:0">
+  <li>纯 HTTP 内网页，默认只允许私网来源；PBKDF2 口令、签名 Cookie、CSRF、失败 5 次锁 10 分钟</li>
+  <li>Web 以低权限用户运行，特权动作经 sudoers 白名单交给 worker</li>
+  <li>溯源到的是<b>账号</b>不是设备；同账号只允许一处在线。只有开启「无 NAT 溯源」后内网日志才看得到账号固定 IP</li>
+  <li>固定 IP 只能管理员改；客户端互访走 FORWARD，别手工加 <span class="mono">client-to-client</span></li>
+  <li>NAT 由自建 OVPNWEB_NAT 链接管，不要再执行 firewall-cmd --add-masquerade</li>
+  <li>不要把它直接暴露公网，远程管理走 HTTPS 反代或堡垒机</li></ul></div>`}
+async function chPwd(){await post('/api/password',{old:$('#op').value,new:$('#np').value});toast('管理密码已修改','ok');$('#op').value='';$('#np').value=''}
+
+/* ---------------- 启动 ---------------- */
+(async()=>{try{const j=await get('/api/session');S.csrf=j.csrf;if(j.logged){S.logged=true;showApp();await loadState();
+  go(j.initialized?(location.hash.slice(2)||'overview'):'wizard')}else showLogin()}catch(e){showLogin()}})();
+</script>
+</body>
+</html>

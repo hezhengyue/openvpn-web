@@ -1,0 +1,23 @@
+# 运行时与产物（不进版本库）
+runtime/
+dist/
+tests/node_modules/
+
+# 运行期数据（证书私钥、台账、日志、快照都在里面，绝不入库）
+data/
+*.db
+*.db-wal
+*.db-shm
+admin_password.txt
+
+# Python
+__pycache__/
+*.pyc
+
+# IDE / AI 工具 / 系统
+.workbuddy/
+.codebuddy/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

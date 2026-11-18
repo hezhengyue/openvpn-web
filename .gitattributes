@@ -1,0 +1,11 @@
+# 统一用 LF：这些脚本/代码最终要跑在 Linux 上，CRLF 会让 bash 报 "$'\r': command not found"
+* text=auto eol=lf
+
+# 二进制：不要做任何换行或文本处理
+*.tar.gz binary
+*.tgz binary
+*.whl binary
+*.png binary
+*.jpg binary
+bin/openvpn binary
+bin/openssl binary
