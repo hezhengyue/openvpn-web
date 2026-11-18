@@ -171,6 +171,9 @@ async function waitUp() {
       if (/Web 自身更新/.test(t)) errors.push('版本页仍显示 Web 自身更新文案');
       if (!/快照与回滚/.test(t)) errors.push('版本页缺少快照与回滚卡片');
       if (!/ta\.key/.test(t)) errors.push('快照说明没写清备份内容');
+      if (!/全备份与迁移/.test(t)) errors.push('版本页缺少全备份与迁移卡片');
+      if (!w.document.querySelector('#fbf')) errors.push('全备份卡片缺少上传备份包的输入框');
+      if (!/openvpn\//.test(t) || !/web\//.test(t)) errors.push('全备份说明没写清两块内容');
     } catch (e) { errors.push('版本页交互抛错: ' + e.message); }
 
     // 导入面板：密码策略开关

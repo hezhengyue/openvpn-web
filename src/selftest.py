@@ -14,6 +14,7 @@ import json
 import shutil
 import tempfile
 import subprocess
+import tarfile
 
 CODE = os.path.dirname(os.path.abspath(__file__))
 TMP = tempfile.mkdtemp(prefix="ovpnweb-selftest-")
@@ -23,6 +24,7 @@ os.environ["OVPN_WEB_PORT"] = "8899"
 sys.path.insert(0, CODE)
 
 import core          # noqa: E402
+import fullbackup    # noqa: E402
 import app as web    # noqa: E402
 
 PASS, FAIL = [], []
@@ -558,6 +560,77 @@ def main():
     snap = [b for b in core.list_backups() if b["kind"] == "snapshot"][-1]["path"]
     check("按钮直接恢复快照", P("/api/backups/restore", {"path": snap}).get_json()["ok"])
     core.init_db()
+
+    # ---------- 全备份 / 迁移 ----------
+    section("全备份与迁移")
+    core.add_user("备份用户", password="Test12345!", real_name="备份", dept="运维部")
+    core.write_all_config()
+    r = fullbackup.create("自检")
+    fp = r["path"]
+    check("全备份包已生成", os.path.isfile(fp) and r["size"] > 100)
+    info = fullbackup.preview(fp)
+    check("包内明确分成 openvpn / web 两块",
+          set(info["manifest"]["files"]) == {"openvpn", "web"}, info["manifest"].keys())
+    check("全备份标记 Web 版本", info["manifest"]["web_version"] == core.WEB_VERSION)
+    with tarfile.open(fp) as tf:
+        names = tf.getnames()
+    check("包内含纯 OpenVPN 材料", "openvpn/ccd/备份用户" in names and "openvpn/server.conf" in names)
+    check("包内含 Web 数据库", "web/openvpn-web.db" in names)
+    check("包内含中文恢复说明", "恢复说明.txt" in names)
+    check("全备份列表能列出", any(x["name"] == r["name"] for x in fullbackup.list_items()))
+    core.delete_user("备份用户")
+    check("恢复前测试账号已删", not any(u["username"] == "备份用户" for u in core.list_users()))
+    res = fullbackup.restore(fp, audit=False)
+    check("全备份恢复后账号回来", any(u["username"] == "备份用户" for u in core.list_users()))
+    check("恢复前自动打了保护快照", os.path.isdir(res["snapshot"]))
+    check("恢复后 ccd 也跟着回来", os.path.exists(os.path.join(core.CCD, "备份用户")))
+    # 坏包必须整包拒绝，绝不能写一半
+    wrong = os.path.join(TMP, "wrong.tar.gz")
+    wm = os.path.join(TMP, "wm.json")
+    with open(wm, "w") as f:
+        json.dump({"kind": "something-else"}, f)
+    with tarfile.open(wrong, "w:gz") as tf:
+        tf.add(wm, arcname="manifest.json")
+    try:
+        fullbackup.preview(wrong)
+        check("拒绝非全备份包", False)
+    except ValueError:
+        check("拒绝非全备份包", True)
+    evil = os.path.join(TMP, "evil.tar.gz")
+    em = os.path.join(TMP, "em.json")
+    with open(em, "w") as f:
+        json.dump({"kind": fullbackup.KIND, "format": fullbackup.FORMAT,
+                   "files": {"openvpn": {}, "web": {}}}, f)
+    xx = os.path.join(TMP, "xx.txt")
+    with open(xx, "w") as f:
+        f.write("x")
+    with tarfile.open(evil, "w:gz") as tf:
+        tf.add(em, arcname="manifest.json")
+        tf.add(xx, arcname="../../etc/passwd")
+        tf.add(xx, arcname="web/openvpn-web.db")
+    try:
+        fullbackup.preview(evil)
+        check("拒绝路径穿越的备份包", False)
+    except ValueError:
+        check("拒绝路径穿越的备份包", True)
+    # 接口层
+    j = P("/api/full-backup/create", {"tag": "接口"}).get_json()
+    check("接口生成全备份", j.get("ok") and os.path.isfile(j["path"]), j)
+    dl = c.get("/api/full-backup/download/" + j["name"], headers=H)
+    check("接口下载全备份", dl.status_code == 200 and dl.data[:2] == b"\x1f\x8b")
+    up = c.post("/api/full-backup/upload",
+                data={"file": (io.BytesIO(dl.data), j["name"])},
+                content_type="multipart/form-data", headers=H)
+    uj = up.get_json()
+    check("接口上传并预览备份包", uj.get("ok") and uj["preview"]["name"] == j["name"], uj)
+    check("接口列出全备份", any(x["name"] == j["name"]
+          for x in c.get("/api/full-backup/list").get_json()["items"]))
+    _dr = P("/api/full-backup/delete", {"name": j["name"]})
+    check("接口删除全备份", _dr.get_json().get("ok") is True,
+          (_dr.status_code, _dr.data[:200], j["name"]))
+    check("删除后列表不再有", not any(x["name"] == j["name"]
+          for x in c.get("/api/full-backup/list").get_json()["items"]))
+    core.delete_user("备份用户")
 
     print("\n" + "=" * 62)
     print(" 通过 %d 项 / 失败 %d 项" % (len(PASS), len(FAIL)))

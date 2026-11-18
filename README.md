@@ -61,6 +61,7 @@ openvpn-web/
 ├── src/                      运行时代码（打包后会被平铺到安装目录根）
 │   ├── app.py                Flask 主程序（路由 / 登录 / CSRF / 长任务调度）
 │   ├── core.py               核心逻辑（DB / 配置渲染 / ACL / 证书 / Excel / 指纹 / 快照）
+├── fullbackup.py         全备份与迁移（openvpn/ + web/ 两块，带 SHA-256 校验）
 │   ├── worker.py             特权执行器，sudo 白名单调用，动作白名单
 │   ├── setup.py              一键配置器（签 CA / 写配置 / 下发规则 / 起 openvpn / 建账号）
 │   ├── auth-verify.py        OpenVPN 认证脚本（fail-closed、失败锁定）
@@ -103,7 +104,7 @@ openvpn-web/
 ├── install.sh        一键安装
 ├── build-static-openvpn.sh  + vendor/static/   「上传源码自动编译」用
 ├── README.md
-└── data/             SQLite / 证书 / ccd / ovpn / 日志 / 快照 / 备份
+└── data/             SQLite / 证书 / ccd / ovpn / 日志 / 快照 / 备份 / full-backups（可迁移全备份）
 ```
 
 进程与权限：
@@ -415,7 +416,7 @@ cd /opt/openvpn-web-x86_64 && ./install.sh
 
 Web 程序自身不提供「上传更新包」入口（日常更新就是覆盖文件 / 重跑 `install.sh`）。后端 `/api/update/web` 接口仍保留，仅作为「改错代码把页面搞崩」时的远程救场通道：进程还活着就能 POST 一个 zip 换回 `app.py` / `core.py` / `index.html`（**不允许替换 root 执行的 `worker.py`**），`data/` 与 `bin/` 不受影响。
 
-### 快照与回滚（完整备份，不是只备一部分）
+### 快照与回滚（本机回滚用）
 
 改配置、升级二进制、导入台账、跑安装向导之前都会自动打快照，也可以点【立即打一份快照】手工打。**一份快照 = 当时的完整业务状态**：
 
@@ -428,6 +429,34 @@ Web 程序自身不提供「上传更新包」入口（日常更新就是覆盖�
 | 当前 `openvpn` 二进制 | |
 
 所以恢复之后是「回到那一刻」，客户端不用重发 ovpn。数据库走 SQLite 在线备份（不是复制 `.db` 文件），避免和后台任务抢锁。
+
+> 快照只存在**本机 `data/snapshots/`**，目的是「改错了退回去」。要下载、要搬到另一台机器，用下面的**全备份**。
+
+### 全备份与迁移（可下载、可跨机器恢复）
+
+「版本与更新 → 全备份与迁移」里点【下载全备份】，得到一个 tar.gz。**一个包分两块，各管各的**：
+
+| 块 | 内容 | 能做什么 |
+|---|---|---|
+| `openvpn/` | `ca.crt` / `ca.key` / `server.crt` / `server.key` / `ta.key` / `server.conf` / `company.ovpn` / `ccd/` | **不依赖本 Web 系统**。拷到任何 OpenVPN 服务器上，改一下配置里的绝对路径，`openvpn --config server.conf` 就能跑；客户端用 `company.ovpn` 连 |
+| `web/` | `openvpn-web.db`（账号、授权、白名单、审计、配置）、`web.secret`（会话签名）、`admin_password.txt`、`meta.json` | 装好 Web 后一键还原，管理密码、白名单、账号台账、授权全都不用重配 |
+
+包内有 `manifest.json`，每个文件带 SHA-256；还有一份中文《恢复说明.txt》。恢复前会**自动打一份本机快照**保护当前状态，包校验不过就整包拒绝，不会写一半。
+
+三种恢复方式，按场景选：
+
+1. **同一台 Web、界面上恢复**：把包拖进「检查备份包」→ 看摘要 → 点【确认恢复】。会重建规则并重启服务。
+2. **新机器迁移（推荐）**：先跑 `install.sh` 装好同版本 Web，把包 scp 上去，然后
+   ```bash
+   python3 app.py --restore-full /path/to/openvpn-web-full-xxx.tar.gz
+   systemctl restart openvpn-web
+   ```
+   恢复程序按目标机的目录重新生成 `server.conf` / `company.ovpn`，所以换目录也不用手改；在线用户可以继续用原来的 ovpn（CA 与 ta.key 一起恢复了）。
+3. **完全不用 Web**：只取 `openvpn/` 那一块，文件放到目标机的 OpenVPN 数据目录，`ccd/` 覆盖，手改配置里的证书路径后启动 `openvpn --config server.conf`。
+
+**安全提醒**：包里有 CA 私钥和 tls-crypt 静态密钥，拿到就等于拿到了整个 VPN 的身份。请加密保存，别放公网网盘。服务器只保留最近 10 份，下载到本地的自己管好。
+
+实测记录（测试机 10.255.114.16）：生成包 16 KB → 下载 → 造两个脏账号 → 分别用命令行和 Web 界面恢复 → 两个脏账号都撤回、`ccd` 与指纹一致、Web/VPN 服务正常。
 
 ### 服务端升级后，客户端要不要更新？
 
@@ -487,7 +516,7 @@ Web 程序自身不提供「上传更新包」入口（日常更新就是覆盖�
 
 ## 11. 验证情况与限制
 
-- `python3 src/selftest.py`（或装机后在安装目录 `python3 selftest.py`）：**216 项全通过**（Windows 上少 3 条 POSIX 专属用例，213 项）——配置渲染、双网络模式（默认 NAT / 无 NAT 溯源）与切换不改指纹、自建 NAT 链、IPv4 转发前提、证书签发、账号校验（含中文账号 + 中文 ccd + 改名时授权/用户组跟着搬）、动态地址池开关与地址冲突、认证脚本（放行/拒绝/锁定/fail-closed）、Excel 全量同步、ACL 默认拒绝与改 IP 不残留、客户端互访授权与过期过滤、跨大版本闸门、安装向导长任务、全部 API（含首页禁用缓存、网络模式切换、P2P 增删、下一个可用 IP、容量、白名单保存与「排除自己」拒绝、操作者名称、审计带 IP、按钮式保存/恢复默认/重签 CA）、二进制更新、快照回滚
+- `python3 src/selftest.py`（或装机后在安装目录 `python3 selftest.py`）：**235 项全通过**（Windows 上少 3 条 POSIX 专属用例，232 项）——配置渲染、双网络模式（默认 NAT / 无 NAT 溯源）与切换不改指纹、自建 NAT 链、IPv4 转发前提、证书签发、账号校验（含中文账号 + 中文 ccd + 改名时授权/用户组跟着搬）、动态地址池开关与地址冲突、认证脚本（放行/拒绝/锁定/fail-closed）、Excel 全量同步、ACL 默认拒绝与改 IP 不残留、客户端互访授权与过期过滤、跨大版本闸门、安装向导长任务、全部 API（含首页禁用缓存、网络模式切换、P2P 增删、下一个可用 IP、容量、白名单保存与「排除自己」拒绝、操作者名称、审计带 IP、按钮式保存/恢复默认/重签 CA）、二进制更新、快照回滚、全备份生成/下载/上传/恢复/删除与安全校验
 - 前端在 jsdom 里逐页真跑（`tests/smoke.js`），另有 `tests/shots.js` 用无头 Edge 截图肉眼核对版式
 - **真实环境实测（2026-11-18，Anolis 8.10 / OpenVPN 2.6.23 / TCP）**：建中文账号 `张三` → 服务端生成 `ccd/张三` → 客户端用中文账号认证通过 → `PUSH_REPLY ... ifconfig 10.8.0.2` 拿到台账固定 IP；白名单按来源判定：隧道内 IP 访问 `/api/state` = 403、`/self` = 200，白名单内网段可进后台，公网 IP 全 403
 

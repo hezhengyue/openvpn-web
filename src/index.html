@@ -945,12 +945,28 @@ async function reinitCA(){confirmAct('重新初始化 CA / tls-crypt',
   pollTask(j.task_id,ok=>{if(ok)toast('已重签，请重新导出 company.ovpn 并全员替换','ok')})},'确认重新签发')}
 
 /* ---------------- 版本与更新 ---------------- */
-async function pgUpdate(){const v=await get('/api/version'),b=await get('/api/backups'),be=(await get('/api/update/build-env')).env;
+async function pgUpdate(){const v=await get('/api/version'),b=await get('/api/backups'),
+ be=(await get('/api/update/build-env')).env,fb=await get('/api/full-backup/list'),fr=fb.items||[];
  $('#page').innerHTML=`<div class="grid">
   <div class="stat"><div class="n">${esc(v.version)}</div><div class="t">服务端版本</div></div>
   <div class="stat"><div class="n">${v.secure?'达标':'偏低'}</div><div class="t">安全线 ≥ ${esc(v.min_secure)}</div></div>
   <div class="stat"><div class="n">${esc(v.eol)}</div><div class="t">分支 EOL</div></div>
   <div class="stat"><div class="n">${esc(v.web_version)}</div><div class="t">Web 版本</div></div></div>
+ <div class="card"><h3>全备份与迁移 <small>一份包，分两块</small></h3>
+  <div class="hint">快照是本机回滚用的；<b>全备份可以下载、搬到另一台机器后直接使用</b>。一个 tar.gz 里分成两块：
+   <b>openvpn/</b> 是纯 OpenVPN 材料（CA、证书、ta.key、server.conf、company.ovpn、ccd），不依赖 Web，拷过去手工改路径就能跑；
+   <b>web/</b> 是 Web 自身状态（数据库、会话密钥、初始密码），装好 Web 后一条命令还原。</div>
+  <div class="bar"><button class="btn pri" onclick="fullSnap()">下载全备份</button>
+   <span class="muted">含 CA 私钥，等同 VPN 身份，请加密保管 · 服务器保留最近 10 份</span></div>
+  ${tbl(['备份包','生成时间','标记','大小','操作'],fr.slice(0,10).map(x=>[
+   '<span class="mono">'+esc(x.name)+'</span>',esc(x.created_at),esc(x.tag||'—'),
+   (x.size/1048576).toFixed(2)+' MB',
+   `<button class="btn sm" onclick="download('/api/full-backup/download/'+encodeURIComponent('${esc(x.name)}'))">下载</button>
+    <button class="btn sm danger" onclick="fullDel('${esc(x.name)}')">删除</button>`]),'还没有全备份，点上面按钮生成')}
+  <div class="bar" style="margin-top:12px"><input type="file" id="fbf" accept=".tar.gz">
+   <button class="btn" onclick="fullPreview()">检查备份包</button>
+   <span class="muted">恢复前会自动打一份快照保护当前状态</span></div>
+  <div id="fbres"></div></div>
  <div class="row"><div class="card"><h3>升级 OpenVPN <small>上传官方源码包，本机编译</small></h3>
   <div class="bar">${be.ok?badge('编译环境可用','ok'):badge('编译环境不完整','warn')}
    <span class="muted">${be.ok?'gcc / make / pkg-config 齐备，约 1~3 分钟':'缺 '+be.missing.join('、')}</span></div>
@@ -973,6 +989,27 @@ async function snapNow(){const j=await post('/api/backups',{tag:'手动'});toast
 function restore(p){confirmAct('恢复快照','将恢复配置、证书、台账与 ccd，并重建规则、重启服务。<b>当前状态会被覆盖</b>。',
  async()=>{await post('/api/backups/restore',{path:p});toast('已恢复','ok');pgUpdate()},'恢复此快照')}
 
+/* ---------------- 全备份与迁移 ---------------- */
+let FB={token:'',name:''};
+async function fullSnap(){const j=await post('/api/full-backup/create',{tag:'手动'});
+ toast('全备份已生成，正在下载','ok');
+ download('/api/full-backup/download/'+encodeURIComponent(j.name));setTimeout(()=>pgUpdate(),800)}
+async function fullDel(n){confirmAct('删除全备份','只删服务器上的这份包；你已经下载到本地的文件不受影响。',
+ async()=>{await post('/api/full-backup/delete',{name:n});toast('已删除','ok');pgUpdate()},'删除')}
+async function fullPreview(){const f=$('#fbf').files[0];if(!f){toast('请选择备份包','err');return}
+ try{const j=await upload('/api/full-backup/upload',f,{});FB.token=j.token;FB.name=j.preview.name;
+  const m=j.preview.manifest;
+  $('#fbres').innerHTML=`<div class="hint"><b>校验通过：</b>${esc(FB.name)} · Web ${esc(m.web_version||'—')} · ${esc(m.created_at||'')}
+   · openvpn ${j.preview.openvpn_files} 个文件 / web ${j.preview.web_files} 个文件。
+   <br>恢复会覆盖当前证书、台账与配置（当前状态会先自动打快照）。</div>
+   <div class="bar"><button class="btn danger" onclick="fullRestore()">确认恢复这份备份</button></div>`;
+ }catch(e){}}
+async function fullRestore(){if(!FB.token){toast('请先上传并检查备份包','err');return}
+ confirmAct('恢复全备份','将用 <b>'+esc(FB.name)+'</b> 覆盖当前 OpenVPN 证书、配置、ccd 与 Web 台账、白名单，并重建规则、重启服务。'
+  +'<br>当前状态会先自动打一份快照。在线用户会被断开，需要重新拨入。',
+  async()=>{const j=await post('/api/full-backup/restore',{token:FB.token});
+   toast(j.msg,'ok');setTimeout(()=>location.reload(),1800)},'确认恢复')}
+
 /* ---------------- 日志 ---------------- */
 /* 审计动作的中文名：库里存的是稳定 key（不随文案变），只在展示层翻译 */
 const ACTCN={
@@ -989,6 +1026,8 @@ const ACTCN={
  'grant.add':'新增授权','grant.delete':'删除授权',
  'ca.reinit':'重签 CA 与 tls-crypt','password.change':'修改管理密码','admin.rename':'修改操作者名称',
  'backup.create':'生成快照备份','backup.restore':'快照回滚',
+ 'backup.full_create':'生成全备份','backup.full_download':'下载全备份',
+ 'backup.full_delete':'删除全备份','backup.full_restore':'恢复全备份',
  'security.allow':'保存访问白名单',
  'update.source':'上传源码并编译','update.binary':'上传 OpenVPN 二进制','update.web':'更新 Web 自身',
  'wizard.params':'安装向导·参数','wizard.binary':'安装向导·二进制','setup.auto':'自动安装'

@@ -28,6 +28,7 @@ from flask import (Flask, request, session, jsonify, send_file, Response,
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import core  # noqa: E402
+import fullbackup  # noqa: E402
 
 ROOT = os.path.dirname(os.path.abspath(__file__))      # 代码所在目录
 PORT = int(os.environ.get("OVPN_WEB_PORT", "8800"))
@@ -1190,6 +1191,62 @@ def backups_restore():
     return ok({"msg": "已恢复快照并重启服务"})
 
 
+# --------------------------------------------------------------------------- 全备份 / 迁移
+@app.get("/api/full-backup/list")
+def full_backup_list():
+    return ok({"items": fullbackup.list_items()})
+
+
+@app.post("/api/full-backup/create")
+def full_backup_create():
+    d = request.get_json(silent=True) or {}
+    r = fullbackup.create(d.get("tag") or "手动")
+    core.log_audit("admin", "backup.full_create", r["name"])
+    return ok(r)
+
+
+@app.get("/api/full-backup/download/<name>")
+def full_backup_download(name):
+    path = os.path.join(fullbackup.FULL, name)
+    if os.path.basename(name) != name or not name.endswith(".tar.gz") or not os.path.isfile(path):
+        raise ValueError("备份包不存在")
+    core.log_audit("admin", "backup.full_download", name)
+    # 读完就关句柄：直接 send_file(path) 在 Windows 上会占着文件不放，
+    # 紧接着点「删除」会 PermissionError（Linux 没这个现象，但内存返回两边都稳）
+    with open(path, "rb") as f:
+        data = f.read()
+    return send_file(io.BytesIO(data), mimetype="application/gzip",
+                     as_attachment=True, download_name=name)
+
+
+@app.post("/api/full-backup/upload")
+def full_backup_upload():
+    """上传后只校验和预览，不落地到生产目录；确认后才恢复"""
+    f = request.files.get("file")
+    if not f:
+        raise ValueError("未选择备份包")
+    return ok(fullbackup.stage(f.read(), f.filename or ""))
+
+
+@app.post("/api/full-backup/restore")
+def full_backup_restore():
+    d = request.get_json(silent=True) or {}
+    path = fullbackup.staged_path(d.get("token", ""))
+    r = fullbackup.restore(path)
+    tid = uuid.uuid4().hex
+    sudo_worker(tid, "apply-rules")
+    sudo_worker(tid, "restart-vpn")
+    return ok({"msg": "全备份已恢复，服务正在重启", "result": r})
+
+
+@app.post("/api/full-backup/delete")
+def full_backup_delete():
+    name = (request.get_json(silent=True) or {}).get("name", "")
+    fullbackup.delete(name)
+    core.log_audit("admin", "backup.full_delete", name)
+    return ok()
+
+
 # --------------------------------------------------------------------------- 在线 / 日志 / 自检 / 路由
 
 @app.get("/api/online")
@@ -1259,6 +1316,17 @@ def main():
         sys.exit(0)
     if argv and argv[0] == "--allow-reset":
         print("新白名单: %s" % ", ".join(core.set_allow_list(core.local_subnets())))
+        sys.exit(0)
+    if argv and argv[0] == "--restore-full":
+        if len(argv) < 2:
+            print("用法: python3 app.py --restore-full /path/to/openvpn-web-full-xxx.tar.gz")
+            sys.exit(1)
+        core.init_db()
+        r = fullbackup.restore(argv[1], audit=False)
+        print("已从 %s 恢复：openvpn %d 个文件 / web %d 个文件（Web %s）"
+              % (r["name"], r["openvpn_files"], r["web_files"], r["web_version"]))
+        print("保护快照: %s" % r["snapshot"])
+        print("请重启服务: systemctl restart openvpn-web && systemctl restart openvpn")
         sys.exit(0)
     bootstrap_admin()
     print("=" * 60)
