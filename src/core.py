@@ -46,7 +46,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "1.3.1"
+WEB_VERSION = "1.3.2"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -1304,6 +1304,30 @@ def add_asset_item(gid, cidr, proto="any", ports="", note="", actor="web"):
     con.close()
     log_audit(actor, "assetitem.add", "组 %s ← %s %s %s" % (gid, r["cidr"], r["proto"], r["ports"]))
     return r
+
+
+def update_asset_item(iid, cidr=None, proto=None, ports=None, note=None, actor="web"):
+    """改已有条目的目标/协议/端口。去重时排除自己，否则「只改备注」会被自己挡住。"""
+    con = db()
+    row = con.execute("SELECT * FROM asset_items WHERE id=?", (iid,)).fetchone()
+    if not row:
+        con.close(); raise ValueError("条目不存在")
+    new_cidr, new_proto, new_ports = norm_item(
+        cidr if cidr is not None else row["cidr"],
+        proto if proto is not None else row["proto"],
+        ports if ports is not None else row["ports"])
+    dup = _find_dup_item(con, new_cidr, new_proto, new_ports, exclude_id=iid)
+    if dup:
+        con.close()
+        raise ValueError("「%s %s %s」在资产组「%s」里已经有一条一模一样的了"
+                         % (new_cidr, new_proto, new_ports or "全部端口", dup["gname"]))
+    new_note = note if note is not None else (row["note"] or "")
+    con.execute("UPDATE asset_items SET cidr=?,proto=?,ports=?,note=? WHERE id=?",
+                (new_cidr, new_proto, new_ports, new_note, iid))
+    con.commit(); con.close()
+    log_audit(actor, "assetitem.update",
+              "id=%s → %s %s %s" % (iid, new_cidr, new_proto, new_ports))
+    return {"id": iid, "cidr": new_cidr, "proto": new_proto, "ports": new_ports}
 
 
 def delete_asset_item(iid, actor="web"):

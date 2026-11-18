@@ -823,6 +823,15 @@ def asset_item_add(gid):
     return ok(r)
 
 
+@app.post("/api/asset-items/<int:iid>")
+def asset_item_update(iid):
+    d = request.get_json(silent=True) or {}
+    r = core.update_asset_item(iid, d.get("cidr"), d.get("proto"),
+                               d.get("ports"), d.get("note"))
+    after_change()
+    return ok(r)
+
+
 @app.delete("/api/asset-items/<int:iid>")
 def asset_item_del(iid):
     core.delete_asset_item(iid)

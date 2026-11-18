@@ -336,8 +336,13 @@ function expBtn(target){ // 到期时间快捷按钮，减少手输
       `<button type="button" class="btn sm" onclick="(function(){const d=new Date(Date.now()+${x[0]}*60000);const z=n=>String(n).padStart(2,'0');document.getElementById('${target}').value=d.getFullYear()+'-'+z(d.getMonth()+1)+'-'+z(d.getDate())+' '+z(d.getHours())+':'+z(d.getMinutes())})()">${x[1]}</button>`).join(' ')
     +`<button type="button" class="btn sm" onclick="document.getElementById('${target}').value=''">清除</button>`;
 }
-function tbl(cols,rows,empty){if(!rows||!rows.length)return '<div class="muted" style="padding:14px">'+(empty||'暂无数据')+'</div>';
- return '<div class="tbl"><table><thead><tr>'+cols.map(c=>'<th>'+esc(c)+'</th>').join('')+'</tr></thead><tbody>'+rows.map(r=>'<tr>'+r.map(x=>'<td>'+x+'</td>').join('')+'</tr>').join('')+'</tbody></table></div>'}
+function tbl(cols,rows,empty,pgKey,size,fn){
+ if(!rows||!rows.length)return '<div class="muted" style="padding:14px">'+(empty||'暂无数据')+'</div>';
+ let tail='';
+ if(pgKey){size=size||10;const total=rows.length,pages=Math.max(1,Math.ceil(total/size));
+  const p=Math.min(PG[pgKey]||0,pages-1);PG[pgKey]=p;
+  rows=rows.slice(p*size,(p+1)*size);tail=pager(pgKey,total,size,fn||'render')}
+ return '<div class="tbl"><table><thead><tr>'+cols.map(c=>'<th>'+esc(c)+'</th>').join('')+'</tr></thead><tbody>'+rows.map(r=>'<tr>'+r.map(x=>'<td>'+x+'</td>').join('')+'</tr>').join('')+'</tbody></table></div>'+tail}
 function badge(t,cls){return '<span class="tag '+(cls||'')+'">'+esc(t)+'</span>'}
 function chips(list,max){max=max||4;const a=(list||[]).map(x=>[x]);if(!a.length)return '<span class="muted">空</span>';
  const shown=a.slice(0,max).map(x=>'<span class="tag" style="margin:1px 2px">'+esc(x[0])+'</span>').join('');
@@ -363,7 +368,7 @@ function tagBulk(id){modal('批量粘贴 · '+(TAGS[id]||[]).length+' 条',
  ()=>{const t=$('#tbk').value.split(/[\s,，]+/).filter(Boolean);TAGS[id]=[...new Set(t)];tagRender(id)},'替换列表')}
 
 /* ---------------- 分页 / 复制 / 明文密码 ---------------- */
-const PG={users:0,ag:0,grants:0};
+const PG={users:0,ag:0,ug:0,grants:0,p2p:0,online:0,logs:0,backups:0,pki:0,selfcheck:0,userbackups:0,agitems:0};
 function setPage(k,n,fn){PG[k]=Math.max(0,n);window[fn]()}
 function pager(k,total,size,fn){const pages=Math.max(1,Math.ceil(total/size));const p=Math.min(PG[k]||0,pages-1);
  if(total<=size)return `<div class="pager">共 ${total} 条</div>`;
@@ -511,32 +516,34 @@ function cfgForm(c){c=c||S.cfg||{};const v=(k,d)=>esc(c[k]==null?(d||''):c[k]);
   <label class="f"><span>VPN 网段</span><input id="c_vpn_cidr" value="${v('vpn_cidr','10.8.0.0/24')}"></label>
   <label class="f"><span>tun-mtu</span><input type="number" id="c_tun_mtu" value="${v('tun_mtu',1400)}"></label>
  </div>
- <div class="sec" style="margin:0 0 14px">
-  <div class="sub">动态地址池（ifconfig-pool）<span style="opacity:.7">· 默认关闭</span></div>
-  <label class="f" style="margin-bottom:8px"><input type="checkbox" id="c_pool_on" ${c.pool_enabled?'checked':''} onchange="poolToggle()">
-   <span style="flex:1 1 auto;color:var(--muted-foreground);font-size:12.5px">启用：给不在台账里的临时连接兜底分地址（正常用不到）</span></label>
-  <div class="bar">
-   <input id="c_pool_start" value="${v('pool_start','10.8.0.2')}" placeholder="10.8.0.2" style="width:150px" ${c.pool_enabled?'':'disabled'}>
-   <span class="muted">~</span>
-   <input id="c_pool_end" value="${v('pool_end','10.8.0.9')}" placeholder="10.8.0.9" style="width:150px" ${c.pool_enabled?'':'disabled'}>
-  </div>
-  <div class="muted" id="poolinfo" style="font-size:12px"></div>
- </div>
  <div style="margin:0 0 14px">
   <div class="sub">附加推送路由 <span style="opacity:.7">· 回车加入，可粘贴多行</span></div>
   ${tagHtml('extra_routes','例如 10.20.0.0/16')}
   <div class="sub" style="margin-top:6px">VPN 网段 <b class="mono">${esc(c.vpn_cidr||'10.8.0.0/24')}</b> 自动下发，不用手工加。</div>
  </div>
- <div class="row3">
-  <label class="f"><span>DNS 例外</span><input id="c_dns" value="${c.dns?esc(c.dns.join(',')):''}" placeholder="只放通这些 IP 的 53 端口"></label>
-  <label class="f"><span>NTP 例外</span><input id="c_ntp" value="${c.ntp?esc(c.ntp.join(',')):''}" placeholder="只放通这些 IP 的 123 端口"></label>
- </div>
  <div class="sec"><div class="k">数据加密套件 <span style="color:var(--muted-foreground);opacity:.8">· 勾选的是「协商顺序表」，每条连接最终只用其中一个</span></div>
   <div class="cks">${CIPHERS.concat(extra.map(x=>[x,x,'自定义（保留原值）'])).map(([val,label,tip])=>
    `<label title="${esc(tip)}"><input type="checkbox" class="cck" value="${esc(val)}" ${have.includes(val)?'checked':''}> ${esc(label)}</label>`).join('')}</div></div>
  <details class="adv"${c.__adv?' open':''}>
-  <summary>高级选项 <span class="muted">默认值通常不用动</span></summary>
-  <div class="row3" style="margin-top:12px">
+  <summary>高级选项 <span class="muted">地址池 / DNS·NTP 例外 / 协议兼容</span></summary>
+  <div class="sub" style="padding:0 14px;margin-top:12px">动态地址池（ifconfig-pool） <span class="muted">· 默认关闭</span></div>
+  <div class="row3" style="grid-template-columns:1fr">
+   <label class="f"><input type="checkbox" id="c_pool_on" ${c.pool_enabled?'checked':''} onchange="poolToggle()">
+    <span style="flex:1 1 auto;color:var(--muted-foreground);font-size:12.5px">启用：给不在台账里的临时连接兜底分地址（正常用不到）</span></label>
+   <div class="bar">
+    <input id="c_pool_start" value="${v('pool_start','10.8.0.2')}" placeholder="10.8.0.2" style="width:150px" ${c.pool_enabled?'':'disabled'}>
+    <span class="muted">~</span>
+    <input id="c_pool_end" value="${v('pool_end','10.8.0.9')}" placeholder="10.8.0.9" style="width:150px" ${c.pool_enabled?'':'disabled'}>
+   </div>
+   <div class="muted" id="poolinfo" style="font-size:12px"></div>
+  </div>
+  <div class="sub" style="padding:0 14px;margin-top:10px">DNS / NTP 例外 <span class="muted">· 只放通指定 IP 的 53 / 123 端口</span></div>
+  <div class="row3">
+   <label class="f"><span>DNS 例外</span><input id="c_dns" value="${c.dns?esc(c.dns.join(',')):''}" placeholder="只放通这些 IP 的 53 端口"></label>
+   <label class="f"><span>NTP 例外</span><input id="c_ntp" value="${c.ntp?esc(c.ntp.join(',')):''}" placeholder="只放通这些 IP 的 123 端口"></label>
+  </div>
+  <div class="sub" style="padding:0 14px;margin-top:10px">协议与兼容</div>
+  <div class="row3">
    <label class="f"><span>最低 TLS</span><select id="c_tls_min">
      <option value="1.2" ${(c.tls_min||'1.2')==='1.2'?'selected':''}>TLS 1.2（推荐，兼容 2.4 以上客户端）</option>
      <option value="1.3" ${c.tls_min==='1.3'?'selected':''}>TLS 1.3（更严，老客户端会连不上）</option>
@@ -583,7 +590,7 @@ let ON={list:[],kw:''};
 async function pgOnline(){const j=await get('/api/online');ON.list=j.users||[];
  $('#page').innerHTML=`<div class="card"><h3>在线会话 <small>同账号只允许一处在线</small></h3>
  <div class="bar"><input id="okw" placeholder="搜索账号 / 固定 IP" value="${esc(ON.kw)}" style="width:220px"
-   oninput="ON.kw=this.value;renderOnline()">
+   oninput="ON.kw=this.value;PG.online=0;renderOnline()">
   <button class="btn" onclick="pgOnline()">刷新</button>
   <span class="muted" id="ocnt"></span></div>
  <div id="obox"></div>
@@ -600,7 +607,7 @@ function renderOnline(){
   u.vpn_ip==='未登记'?badge('未登记告警','err'):'<span class="mono">'+esc(u.vpn_ip)+'</span>',
   esc(u.real_addr),esc(u.bytes_recv),esc(u.bytes_sent),esc(u.since),
   '<button class="btn sm danger" onclick="kick(\''+esc(u.username)+'\')">踢下线</button>']),
-  kw?'没有匹配的会话':'当前没有在线会话');
+  kw?'没有匹配的会话':'当前没有在线会话','online',10,'renderOnline');
  const c=document.getElementById('ocnt');
  if(c)c.textContent='在线 '+ON.list.length+' 个'+(kw?'，匹配 '+list.length+' 个':'');
 }
@@ -643,16 +650,14 @@ function renderUsers(){
  const kw=(U.kw||'').trim().toLowerCase();
  const all=U.list.filter(u=>(U.state==='all'||(U.state==='on'?u.enabled:!u.enabled))&&
    (!kw||[u.username,u.real_name,u.dept,u.vpn_ip,u.note].some(x=>String(x||'').toLowerCase().includes(kw))));
- const rows=pageOf('users',all,20);
- box.innerHTML=tbl(['账号','姓名','部门','固定 IP','状态','备注','操作'],rows.map(u=>[
+ box.innerHTML=tbl(['账号','姓名','部门','固定 IP','状态','备注','操作'],all.map(u=>[
   '<b>'+esc(u.username)+'</b>',esc(u.real_name||''),esc(u.dept||''),
   '<span class="mono">'+esc(u.vpn_ip)+'</span>',
   u.enabled?badge('启用','ok'):badge('停用','warn'),esc(u.note||''),
   `<button class="btn sm" onclick="userEdit('${esc(u.username)}')">编辑</button>
    <button class="btn sm" onclick="userPwd('${esc(u.username)}')">改密</button>
    <button class="btn sm" onclick="userToggle('${esc(u.username)}',${u.enabled?0:1})">${u.enabled?'停用':'启用'}</button>
-   <button class="btn sm danger" onclick="userDel('${esc(u.username)}')">删除</button>`]),'没有匹配的账号')
-  +pager('users',all.length,20,'renderUsers')}
+   <button class="btn sm danger" onclick="userDel('${esc(u.username)}')">删除</button>`]),'没有匹配的账号','users',20,'renderUsers')}
 function userAdd(){modal('添加认证账号',`<label class="f"><span>账号</span><input id="u_name" placeholder="张三 或 zhangsan（支持中文）"></label>
  <label class="f"><span>姓名</span><input id="u_real" placeholder="用于台账检索"></label>
  <label class="f"><span>部门</span><input id="u_dept" placeholder="如 运维部"></label>
@@ -735,25 +740,26 @@ function renderAclBox(){const b=$('#aclbox');if(!b)return;
 function keepFocus(id){setTimeout(function(){const e=document.getElementById(id);if(e&&e.focus){e.focus();try{e.setSelectionRange(e.value.length,e.value.length)}catch(x){}}},0)}
 
 /* ---- 资产组 ---- */
+let AG_CUR=0;
+function agItemsPg(){if(AG_CUR)agItems(AG_CUR)}
 function agHtml(){
  const kw=(A.kw||'').toLowerCase();
  const hit=g=>!kw||[g.name,g.note].some(x=>String(x||'').toLowerCase().includes(kw))
    || g.items.some(i=>String(i.cidr).includes(kw));
- const list=A.ag.filter(hit),rows=pageOf('ag',list,10);
+ const list=A.ag.filter(hit);
  const totalItems=A.ag.reduce((s,g)=>s+g.items.length,0);
  return `<div class="card"><h3>资产组 <small>一组装多个目标，授权时整组给</small></h3>
  <div class="bar"><input id="agkw" placeholder="搜索组名 / 目标 IP" value="${esc(A.kw)}" style="width:220px"
    oninput="A.kw=this.value;PG.ag=0;renderAclBox();keepFocus('agkw')">
   <button class="btn pri" onclick="agNew()">新建资产组</button>
   <span class="muted">共 ${A.ag.length} 组 · ${totalItems} 条目标</span></div>
- ${tbl(['资产组','包含的目标','条目','操作'],rows.map(g=>[
+ ${tbl(['资产组','包含的目标','条目','操作'],list.map(g=>[
    '<b>'+esc(g.name)+'</b>'+(g.note?'<div class="muted">'+esc(g.note)+'</div>':''),
    `<a href="javascript:agItems(${g.id})">${chips(g.items.map(i=>i.cidr+' '+i.proto+(i.ports?' '+i.ports:'')),3)}</a>`,
    '<b>'+g.items.length+'</b>',
    `<button class="btn sm" onclick="agItems(${g.id})">管理条目</button>
     <button class="btn sm" onclick="agRename(${g.id})">改名</button>
-    <button class="btn sm danger" onclick="agDel(${g.id})">删除</button>`]),'还没有资产组，点【新建资产组】把要放行的 IP 一次贴进去')}
- ${pager('ag',list.length,10,'renderAclBox')}
+    <button class="btn sm danger" onclick="agDel(${g.id})">删除</button>`]),'还没有资产组，点【新建资产组】把要放行的 IP 一次贴进去','ag',10,'renderAclBox')}
  <div class="hint">同一个「目标 + 协议 + 端口」只允许存在一条：重复添加会被拒绝，并告诉你在哪个组里已经有了。目标可以写单个 IP（自动补 /32）或网段。</div></div>`}
 function agNew(){modal('新建资产组',
  `<label class="f"><span>组名</span><input id="agn" placeholder="如 核心数据库"></label>
@@ -764,10 +770,12 @@ function agNew(){modal('新建资产组',
  async()=>{const j=await post('/api/asset-groups',{name:$('#agn').value.trim(),lines:$('#agl').value,note:$('#agnote').value.trim()});
   toast('已创建，共 '+j.count+' 条目标','ok');await pgAcl()},'创建')}
 function agItems(id){const g=A.ag.find(x=>x.id===id);if(!g)return;
+ if(AG_CUR!==id){AG_CUR=id;PG.agitems=0}
  const rows=g.items.map(i=>[ '<span class="mono">'+esc(i.cidr)+'</span>',esc(i.proto),esc(i.ports||'全部'),
-   `<button class="btn sm danger" onclick="agItemDel(${i.id})">删除</button>`]);
+   `<button class="btn sm" onclick="agItemEdit(${id},${i.id})">编辑</button>
+    <button class="btn sm danger" onclick="agItemDel(${i.id})">删除</button>`]);
  modal('条目管理 · '+g.name,
-  tbl(['目标','协议','端口','操作'],rows,'这个组还是空的，加一条吧')
+  tbl(['目标','协议','端口','操作'],rows,'这个组还是空的，加一条吧','agitems',10,'agItemsPg')
   +`<div class="bar" style="margin-top:10px;flex-wrap:wrap"><input id="ni_cidr" placeholder="10.10.1.20 或 10.10.2.0/24" style="width:200px">
    <select id="ni_proto" style="width:90px"><option>any</option><option>tcp</option><option>udp</option><option>icmp</option></select>
    <input id="ni_ports" placeholder="端口，如 22,3389" style="width:150px">
@@ -777,6 +785,16 @@ function agItems(id){const g=A.ag.find(x=>x.id===id);if(!g)return;
 async function agItemAdd(id){try{await post('/api/asset-groups/'+id+'/items',
   {cidr:$('#ni_cidr').value.trim(),proto:$('#ni_proto').value,ports:$('#ni_ports').value.trim()});
   toast('已添加','ok');await pgAcl();agItems(id)}catch(e){}}
+function agItemEdit(gid,iid){const g=A.ag.find(x=>x.id===gid),it=g&&g.items.find(x=>x.id===iid);if(!it)return;
+ modal('编辑条目 · '+g.name,
+  `<label class="f"><span>目标 IP / 网段</span><input id="ei_cidr" value="${esc(it.cidr)}" placeholder="10.10.1.20 或 10.10.2.0/24"></label>
+  <div class="bar"><label class="f" style="min-width:120px"><span>协议</span><select id="ei_proto">
+   ${['any','tcp','udp','icmp'].map(p=>`<option ${it.proto===p?'selected':''}>${p}</option>`).join('')}</select></label>
+   <label class="f" style="flex:1"><span>端口</span><input id="ei_ports" value="${esc(it.ports||'')}" placeholder="22,3389 或 8000-9000，留空全部"></label></div>
+  <div class="hint">保存后立即重建防火墙规则。协议改成 any / icmp 时端口会被自动清空。</div>`,
+  async()=>{await post('/api/asset-items/'+iid,{cidr:$('#ei_cidr').value.trim(),
+   proto:$('#ei_proto').value,ports:$('#ei_ports').value.trim()});
+   toast('条目已更新，规则已重建','ok');await pgAcl();agItems(gid)},'保存')}
 async function agItemDel(iid){confirmAct('删除条目','该条目会从资产组里移除，所有通过这个组的授权立即失效对应规则。',
  async()=>{await del('/api/asset-items/'+iid);toast('已删除','ok');await pgAcl()},'删除')}
 function agRename(id){const g=A.ag.find(x=>x.id===id)||{};
@@ -794,7 +812,7 @@ function ugHtml(){
    || g.members.some(m=>String(m.username).includes(kw)||String(m.real_name||'').includes(kw)));
  return `<div class="card"><h3>用户组 <small>把几个人划成一组，授权时按组给</small></h3>
  <div class="bar"><input id="ugkw" placeholder="搜索组名 / 成员" value="${esc(A.gkw)}" style="width:220px"
-   oninput="A.gkw=this.value;renderAclBox();keepFocus('ugkw')">
+   oninput="A.gkw=this.value;PG.ug=0;PG.grants=0;renderAclBox();keepFocus('ugkw')">
   <button class="btn pri" onclick="ugNew()">新建用户组</button>
   <span class="muted">共 ${A.ug.length} 组</span></div>
  ${tbl(['用户组','成员','人数','操作'],list.map(g=>[
@@ -803,23 +821,23 @@ function ugHtml(){
    '<b>'+g.count+'</b>',
    `<button class="btn sm" onclick="ugEdit(${g.id})">编辑成员</button>
     <button class="btn sm" onclick="ugRename(${g.id})">改名</button>
-    <button class="btn sm danger" onclick="ugDel(${g.id})">删除</button>`]),'还没有用户组，点【新建用户组】勾几个账号')}
+    <button class="btn sm danger" onclick="ugDel(${g.id})">删除</button>`]),'还没有用户组，点【新建用户组】手动输入成员','ug',10,'renderAclBox')}
  <div class="hint">组内成员变动后，所有「组 → 资产组」的授权自动跟着变，不需要重新配权限。停用的账号不会产生规则，重新启用后自动恢复。</div></div>`}
-function userChecks(sel){
- return A.users.map(u=>`<label><input type="checkbox" class="mck" value="${esc(u.username)}" ${sel.includes(u.username)?'checked':''}>
-  <span>${esc(u.username)}${u.real_name?' · '+esc(u.real_name):''}<span class="muted"> ${esc(u.vpn_ip)}${u.enabled?'':' · 停用'}</span></span></label>`).join('')
-  || '<div class="muted">暂无账号，请先到「认证账号」里添加</div>'}
-function ugNew(){modal('新建用户组',`<label class="f"><span>组名</span><input id="ugn" placeholder="如 财务部 / 外包运维"></label>
- <div class="muted" style="margin-bottom:5px">选择成员</div><div class="cks" id="ugcks">${userChecks([])}</div>
+/* 成员手动输入：账号多时勾选列表会很长，改用标签输入（回车确认 / 批量粘贴） */
+function ugNew(){tagInit('ugm',[]);
+ modal('新建用户组',`<label class="f"><span>组名</span><input id="ugn" placeholder="如 财务部 / 外包运维"></label>
+ <div class="muted" style="margin:10px 0 5px">成员账号 <span style="opacity:.8">· 手动输入，回车确认；支持中文账号，可点【批量】一次粘贴多个</span></div>
+ ${tagHtml('ugm','输入账号名，回车')}
  <label class="f" style="margin-top:10px"><span>备注</span><input id="ugnote"></label>`,
- async()=>{const ms=[...document.querySelectorAll('.mck:checked')].map(x=>x.value);
-  const j=await post('/api/user-groups',{name:$('#ugn').value.trim(),members:ms,note:$('#ugnote').value.trim()});
+ async()=>{const j=await post('/api/user-groups',{name:$('#ugn').value.trim(),
+  members:(TAGS.ugm||[]).slice(),note:$('#ugnote').value.trim()});
   toast('已创建，'+j.count+' 人','ok');await pgAcl()},'创建')}
 function ugEdit(id){const g=A.ug.find(x=>x.id===id);if(!g)return;
- modal('编辑成员 · '+g.name,`<div class="muted" style="margin-bottom:5px">勾选即加入，取消即移出（共 ${A.users.length} 个账号）</div>
-  <div class="cks" id="ugcks">${userChecks(g.members.map(m=>m.username))}</div>`,
- async()=>{const ms=[...document.querySelectorAll('.mck:checked')].map(x=>x.value);
-  await post('/api/user-groups/'+id,{members:ms});toast('成员已更新，规则已重建','ok');await pgAcl()})}
+ tagInit('ugm',g.members.map(m=>m.username));
+ modal('编辑成员 · '+g.name,`<div class="muted" style="margin-bottom:5px">手动输入账号名，回车确认；不存在的账号保存时会明确报错</div>
+  ${tagHtml('ugm','输入账号名，回车')}`,
+ async()=>{await post('/api/user-groups/'+id,{members:(TAGS.ugm||[]).slice()});
+  toast('成员已更新，规则已重建','ok');await pgAcl()})}
 function ugRename(id){const g=A.ug.find(x=>x.id===id)||{};
  modal('改名 / 备注',`<label class="f"><span>组名</span><input id="ugn" value="${esc(g.name||'')}"></label>
   <label class="f"><span>备注</span><input id="ugnote" value="${esc(g.note||'')}"></label>`,
@@ -832,7 +850,6 @@ function ugDel(i){confirmAct('删除用户组','「组 → 资产组」的授权
 function grHtml(){
  const kw=(A.gkw||'').toLowerCase();
  const list=A.grants.filter(g=>!kw||[g.subject,g.asset_group].some(x=>String(x||'').toLowerCase().includes(kw)));
- const rows=pageOf('grants',list,12);
  const agopt=A.ag.map(g=>`<option value="${g.id}">${esc(g.name)}（${g.items.length} 条）</option>`).join('');
  const subj=A.users.map(u=>`<option value="${esc(u.username)}">${esc(u.username)}${u.real_name?' · '+esc(u.real_name):''} (${esc(u.vpn_ip)})</option>`).join('');
  return `<div class="card"><h3>授权 <small>「账号 或 用户组」→「资产组」，一次授一整组</small></h3>
@@ -846,7 +863,7 @@ function grHtml(){
  <div class="bar"><input id="gkw" placeholder="搜索主体 / 资产组" value="${esc(A.gkw)}" style="width:200px"
    oninput="A.gkw=this.value;PG.grants=0;renderAclBox();keepFocus('gkw')">
   <span class="muted">共 ${A.grants.length} 条授权 · 展开后 ${A.expanded} 条规则</span></div>
- ${tbl(['主体','类型','资产组','目标','覆盖账号','到期','操作'],rows.map(g=>[
+ ${tbl(['主体','类型','资产组','目标','覆盖账号','到期','操作'],list.map(g=>[
    '<b>'+esc(g.subject)+'</b>',
    g.subject_type==='group'?badge('用户组','warn'):badge('账号',''),
    esc(g.asset_group)+'<div class="muted">'+g.items+' 条目标</div>',
@@ -854,8 +871,7 @@ function grHtml(){
    g.subject_type==='group'?('<span class="mono">'+esc((g.members||[]).join('、'))+'</span><div class="muted">'+g.scope+' 个账号</div>')
      :'<span class="mono">'+esc(g.vpn_ip||'')+'</span>',
    g.expires_at?esc(g.expires_at):badge('长期','ok'),
-   `<button class="btn sm danger" onclick="grantDel(${g.id})">删除</button>`]),'还没有授权：上面选主体和资产组，点【添加授权】')}
- ${pager('grants',list.length,12,'renderAclBox')}
+   `<button class="btn sm danger" onclick="grantDel(${g.id})">删除</button>`]),'还没有授权：上面选主体和资产组，点【添加授权】','grants',12,'renderAclBox')}
  <div class="hint">临时授权到期自动失效；每次变更全量重建 iptables 链，立即生效、无需重连。<b>授权可以叠加</b>：一个人既在组里又被单独授权，取并集。</div></div>`}
 function syncSubj(){
  const t=$('#g_type').value,el=$('#g_subject');if(!el)return;
@@ -877,7 +893,7 @@ function p2pHtml(){const uopt=A.users.map(u=>`<option value="${esc(u.username)}"
   <div class="hint">不开 <span class="mono">client-to-client</span>：让客户端间流量照旧经过 FORWARD，按「固定 IP → 固定 IP」放行，纳入同一套授权与越权日志。</div>
   ${tbl(['源账号','目标账号','协议','端口','到期','操作'],(A.peers||[]).map(p=>[
     esc(p.src_username),esc(p.dst_username),esc(p.proto),esc(p.ports||'全部'),esc(p.expires_at||'长期'),
-    `<button class="btn sm danger" onclick="peerDel(${p.id})">删除</button>`]),'还没有互访授权')}
+    `<button class="btn sm danger" onclick="peerDel(${p.id})">删除</button>`]),'还没有互访授权','p2p',10,'renderAclBox')}
   <div class="bar" style="margin-top:10px"><select id="p_src">${uopt}</select><span>→</span><select id="p_dst">${uopt}</select>
    <select id="p_proto" style="width:80px"><option>any</option><option>tcp</option><option>udp</option><option>icmp</option></select>
    <input id="p_ports" placeholder="端口，留空全部" style="width:130px">
@@ -918,7 +934,7 @@ async function pgSettings(){const j=await get('/api/settings'),p=(await get('/ap
    ${p.length?tbl(['证书','主体','生效时间','到期时间','剩余','指纹 SHA256','操作'],p.map(c=>[esc(c.title),
      '<span class="mono">'+esc(c.subject)+'</span>',esc(c.not_before),esc(c.not_after),daysBadge(c.days_left),
      '<span class="mono">'+esc((c.fingerprint||'').split('=').pop().trim().slice(0,29))+'…</span>',
-     '<button class="btn sm" onclick="download(\'/api/pki/'+esc(c.name)+'\')">下载 PEM</button>'])):'<div class="hint warn">尚未生成证书，请先执行安装向导。</div>'}</div>
+     '<button class="btn sm" onclick="download(\'/api/pki/'+esc(c.name)+'\')">下载 PEM</button>']),null,'pki',10,'pgSettings'):'<div class="hint warn">尚未生成证书，请先执行安装向导。</div>'}</div>
   <div class="row"><div class="card"><h3>恢复默认参数</h3><div class="hint warn">会清空对外地址等参数。</div>
    <button class="btn danger" onclick="restoreDefault()">恢复默认</button></div>
   <div class="card"><h3>重新初始化 CA / tls-crypt</h3><div class="hint err">全员现有 company.ovpn 立即失效，必须重新分发。</div>
@@ -952,6 +968,14 @@ async function pgUpdate(){const v=await get('/api/version'),
   <div class="stat"><div class="n">${v.secure?'达标':'偏低'}</div><div class="t">安全线 ≥ ${esc(v.min_secure)}</div></div>
   <div class="stat"><div class="n">${esc(v.eol)}</div><div class="t">分支 EOL</div></div>
   <div class="stat"><div class="n">${esc(v.web_version)}</div><div class="t">Web 版本</div></div></div>
+ <div class="card"><h3>升级 OpenVPN <small>上传官方源码包，本机编译</small></h3>
+  <div class="bar">${be.ok?badge('编译环境可用','ok'):badge('编译环境不完整','warn')}
+   <span class="muted">${be.ok?'gcc / make / pkg-config 齐备，约 1~3 分钟':'缺 '+be.missing.join('、')}</span></div>
+  ${be.ok?`<div class="bar"><input type="file" id="upsrc" accept=".gz,.tgz"></div>
+   <div class="bar"><label style="font-size:12px"><input type="checkbox" id="upsrcmajor"> 允许跨大版本</label>
+    <button class="btn pri" onclick="upSource()">编译并更新</button></div><div id="uptask2"></div>`
+   :'<div class="hint warn">本机没有编译器：请在构建机上用 build/build-static-openvpn.sh 编好后，替换 <span class="mono">bin/openvpn</span> 再重启服务。</div>'}
+  <div class="muted">只换二进制不改配置指纹，客户端不用重新分发；编译失败会自动回滚到备份点。最近更新：${esc(v.last_update||'无')}</div></div>
  <div class="card"><h3>备份与恢复 <small>回滚 · 下载 · 迁移，同一套</small></h3>
   <div class="hint">改配置、升级前系统会自动打备份点（来源「自动」），也可以手工打一份（来源「手动」）。
    <b>两种备份都是同一个 tar.gz，都能在本机一键恢复，也都能下载搬到另一台机器。</b>
@@ -960,25 +984,17 @@ async function pgUpdate(){const v=await get('/api/version'),
   <div class="bar"><button class="btn pri" onclick="fullNow(false)">立即备份</button>
    <button class="btn" onclick="fullNow(true)">备份并下载</button>
    <span class="muted">含 CA 私钥，等同 VPN 身份，请加密保管 · 服务器保留最近 10 份</span></div>
-  ${tbl(['备份包','来源','生成时间','标记','大小','操作'],fr.slice(0,12).map(x=>[
+  ${tbl(['备份包','来源','生成时间','标记','大小','操作'],fr.map(x=>[
    '<span class="mono">'+esc(x.name)+'</span>',
    '<span class="muted">'+(x.origin==='auto'?'自动':'手动')+'</span>',
    esc(x.created_at),esc(x.tag||'—'),(x.size/1048576).toFixed(2)+' MB',
    `<button class="btn sm" onclick="download('/api/full-backup/download/'+encodeURIComponent('${esc(x.name)}'))">下载</button>
     <button class="btn sm" onclick="fullRestoreName('${esc(x.name)}')">恢复</button>
-    <button class="btn sm danger" onclick="fullDel('${esc(x.name)}')">删除</button>`]),'还没有备份，点上面按钮生成')}
+    <button class="btn sm danger" onclick="fullDel('${esc(x.name)}')">删除</button>`]),'还没有备份，点上面按钮生成','backups',10,'pgUpdate')}
   <div class="bar" style="margin-top:12px"><input type="file" id="fbf" accept=".tar.gz">
    <button class="btn" onclick="fullPreview()">检查备份包</button>
    <span class="muted">从别处迁移来的包：上传 → 校验 → 确认恢复；恢复前会自动打一份保护备份。</span></div>
-  <div id="fbres"></div></div>
- <div class="row"><div class="card"><h3>升级 OpenVPN <small>上传官方源码包，本机编译</small></h3>
-  <div class="bar">${be.ok?badge('编译环境可用','ok'):badge('编译环境不完整','warn')}
-   <span class="muted">${be.ok?'gcc / make / pkg-config 齐备，约 1~3 分钟':'缺 '+be.missing.join('、')}</span></div>
-  ${be.ok?`<div class="bar"><input type="file" id="upsrc" accept=".gz,.tgz"></div>
-   <div class="bar"><label style="font-size:12px"><input type="checkbox" id="upsrcmajor"> 允许跨大版本</label>
-    <button class="btn pri" onclick="upSource()">编译并更新</button></div><div id="uptask2"></div>`
-   :'<div class="hint warn">本机没有编译器：请在构建机上用 build/build-static-openvpn.sh 编好后，替换 <span class="mono">bin/openvpn</span> 再重启服务。</div>'}
-  <div class="muted">只换二进制不改配置指纹，客户端不用重新分发；编译失败会自动回滚到备份点。最近更新：${esc(v.last_update||'无')}</div></div></div>`}
+  <div id="fbres"></div></div>`}
 
 async function upSource(){const f=$('#upsrc').files[0];if(!f){toast('请选择 openvpn 源码包','err');return}
  confirmAct('上传源码并编译','将在本机编译 OpenVPN 源码并重启服务，<b>在线连接会断开并自动重连</b>。编译失败会自动回滚到备份点。',
@@ -1022,7 +1038,7 @@ const ACTCN={
  'network.nat':'切换网络模式','acl.mode':'切换 ACL 模式',
  'peer.add':'新增客户端互访','peer.delete':'删除客户端互访',
  'assetgroup.add':'新增资产组','assetgroup.update':'修改资产组','assetgroup.delete':'删除资产组',
- 'assetitem.add':'新增资产','assetitem.delete':'删除资产',
+ 'assetitem.add':'新增资产','assetitem.update':'修改资产','assetitem.delete':'删除资产',
  'usergroup.add':'新增用户组','usergroup.update':'修改用户组','usergroup.delete':'删除用户组',
  'grant.add':'新增授权','grant.delete':'删除授权',
  'ca.reinit':'重签 CA 与 tls-crypt','password.change':'修改管理密码','admin.rename':'修改操作者名称',
@@ -1052,9 +1068,9 @@ async function pgLogs(){const j=await get('/api/logs?kind='+LK);
    '<span title="'+esc(r.action)+'">'+esc(actCN(r.action))+'</span>',esc(r.detail)]});
  const cols={auth:['时间','账号','来源公网 IP','结果','原因'],server:['日志'],audit:['时间','操作者','操作者 IP','动作','详情'],
   deny:['时间','模式','源 IP','目标','端口','协议']}[LK];
- $('#page').innerHTML=`<div class="card"><h3>日志与审计</h3><div class="tabs">${tabs.map(t=>`<div class="tab ${LK===t[0]?'on':''}" onclick="LK='${t[0]}';pgLogs()">${t[1]}</div>`).join('')}</div>
+ $('#page').innerHTML=`<div class="card"><h3>日志与审计</h3><div class="tabs">${tabs.map(t=>`<div class="tab ${LK===t[0]?'on':''}" onclick="LK='${t[0]}';PG.logs=0;pgLogs()">${t[1]}</div>`).join('')}</div>
   <div class="bar"><button class="btn" onclick="pgLogs()">刷新</button><span class="muted">越权尝试（含观察模式）本身就是审计证据，DROP 前限流记录</span></div>
-  ${tbl(cols,rows)}</div>`}
+  ${tbl(cols,rows,null,'logs',20,'pgLogs')}</div>`}
 
 /* ---------------- 回程路由 / 自检 ---------------- */
 async function pgRoute(){const r=await get('/api/route-guide'),s=await get('/api/selfcheck');
@@ -1067,7 +1083,7 @@ async function pgRoute(){const r=await get('/api/route-guide'),s=await get('/api
  <h3 style="margin-top:18px">检查清单</h3><ul>${r.checklist.map(x=>'<li>'+esc(x)+'</li>').join('')}</ul></div>
  <div class="card"><h3>自检 <small>库里该是什么 vs 系统里实际是什么</small></h3>
   <div class="bar"><button class="btn" onclick="pgRoute()">重新自检</button></div>
-  ${tbl(['检查项','结果','说明'],s.items.map(i=>[esc(i.name),i.ok?badge('正常','ok'):badge('异常','err'),esc(i.detail)]))}</div>`}
+  ${tbl(['检查项','结果','说明'],s.items.map(i=>[esc(i.name),i.ok?badge('正常','ok'):badge('异常','err'),esc(i.detail)]),null,'selfcheck',10,'pgRoute')}</div>`}
 
 /* ---------------- 安全 ---------------- */
 let SEC={allow:[],detected:[],current_ip:''};
@@ -1098,7 +1114,7 @@ async function pgSecurity(){
    （或 <span class="mono">--allow-reset</span> 恢复成本机网段）。</div></div>
  <div class="row">
   <div class="card"><h3>台账备份 <small>每次账号变更自动生成</small></h3>
-   ${tbl(['时间','类型','文件'],b.backups.filter(x=>x.kind==='users').slice(0,12).map(x=>[esc(x.ts),esc(x.kind),'<span class="mono">'+esc(x.path)+'</span>']))}</div>
+   ${tbl(['时间','类型','文件'],b.backups.filter(x=>x.kind==='users').map(x=>[esc(x.ts),esc(x.kind),'<span class="mono">'+esc(x.path)+'</span>']),null,'userbackups',10,'pgSecurity')}</div>
   <div class="card"><h3>安全边界</h3><ul class="muted" style="line-height:1.9;padding-left:18px;margin:0">
    <li>纯 HTTP 内网页：按来源白名单放行 + 管理密码，PBKDF2 口令、签名 Cookie、CSRF、失败 5 次锁 10 分钟</li>
    <li>Web 以低权限用户运行，特权动作经 sudoers 白名单交给 worker</li>

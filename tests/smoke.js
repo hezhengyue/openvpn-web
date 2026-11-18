@@ -123,6 +123,21 @@ async function waitUp() {
       w.document.querySelector('#g_type').value = 'group';
       w.syncSubj();
       if (!w.document.querySelector('#g_subject').innerHTML.includes('运维组')) errors.push('切换用户组后主体列表没更新');
+      // 用户组成员改成手动输入（标签框），不再是一长串勾选框
+      w.aclTab('ug'); await wait(150);
+      w.ugNew(); await wait(150);
+      if (w.document.querySelector('.mck')) errors.push('用户组成员仍是勾选列表');
+      if (!w.document.querySelector('#tg_ugm')) errors.push('用户组成员缺少手动输入的标签框');
+      w.closeModal();
+      // 资产组条目可编辑
+      w.aclTab('ag'); await wait(150);
+      const agBtn = w.document.querySelector('#aclbox button[onclick*="agItems("]');
+      if (agBtn) {
+        agBtn.click(); await wait(150);
+        if (!w.document.querySelector('#mask').textContent.includes('编辑'))
+          errors.push('资产条目管理缺少编辑按钮');
+        w.closeModal();
+      }
     } catch (e) { errors.push('ACL 交互抛错: ' + e.message); }
 
     // 设置页：标签式路由、加密套件、自动算人数
@@ -144,6 +159,8 @@ async function waitUp() {
         if (adv.open) errors.push('高级选项默认应收起');
         if (!adv.querySelector('#c_tls_min') || !adv.querySelector('#c_compress'))
           errors.push('最低 TLS / 压缩 没放进高级折叠区');
+        if (!adv.querySelector('#c_pool_on') || !adv.querySelector('#c_dns') || !adv.querySelector('#c_ntp'))
+          errors.push('动态地址池 / DNS / NTP 例外没放进高级折叠区');
         if (adv.textContent.includes('undefined')) errors.push('高级区出现 undefined');
       }
       if (cfg.compress !== 'off') errors.push('readCfg 压缩默认值=' + cfg.compress);
@@ -176,7 +193,20 @@ async function waitUp() {
       if (!/openvpn\//.test(t) || !/web\//.test(t)) errors.push('备份说明没写清两块内容');
       if (!/立即备份/.test(t)) errors.push('备份卡片缺少手动备份入口');
       if (!/来源/.test(t)) errors.push('备份列表缺少来源标记');
+      const cards = [...w.document.querySelectorAll('#page > .card')];
+      const upIdx = cards.findIndex(c => c.textContent.includes('升级 OpenVPN'));
+      const bkIdx = cards.findIndex(c => c.textContent.includes('备份与恢复'));
+      if (upIdx < 0 || bkIdx < 0 || upIdx > bkIdx)
+        errors.push('升级 OpenVPN 卡片应在备份与恢复卡片上方');
+      if (w.document.querySelector('#page > .row'))
+        errors.push('版本页卡片仍被两栏 .row 包裹，未与备份卡片对齐');
     } catch (e) { errors.push('版本页交互抛错: ' + e.message); }
+
+    // 表格分页：在线会话页也要有分页条
+    try {
+      w.go('online'); await wait(400);
+      if (!w.document.querySelector('.pager')) errors.push('在线用户表格缺少分页条');
+    } catch (e) { errors.push('在线页交互抛错: ' + e.message); }
 
     // 导入面板：密码策略开关
     try {

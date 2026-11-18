@@ -502,6 +502,15 @@ def main():
     ag = P("/api/asset-groups", {"name": "API 资产组",
                                  "lines": "10.10.9.1 tcp 22\n10.10.9.2 tcp 22"}).get_json()
     check("资产组接口：一次建组+2 条目", ag.get("ok") and ag["count"] == 2, ag)
+    _ag = next(g for g in core.list_asset_groups() if g["name"] == "API 资产组")
+    _eid = _ag["items"][0]["id"]
+    check("编辑资产条目（IP/协议/端口）", P("/api/asset-items/" + str(_eid),
+          {"cidr": "10.10.9.9", "proto": "tcp", "ports": "3389"}).get_json().get("ok") is True)
+    _ag2 = next(g for g in core.list_asset_groups() if g["name"] == "API 资产组")
+    check("条目改动已落库", any(i["cidr"] == "10.10.9.9/32" and i["ports"] == "3389"
+                            for i in _ag2["items"]), _ag2["items"])
+    check("改成同组已有条目会被拒", P("/api/asset-items/" + str(_eid),
+          {"cidr": "10.10.9.2", "proto": "tcp", "ports": "22"}).get_json().get("ok") is not True)
     ug = P("/api/user-groups", {"name": "API 用户组", "members": ["lisi"]}).get_json()
     check("用户组接口建组", ug.get("ok") and ug["count"] == 1, ug)
     check("授权接口（用户组 → 资产组）", P("/api/grants", {"subject_type": "group", "subject": "API 用户组",
