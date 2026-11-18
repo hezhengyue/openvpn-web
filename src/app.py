@@ -976,6 +976,10 @@ def settings_reinit_ca():
 def settings_restore_default():
     core.snapshot("恢复默认前")
     for k, v in core.DEFAULT_CFG.items():
+        # 白名单/操作者这类「安全边界」不跟着服务端参数一起回默认值：
+        # 否则点一下「恢复默认」就把访问范围放大回所有私网。
+        if k in ("web_allow_cidr",):
+            continue
         core.set_meta(k, v)
     core.write_all_config()
     core.log_audit("admin", "settings.default", "恢复默认")

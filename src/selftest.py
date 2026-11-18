@@ -454,6 +454,9 @@ def main():
     check("改管理密码", P("/api/password", {"old": "TestPass123!", "new": "NewPass456!"}).get_json()["ok"])
     check("按钮式保存服务端设置", P("/api/settings", params).get_json()["ok"])
     check("按钮式恢复默认参数", P("/api/settings/restore-default", {}).get_json()["ok"])
+    check("恢复默认不会把白名单放大回所有私网",
+          "10.255.114.0/24" in core.allow_list() or "10.0.0.0/8" not in core.allow_list(),
+          core.allow_list())
 
     # ---------- 网络模式开关 / P2P 接口 ----------
     section("网络模式开关与 P2P 接口")
