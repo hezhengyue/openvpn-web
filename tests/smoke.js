@@ -70,7 +70,7 @@ async function waitUp() {
     if (!/忘记管理凭据/.test(html)) errors.push('登录页缺少重置凭据入口说明');
     if (!/async function doForce\(/.test(html)) errors.push('缺少首登改密提交逻辑 doForce');
     if (/function userPwd\(/.test(html)) errors.push('前端仍保留独立的改密弹窗 userPwd');
-    if (!/显示密码列/.test(html)) errors.push('账号页缺少【显示密码列】开关');
+    if (/显示密码列|togglePwCol/.test(html)) errors.push('账号页仍保留【显示密码列】开关');
     if (!/有效期/.test(html)) errors.push('账号页缺少有效期字段');
     const jar = {};
     const dom = new JSDOM(html, {url: base + '/', runScripts: 'dangerously', virtualConsole: vc,
@@ -249,34 +249,41 @@ async function waitUp() {
       if (ubtns.some(t => t === '踢')) errors.push('账号管理页操作列仍有「踢」按钮');
       if (ubtns.some(t => t === '改密')) errors.push('账号管理页操作列仍有独立的「改密」按钮');
       if (typeof w.userPwd !== 'undefined') errors.push('前端仍保留独立的 userPwd 改密入口');
-      // 密码默认不进显示列，点开关后才展开明文
+      // 账号列表不再提供显示密码列开关，密码只在编辑弹窗里查看
       if (/Passw0rd!23/.test(w.document.querySelector('#ubox').textContent))
-        errors.push('密码列默认就显示了明文（应默认隐藏）');
-      w.togglePwCol(); await wait(120);
-      if (!/Passw0rd!23/.test(w.document.querySelector('#ubox').textContent))
-        errors.push('点【显示密码列】后没看到明文密码');
-      w.togglePwCol(); await wait(120);
+        errors.push('账号列表里仍显示了明文密码');
+      if (typeof w.togglePwCol !== 'undefined') errors.push('仍保留 togglePwCol 显示密码列入口');
       // 添加账号：留空密码一次生成并直接保存，不再要求复制后二次确认
       w.userAdd(); await wait(100);
       w.document.querySelector('#u_name').value = '新建测试';
       w.document.querySelector('#mok').click(); await wait(1200);
       if (w.document.querySelector('#mask').style.display === 'flex')
         errors.push('添加账号保存后弹窗未关闭');
-      // 编辑弹窗：账号可改名、密码明文可见可改、有有效期
+      // 编辑弹窗：账号可改名、密码默认星号遮盖但可显示/生成/修改、有有效期
       w.userEdit('alice'); await wait(100);
       const uname = w.document.querySelector('#u_name');
       if (!uname) errors.push('编辑弹窗里没有「账号」输入框（应支持改名）');
       else if (uname.value !== 'alice') errors.push('编辑弹窗的账号没有回填: ' + uname.value);
       const inp = w.document.querySelector('#u_pw');
       if (!inp || inp.value !== 'Passw0rd!23') errors.push('编辑弹窗密码框未回填当前明文: ' + (inp && inp.value));
-      else if (inp.type === 'password') errors.push('编辑弹窗的密码框默认不可见');
+      else if (inp.type !== 'password') errors.push('编辑弹窗密码框默认未用星号遮盖');
       if (!w.document.querySelector('#u_exp')) errors.push('编辑弹窗缺少有效期输入框');
       const genBtn = [...w.document.querySelectorAll('#mbody button')].find(b => /生成随机密码/.test(b.textContent));
       if (!genBtn) errors.push('编辑弹窗缺少【生成随机密码】按钮');
       else {
         genBtn.click();
-        if (!w.document.querySelector('#u_pw').value || w.document.querySelector('#u_pw').value.length < 8)
-          errors.push('点生成后密码框没填上可见明文');
+        const pw2 = w.document.querySelector('#u_pw');
+        if (!pw2.value || pw2.value.length < 8) errors.push('点生成后密码框没填上明文');
+        else if (pw2.type !== 'password') errors.push('生成后密码框不再是星号遮盖');
+      }
+      const showBtn = [...w.document.querySelectorAll('#mbody button')].find(b => b.textContent.trim() === '显示');
+      if (!showBtn) errors.push('编辑弹窗缺少【显示】按钮');
+      else {
+        showBtn.click(); await wait(80);
+        if (w.document.querySelector('#u_pw').type !== 'text') errors.push('点【显示】后密码没有明文可见');
+        if (showBtn.textContent.trim() !== '隐藏') errors.push('点【显示】后按钮文字没变成【隐藏】');
+        showBtn.click(); await wait(80);
+        if (w.document.querySelector('#u_pw').type !== 'password') errors.push('点【隐藏】后密码没有恢复星号');
       }
       // 保存后不能再弹一次性密码页：密码留在台账里，列表/编辑随时可看
       w.document.querySelector('#u_pw').value = 'ResetPw12345!';

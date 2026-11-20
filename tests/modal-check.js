@@ -1,4 +1,4 @@
-// 真浏览器验证：编辑弹窗里点【生成随机密码】→ 密码明文在输入框 → 保存 → 不再弹二次密码页
+// 真浏览器验证：编辑弹窗密码框默认星号遮盖 → 生成后仍遮盖 → 点【显示】可见 → 保存 → 不再弹二次密码页
 // 用法：
 //   node modal-check.js                      # 本地 MOCK（账号 alice）
 //   SHOT_BASE=http://ip:8800 SHOT_PW=xxx MODAL_USER=会话 node modal-check.js
@@ -94,12 +94,13 @@ function cdp(method, params, sessionId) {
       fs.writeFileSync(path.join(OUT, name + '.png'), Buffer.from(r.data, 'base64'));
     };
 
-    await evalJs(`(async()=>{document.querySelector('#lp').value=${JSON.stringify(PW)};await doLogin();return 1})()`);
+    await evalJs(`(async()=>{document.querySelector('#lu').value='admin';document.querySelector('#lp').value=${JSON.stringify(PW)};await doLogin();return 1})()`);
     await sleep(1500);
     await evalJs(`go('users')`);
-    await sleep(900);
+    for (let i = 0; i < 40 && !(await evalJs(`U.list.length>0`)); i++) await sleep(250);
+    await sleep(300);
 
-    // 打开编辑弹窗 → 点「生成随机密码」→ 读回生成的密码
+    // 打开编辑弹窗 → 默认星号遮盖 → 点【生成随机密码】→ 仍遮盖 → 点【显示】才可见
     await evalJs(`userEdit(${JSON.stringify(USER)})`);
     await sleep(400);
     const pw = await evalJs(`(function(){
@@ -111,9 +112,16 @@ function cdp(method, params, sessionId) {
     if (pw === '__NO_BTN__') fails.push('编辑弹窗里找不到【生成随机密码】按钮');
     else if (!pw || pw.length < 8) fails.push('点生成后输入框没填上密码: ' + pw);
     else {
-      // 输入框必须是明文可见，不是 password 点
+      // 输入框默认必须是 password 类型（星号），生成后也保持遮盖
       const typ = await evalJs(`document.querySelector('#u_pw').type`);
-      if (typ === 'password') fails.push('生成后密码框仍是 password 类型，看不到值');
+      if (typ !== 'password') fails.push('密码框默认不是星号遮盖');
+      const shown = await evalJs(`(function(){
+        const b=[...document.querySelectorAll('#mbody button')].find(x=>x.textContent.trim()==='显示');
+        if(!b) return '__NO_BTN__';
+        b.click(); return document.querySelector('#u_pw').type;
+      })()`);
+      if (shown === '__NO_BTN__') fails.push('编辑弹窗里找不到【显示】按钮');
+      else if (shown !== 'text') fails.push('点【显示】后密码没有明文可见');
     }
     await shot('1-生成后');
 

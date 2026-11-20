@@ -113,7 +113,7 @@ function cdp(method, params, sessionId) {
     };
 
     await shot('00-login');
-    await evalJs(`(async()=>{document.querySelector('#lp').value='${PW}';await doLogin();return 1})()`);
+    await evalJs(`(async()=>{document.querySelector('#lu').value='admin';document.querySelector('#lp').value=${JSON.stringify(PW)};await doLogin();return 1})()`);
     await sleep(1500);
     for (const p of ['overview', 'online', 'users', 'acl', 'settings', 'update', 'logs', 'route', 'security']) {
       await evalJs(`go('${p}')`);
@@ -126,9 +126,10 @@ function cdp(method, params, sessionId) {
       await sleep(700);
       await shot('acl-' + (i + 2) + '-' + t);
     }
-    // 一个弹窗（账号编辑，内含明文密码框）看看表单排版
+    // 一个弹窗（账号编辑，内含星号遮盖的密码框）看看表单排版
     await evalJs(`go('users');a=0`);
-    await sleep(600);
+    for (let i = 0; i < 40 && !(await evalJs(`U.list.length>0`)); i++) await sleep(250);
+    await sleep(300);
     await evalJs(`userEdit('alice')`);
     await sleep(500);
     await shot('modal-pwd');

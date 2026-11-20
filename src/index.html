@@ -367,6 +367,13 @@ function genPw(){ // 一键生成随机密码，省得手输
   const a=new Uint32Array(16);crypto.getRandomValues(a);
   return Array.from(a,x=>cs[x%cs.length]).join('')
 }
+/* 密码框默认以 * 遮盖；切换只改 type 和按钮文字，输入框宽度固定，右边按钮不会跟着移动 */
+function togglePw(id,btn){
+  const e=document.getElementById(id);if(!e)return;
+  const reveal=e.type==='password';
+  e.type=reveal?'text':'password';
+  if(btn)btn.textContent=reveal?'隐藏':'显示';
+}
 function expBtn(target){ // 到期时间快捷按钮，减少手输
   return '<span class="muted">快捷：</span>'
     +[[120,'2小时'],[1440,'1天'],[10080,'7天'],[43200,'30天']].map(x=>
@@ -635,18 +642,17 @@ async function stopUser(n){
 }
 
 /* ---------------- 账号管理 ---------------- */
-let U={list:[],kw:'',state:'all',showPw:false};
+let U={list:[],kw:'',state:'all'};
 async function pgUsers(){const j=await get('/api/users');U.list=j.users;
  $('#page').innerHTML=`<div class="card"><h3>认证账号 <small>一人一账号一固定 IP；账号可中文；密码可查看 / 编辑 / 导出明文</small></h3>
  <div class="bar"><input type="text" id="ukw" placeholder="搜索账号 / 姓名 / 部门 / IP" value="${esc(U.kw)}" style="width:230px" oninput="U.kw=this.value;PG.users=0;renderUsers()">
  <select onchange="U.state=this.value;PG.users=0;renderUsers()"><option value="all">全部状态</option><option value="on" ${U.state==='on'?'selected':''}>启用</option><option value="off" ${U.state==='off'?'selected':''}>停用</option></select>
  <button class="btn pri" onclick="userAdd()">添加账号</button>
- <button class="btn" onclick="togglePwCol()">${U.showPw?'隐藏密码列':'显示密码列'}</button>
  <button class="btn" onclick="impOpen()">导入 Excel（全量覆盖）</button>
  <button class="btn" onclick="download('/api/users/export')">导出 Excel（全部账号）</button>
  <span class="muted">共 ${U.list.length} 个账号 · 列表全部显示，不分页</span></div>
  <div id="ubox"></div>
- <div class="hint">密码<b>默认不在列表里显示</b>，点【显示密码列】才展开明文；也可以在【编辑】里查看、生成、复制和修改。<br>
+ <div class="hint">密码<b>不在列表里显示</b>，请在【编辑】里查看、生成、复制和修改。<br>
  导入 / 导出<b>只针对全部账号</b>，不用也不提供「选中某个人」：导出是当前整张台账（含明文密码），导入是整张表覆盖同步（表里没有的账号会被删除，预览时可逐项核对）。<b>密码列必填，留空整批拒绝。</b><br>
  有效期写到日（YYYY-MM-DD），当天仍可用，<b>次日自动停用并断开在线会话</b>；留空表示长期有效。<br>
  固定 IP 由服务端下发，客户端改不了；改 IP 会自动重建 ACL 并断开该账号当前连接。<br>
@@ -654,20 +660,18 @@ async function pgUsers(){const j=await get('/api/users');U.list=j.users;
  员工自助改密：<span class="mono" id="selfurl"></span></div></div>`;
  renderUsers();
  setTimeout(function(){const e=document.getElementById('selfurl');if(e)e.textContent=location.origin+'/self'},0)}
-function togglePwCol(){U.showPw=!U.showPw;renderUsers()}
 function renderUsers(){
  const box=document.getElementById('ubox');if(!box)return;
  const kw=(U.kw||'').trim().toLowerCase();
  const all=U.list.filter(u=>(U.state==='all'||(U.state==='on'?u.enabled:!u.enabled))&&
    (!kw||[u.username,u.real_name,u.dept,u.vpn_ip,u.note,u.expires_at].some(x=>String(x||'').toLowerCase().includes(kw))));
- const heads=['账号','姓名','部门','固定 IP','有效期','状态','备注'].concat(U.showPw?['密码']:[]).concat(['操作']);
+ const heads=['账号','姓名','部门','固定 IP','有效期','状态','备注','操作'];
  const rows=all.map(u=>{
   const exp=u.expires_at||'';
   const expCell=exp?(new Date(exp+'T23:59:59')<new Date()?badge(exp+' 已到期','err'):'<span class="mono">'+esc(exp)+'</span>'):'<span class="muted">长期有效</span>';
   const row=['<b>'+esc(u.username)+'</b>',esc(u.real_name||''),esc(u.dept||''),
    '<span class="mono">'+esc(u.vpn_ip)+'</span>',expCell,
    u.enabled?badge('启用','ok'):badge('停用','warn'),esc(u.note||'')];
-  if(U.showPw)row.push('<span class="mono">'+esc(u.password_plain||'')+'</span>');
   row.push(`<button class="btn sm" onclick="userEdit('${esc(u.username)}')">编辑</button>
    <button class="btn sm" onclick="userToggle('${esc(u.username)}',${u.enabled?0:1})">${u.enabled?'停用':'启用'}</button>
    <button class="btn sm danger" onclick="userDel('${esc(u.username)}')">删除</button>`);
@@ -679,12 +683,17 @@ function userAdd(){modal('添加认证账号',`<label class="f"><span>账号</sp
  <label class="f"><span>部门</span><input id="u_dept" placeholder="如 运维部"></label>
  <label class="f"><span>固定 IP</span><input id="u_ip" placeholder="留空自动分配下一个可用">
    <button type="button" class="btn sm" onclick="fillNextIp('u_ip')">自动分配</button></label>
- <label class="f"><span>初始密码</span><input id="u_pw" placeholder="留空自动生成明文密码">
+ <label class="f"><span>初始密码</span>
+  <div class="bar" style="margin-bottom:0;flex-wrap:nowrap">
+   <input id="u_pw" type="password" placeholder="留空自动生成随机密码" autocomplete="new-password" style="flex:0 0 250px;width:250px">
    <button type="button" class="btn sm" onclick="document.getElementById('u_pw').value=genPw()">生成</button>
-   <button type="button" class="btn sm" onclick="copyText(document.getElementById('u_pw').value)">复制</button></label>
+   <button type="button" class="btn sm" onclick="togglePw('u_pw',this)">显示</button>
+   <button type="button" class="btn sm" onclick="copyText(document.getElementById('u_pw').value)">复制</button>
+  </div>
+  <span class="muted">默认以 * 遮盖，点【显示】查看；留空自动生成随机密码。</span></label>
  <label class="f"><span>有效期</span><input type="date" id="u_exp"><span class="muted" style="margin-left:8px">留空 = 长期有效；到期次日自动停用</span></label>
  <label class="f"><span>备注</span><input id="u_note"></label>
- <div class="hint">密码会以明文保存在台账里，可在列表【显示密码列】或【编辑】里随时查看、复制、修改；不再一次性弹窗。留空自动生成随机密码。</div>`,async()=>{
+ <div class="hint">密码以明文保存在台账里，可在【编辑】里随时查看、复制、修改；不再一次性弹窗。</div>`,async()=>{
  await post('/api/users',{username:$('#u_name').value.trim(),vpn_ip:$('#u_ip').value.trim(),
    password:$('#u_pw').value,expires_at:$('#u_exp').value,note:$('#u_note').value.trim(),
    real_name:$('#u_real').value.trim(),dept:$('#u_dept').value.trim()});
@@ -698,11 +707,14 @@ function userEdit(n){const u=U.list.find(x=>x.username===n)||{};
  <label class="f"><span>部门</span><input id="u_dept" value="${esc(u.dept||'')}"></label>
  <label class="f"><span>固定 IP</span><input id="u_ip" value="${esc(u.vpn_ip||'')}">
    <button type="button" class="btn sm" onclick="fillNextIp('u_ip')">换一个</button></label>
- <label class="f"><span>密码（明文，可直接修改）</span><input id="u_pw" type="text" value="${esc(u.password_plain||'')}" autocomplete="off">
-  <div class="bar"><button type="button" class="btn" onclick="document.getElementById('u_pw').value=genPw()">生成随机密码</button>
-  <button type="button" class="btn" onclick="var e=document.getElementById('u_pw');e.type=e.type==='password'?'text':'password'">显示 / 隐藏</button>
-  <button type="button" class="btn" onclick="copyText(document.getElementById('u_pw').value)">复制密码</button></div>
-  <span class="muted">框里就是当前生效的明文密码；改了再保存即重置，留空会报错。</span></label>
+ <label class="f"><span>密码（默认隐藏，可直接修改）</span>
+  <div class="bar" style="margin-bottom:0;flex-wrap:nowrap">
+   <input id="u_pw" type="password" value="${esc(u.password_plain||'')}" autocomplete="off" style="flex:0 0 250px;width:250px">
+   <button type="button" class="btn sm" onclick="document.getElementById('u_pw').value=genPw()">生成随机密码</button>
+   <button type="button" class="btn sm" onclick="togglePw('u_pw',this)">显示</button>
+   <button type="button" class="btn sm" onclick="copyText(document.getElementById('u_pw').value)">复制密码</button>
+  </div>
+  <span class="muted">框里是当前生效的密码，默认以 * 显示；点【显示】查看，改了再保存即重置，留空会报错。</span></label>
  <label class="f"><span>有效期</span><input type="date" id="u_exp" value="${esc(u.expires_at||'')}">
   <span class="muted" style="margin-left:8px">留空 = 长期有效；到期次日自动停用并断开</span></label>
  <label class="f"><span>备注</span><input id="u_note" value="${esc(u.note||'')}"></label>
