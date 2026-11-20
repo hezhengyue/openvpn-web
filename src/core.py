@@ -46,7 +46,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "1.3.12"
+WEB_VERSION = "1.3.13"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -1465,6 +1465,16 @@ def _clean_members(con, members):
             bad.append(m)
     if bad:
         raise ValueError("这些账号不存在：%s" % "、".join(bad))
+    return out
+
+
+def parse_member_lines(text):
+    """用户组批量输入：一行一个账号，和资产组「一行一条」保持同一种操作方式。"""
+    out = []
+    for raw in str(text or "").splitlines():
+        m = raw.strip()
+        if m and m not in out:
+            out.append(m)
     return out
 
 

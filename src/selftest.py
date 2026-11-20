@@ -629,6 +629,16 @@ def main():
           {"cidr": "10.10.9.2", "proto": "tcp", "ports": "22"}).get_json().get("ok") is not True)
     ug = P("/api/user-groups", {"name": "API 用户组", "members": ["lisi"]}).get_json()
     check("用户组接口建组", ug.get("ok") and ug["count"] == 1, ug)
+    check("用户组多行解析（一行一个、去重）",
+          core.parse_member_lines("张三\n 李四 \n张三\n\n") == ["张三", "李四"])
+    ug2 = P("/api/user-groups", {"name": "API 用户组多行",
+                                 "lines": "lisi\nzhangsan\nlisi\n   \n"}).get_json()
+    check("用户组接口：多行文本一次建组并去重", ug2.get("ok") and ug2["count"] == 2, ug2)
+    _ugid = next(g["id"] for g in core.list_user_groups() if g["name"] == "API 用户组多行")
+    P("/api/user-groups/" + str(_ugid), {"lines": "wangwu\nzhaoliu"})
+    check("用户组编辑同样用多行文本",
+          sorted(m["username"] for m in next(g for g in core.list_user_groups()
+                                             if g["id"] == _ugid)["members"]) == ["wangwu", "zhaoliu"])
     check("授权接口（用户组 → 资产组）", P("/api/grants", {"subject_type": "group", "subject": "API 用户组",
           "asset_group_id": ag["id"]}).get_json()["ok"])
     check("ACL 接口返回资产组/用户组", "asset_groups" in c.get("/api/acl").get_json()

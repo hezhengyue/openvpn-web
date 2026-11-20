@@ -272,7 +272,7 @@ pre::-webkit-scrollbar-thumb{background:oklch(.45 .02 250);background-clip:conte
 <script>
 /* 页面版本：每次升级手动同步 core.WEB_VERSION（selftest 会校验两者一致）。
    浏览器若缓存了旧 HTML（标签页常开不重载、或中间层缓存），靠这个跟服务端版本比对来自愈。 */
-const PAGE_VERSION='1.3.12';
+const PAGE_VERSION='1.3.13';
 const S={csrf:'',logged:false,cfg:null,page:'overview',task:null};
 const $=s=>document.querySelector(s);
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -416,7 +416,6 @@ function tagBulk(id){const c=TAG_BULK[id]||{};
  ()=>{const t=$('#tbk').value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);TAGS[id]=[...new Set(t)];tagRender(id)},'替换列表')}
 /* 不同标签输入框的批量提示，避免把账号/网段/路由混在一起 */
 const TAG_BULK={
- ugm:{hint:'一行一个<b>已存在的账号名</b>，支持中文账号；不是 IP／网段。写错的名字保存时会明确报出来。',ph:'张三\n李四\nwangwu'},
  extra_routes:{hint:'一行一个回程网段，格式 <span class="mono">10.20.0.0/16</span>；VPN 客户端会按这些网段走隧道。',ph:'10.20.0.0/16\n172.16.5.0/24'},
  web_allow:{hint:'一行一个来源 IP 或网段，例如 <span class="mono">10.20.30.0/24</span>；保存时不能删掉你当前的 IP。',ph:'10.20.30.0/24\n192.168.1.7'}
 };
@@ -860,20 +859,21 @@ function ugHtml(){
     <button class="btn sm" onclick="ugRename(${g.id})">改名</button>
     <button class="btn sm danger" onclick="ugDel(${g.id})">删除</button>`]),'还没有用户组，点【新建用户组】手动输入成员','ug',10,'renderAclBox')}
  <div class="hint">组内成员变动后，所有「组 → 资产组」的授权自动跟着变，不需要重新配权限。停用的账号不会产生规则，重新启用后自动恢复。</div></div>`}
-/* 成员手动输入：账号多时勾选列表会很长，改用标签输入（回车确认 / 批量粘贴） */
-function ugNew(){tagInit('ugm',[]);
- modal('新建用户组',`<label class="f"><span>组名</span><input id="ugn" placeholder="如 财务部 / 外包运维"></label>
- <div class="muted" style="margin:10px 0 5px">成员账号 <span style="opacity:.8">· 手动输入，回车确认；支持中文账号，可点【批量】一次粘贴多个</span></div>
- ${tagHtml('ugm','输入账号名，回车')}
- <label class="f" style="margin-top:10px"><span>备注</span><input id="ugnote"></label>`,
- async()=>{const j=await post('/api/user-groups',{name:$('#ugn').value.trim(),
-  members:(TAGS.ugm||[]).slice(),note:$('#ugnote').value.trim()});
+/* 用户组和资产组采用同一种输入方式：一行一个，只是内容换成账号名 */
+function ugNew(){modal('新建用户组',
+ `<label class="f"><span>组名</span><input id="ugn" placeholder="如 财务部 / 外包运维"></label>
+  <div class="muted" style="margin-bottom:5px">成员账号 <span style="opacity:.8">· 一行一个，可一次贴多个人</span></div>
+  <textarea id="ugl" style="width:100%;height:150px;font-family:ui-monospace,Menlo,Consolas,monospace" placeholder="张三&#10;李四&#10;wangwu"></textarea>
+  <div class="hint">统一格式：<span class="mono">用户名</span>，一行一个，支持中文账号；重复自动去重，不存在的账号保存时会明确报错。和资产组一样，先把成员一次贴进来再保存。</div>
+  <label class="f"><span>备注</span><input id="ugnote"></label>`,
+ async()=>{const j=await post('/api/user-groups',{name:$('#ugn').value.trim(),lines:$('#ugl').value,note:$('#ugnote').value.trim()});
   toast('已创建，'+j.count+' 人','ok');await pgAcl()},'创建')}
 function ugEdit(id){const g=A.ug.find(x=>x.id===id);if(!g)return;
- tagInit('ugm',g.members.map(m=>m.username));
- modal('编辑成员 · '+g.name,`<div class="muted" style="margin-bottom:5px">手动输入账号名，回车确认；不存在的账号保存时会明确报错</div>
-  ${tagHtml('ugm','输入账号名，回车')}`,
- async()=>{await post('/api/user-groups/'+id,{members:(TAGS.ugm||[]).slice()});
+ modal('编辑成员 · '+g.name,
+  `<div class="muted" style="margin-bottom:5px">成员账号 <span style="opacity:.8">· 一行一个，格式和「新建用户组」一样</span></div>
+   <textarea id="ugl" style="width:100%;height:200px;font-family:ui-monospace,Menlo,Consolas,monospace">${esc(g.members.map(m=>m.username).join('\n'))}</textarea>
+   <div class="hint">这里就是组内完整名单：要删人就从文本框里删掉那一行。重复自动去重，不存在的账号保存时会明确报错。</div>`,
+ async()=>{await post('/api/user-groups/'+id,{lines:$('#ugl').value});
   toast('成员已更新，规则已重建','ok');await pgAcl()})}
 function ugRename(id){const g=A.ug.find(x=>x.id===id)||{};
  modal('改名 / 备注',`<label class="f"><span>组名</span><input id="ugn" value="${esc(g.name||'')}"></label>

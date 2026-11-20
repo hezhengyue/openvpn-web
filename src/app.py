@@ -899,14 +899,16 @@ def asset_item_del(iid):
 @app.post("/api/user-groups")
 def user_group_add():
     d = request.get_json(silent=True) or {}
-    r = core.add_user_group(d.get("name", ""), d.get("note", ""), d.get("members") or [])
+    members = core.parse_member_lines(d.get("lines", "")) if "lines" in d else (d.get("members") or [])
+    r = core.add_user_group(d.get("name", ""), d.get("note", ""), members)
     return ok(r)
 
 
 @app.post("/api/user-groups/<int:gid>")
 def user_group_update(gid):
     d = request.get_json(silent=True) or {}
-    core.update_user_group(gid, d.get("name"), d.get("note"), d.get("members"))
+    members = core.parse_member_lines(d.get("lines", "")) if "lines" in d else d.get("members")
+    core.update_user_group(gid, d.get("name"), d.get("note"), members)
     after_change()
     return ok()
 

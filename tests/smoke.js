@@ -137,11 +137,12 @@ async function waitUp() {
       w.document.querySelector('#g_type').value = 'group';
       w.syncSubj();
       if (!w.document.querySelector('#g_subject').innerHTML.includes('运维组')) errors.push('切换用户组后主体列表没更新');
-      // 用户组成员改成手动输入（标签框），不再是一长串勾选框
+      // 用户组和资产组用同一种多行输入：一行一个账号，不再用标签芯片/批量弹窗
       w.aclTab('ug'); await wait(150);
       w.ugNew(); await wait(150);
       if (w.document.querySelector('.mck')) errors.push('用户组成员仍是勾选列表');
-      if (!w.document.querySelector('#tg_ugm')) errors.push('用户组成员缺少手动输入的标签框');
+      if (w.document.querySelector('#tg_ugm')) errors.push('用户组还在用标签框');
+      if (!w.document.querySelector('#ugl')) errors.push('用户组缺少多行成员输入框');
       w.closeModal();
       // 资产组条目可编辑
       w.aclTab('ag'); await wait(150);
