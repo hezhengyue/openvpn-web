@@ -405,6 +405,13 @@ def main():
     check("账号备份恢复前会再备份当前台账", os.path.exists(rs["backup"]))
     check("恢复动作审计用的是台账口径",
           any(r.get("action") == "user_backup.restore" for r in core.get_logs("audit", 200)))
+    from urllib.parse import quote as _q
+    _dl = c.get("/api/user-backups/download?path=" + _q(ub))
+    check("账号备份可下载成 Excel",
+          _dl.status_code == 200 and "spreadsheet" in (_dl.headers.get("Content-Type") or ""),
+          _dl.headers.get("Content-Type"))
+    check("备份下载路径越界被拒",
+          c.get("/api/user-backups/download?path=/etc/passwd").status_code == 400)
 
     # ---------- 公网 IP 识别 ----------
     section("对外地址自动识别")
