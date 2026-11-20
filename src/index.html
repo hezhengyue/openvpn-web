@@ -998,13 +998,15 @@ async function pgUpdate(){const v=await get('/api/version'),
   <div class="stat"><div class="n">${esc(v.version)}</div><div class="t">服务端版本</div></div>
   <div class="stat"><div class="n">${esc(v.web_version)}</div><div class="t">Web 版本</div></div></div>
  <div class="card"><h3>升级 OpenVPN <small>上传官方源码包，本机编译</small></h3>
-  <div class="bar">${be.ok?badge('编译环境可用','ok'):badge('编译环境不完整','warn')}
-   <span class="muted">${be.ok?'gcc / make / pkg-config 齐备，约 1~3 分钟':'缺 '+be.missing.join('、')}</span></div>
+  <div class="bar">${be.ok?badge('编译环境可用','ok'):badge('本机暂不能编译','warn')}
+   <span class="muted">${be.ok?'gcc / make / pkg-config 齐备，约 1~3 分钟':'缺 '+be.missing.join('、')}</span>
+   <button class="btn sm" onclick="recheckBuildEnv()">重新检测</button></div>
+  <div class="muted" style="font-size:12px;margin-bottom:6px">安装完成与服务启动时已自动检查${be.checked_at?'，最近一次：'+esc(be.checked_at):''}。补装工具后点【重新检测】即可刷新，无需重启。</div>
   ${be.ok?`<div class="bar"><input type="file" id="upsrc" accept=".gz,.tgz"></div>
    <div class="bar"><label style="font-size:12px"><input type="checkbox" id="upsrcmajor"> 允许跨大版本</label>
     <button class="btn pri" onclick="upSource()">编译并更新</button></div><div id="uptask2"></div>`
-   :'<div class="hint warn">本机没有编译器：请在构建机上用 build/build-static-openvpn.sh 编好后，替换 <span class="mono">bin/openvpn</span> 再重启服务。</div>'}
-  <div class="muted">只换二进制不改配置指纹，客户端不用重新分发；编译失败会自动回滚到备份点。最近更新：${esc(v.last_update||'无')}</div></div>
+   :'<div class="hint">本机没有编译工具，<b>不影响当前 OpenVPN 服务和客户端使用</b>，只是不能在这里从源码编译新版本。请在构建机上用 <span class="mono">build/build-static-openvpn.sh</span> 编好后，到下方或「备份与恢复」替换 <span class="mono">bin/openvpn</span> 再重启服务。</div>'}
+  <div class="muted">只换二进制不改配置指纹，客户端不用重新分发；编译失败会自动回滚到备份点。二进制最近更新：${esc(v.last_update||'无')}</div></div>
  <div class="card"><h3>备份与恢复 <small>回滚 · 下载 · 迁移，同一套</small></h3>
   <div class="hint">改配置、升级前系统会自动打备份点（来源「自动」），也可以手工打一份（来源「手动」）。
    <b>两种备份都是同一个 tar.gz，都能在本机一键恢复，也都能下载搬到另一台机器。</b>
@@ -1025,6 +1027,7 @@ async function pgUpdate(){const v=await get('/api/version'),
    <span class="muted">从别处迁移来的包：上传 → 校验 → 确认恢复；恢复前会自动打一份保护备份。</span></div>
   <div id="fbres"></div></div>`}
 
+async function recheckBuildEnv(){try{await get('/api/update/build-env?refresh=1');toast('已重新检测编译环境','ok');pgUpdate()}catch(e){}}
 async function upSource(){const f=$('#upsrc').files[0];if(!f){toast('请选择 openvpn 源码包','err');return}
  confirmAct('上传源码并编译','将在本机编译 OpenVPN 源码并重启服务，<b>在线连接会断开并自动重连</b>。编译失败会自动回滚到备份点。',
  async()=>{const j=await upload('/api/update/source',f,{allow_major:$('#upsrcmajor').checked?'1':'0'});

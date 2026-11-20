@@ -46,7 +46,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "1.3.9"
+WEB_VERSION = "1.3.10"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -2252,6 +2252,30 @@ def build_env():
         add("临时空间", True, "无法探测: %s" % e)
     missing = [i["name"] for i in items if not i["ok"]]
     return {"ok": not missing, "items": items, "missing": missing}
+
+
+BUILD_ENV_CACHE = "build_env_cache"
+BUILD_ENV_CHECKED_AT = "build_env_checked_at"
+
+
+def check_build_env(force=False):
+    """安装尾声 / 服务启动时检查本机能否源码编译 OpenVPN，结果连同时间落库。
+
+    以前只在打开版本页时才实时探测，用户会以为「升级时发现缺 gcc」是故障；
+    现在开机/装完就先查一遍并记下时间，版本页直接展示，不必等点开升级页。
+    force=True 用于「重新检测」：补装工具后无需重启即可刷新。
+    """
+    if not force:
+        cached = get_meta(BUILD_ENV_CACHE)
+        if isinstance(cached, dict) and cached.get("items"):
+            out = dict(cached)
+            out["checked_at"] = get_meta(BUILD_ENV_CHECKED_AT, "")
+            return out
+    env = build_env()
+    env["checked_at"] = now()
+    set_meta(BUILD_ENV_CACHE, env)
+    set_meta(BUILD_ENV_CHECKED_AT, env["checked_at"])
+    return env
 
 
 def check_binary(path, allow_major=False, expect_sha256=""):

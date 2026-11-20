@@ -303,6 +303,21 @@ for _ in $(seq 1 20); do
 done
 [ "$ok" = 1 ] || { say "错误: Web 未响应，执行 journalctl -u openvpn-web -n 50 查看原因"; exit 1; }
 
+# 安装尾声：本机能否源码编译 OpenVPN，提前查一遍并落库，避免日后到「升级」页才发现缺 gcc。
+# 这只是能力探测，不改任何配置或二进制；Web 启动时也会复查并写同样的缓存。
+BUILD_ENV="$("$PY" - <<'PYEOF' 2>/dev/null || true
+import os, sys
+sys.path.insert(0, os.environ.get("OVPN_WEB_ROOT", "/opt/openvpn-web"))
+import core
+e = core.check_build_env(force=True)
+if e["ok"]:
+    print("可用 · gcc / make / pkg-config 齐备")
+else:
+    print("不完整 · 缺 " + "、".join(e["missing"]) + "（不影响现有服务；可在构建机编好二进制后替换）")
+PYEOF
+)"
+[ -n "$BUILD_ENV" ] || BUILD_ENV="未探测到（可稍后在「版本与更新」页点【重新检测】）"
+
 IP="$("$PY" - <<'PYEOF' 2>/dev/null || true
 import subprocess, re
 try:
@@ -337,6 +352,7 @@ cat <<EOF
  管理账户:   admin
  管理密码:   $( [ "$NEWPW" = 1 ] && echo "admin（首次登录强制修改）" || echo "（沿用已有 data/admin_password.txt）" )
  OpenVPN:    ${VERSION:-未知版本}  监听 ${CLIENT_IP:-$IP}:1194
+ 本机编译:   ${BUILD_ENV}
  客户端配置: $DEST/data/company.ovpn   （全员共用，含 CA 与 tls-crypt）
  服务端配置: $DEST/data/server.conf
  日志:       journalctl -u openvpn-web -f   /   tail -f $DEST/data/openvpn.log

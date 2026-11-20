@@ -205,6 +205,10 @@ async function waitUp() {
       if (!/立即备份/.test(t)) errors.push('备份卡片缺少手动备份入口');
       if (!/来源/.test(t)) errors.push('备份列表缺少来源标记');
       if (/安全线|分支 EOL|达标|偏低/.test(t)) errors.push('版本页仍显示毫无作用的安全线/分支 EOL');
+      if (!/重新检测/.test(t)) errors.push('版本页编译环境缺少【重新检测】按钮');
+      if (!/安装完成与服务启动时已自动检查/.test(t))
+        errors.push('版本页没有说明编译环境在安装/启动已自动检查');
+      if (/编译环境不完整/.test(t)) errors.push('版本页仍用「编译环境不完整」制造故障错觉');
       const cards = [...w.document.querySelectorAll('#page > .card')];
       const upIdx = cards.findIndex(c => c.textContent.includes('升级 OpenVPN'));
       const bkIdx = cards.findIndex(c => c.textContent.includes('备份与恢复'));

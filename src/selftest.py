@@ -507,6 +507,18 @@ def main():
               "pool_start": "10.8.0.2", "pool_end": "10.8.0.9"}
     check("向导参数保存", P("/api/wizard/params", params).get_json()["ok"])
     check("环境自检 API", P("/api/wizard/check").get_json()["ok"])
+    # 编译环境在安装/启动时前置检查并落库，版本页直接读，不必等点开升级页
+    section("编译环境前置检查（安装/启动即查）")
+    be = core.check_build_env(force=True)
+    check("编译环境检查返回结构完整",
+          set(("ok", "items", "missing", "checked_at")).issubset(be.keys()), be)
+    check("检查结果写入缓存", isinstance(core.get_meta("build_env_cache"), dict))
+    check("检查时间写入缓存", bool(core.get_meta("build_env_checked_at")))
+    check("缓存带检查时间", bool(be.get("checked_at")))
+    check("版本页接口读缓存成功", c.get("/api/update/build-env").get_json()["ok"])
+    check("强制重新检测接口可用", c.get("/api/update/build-env?refresh=1").get_json()["ok"])
+    check("重新检测后时间不为空",
+          bool(c.get("/api/update/build-env").get_json()["env"].get("checked_at")))
     ex = P("/api/wizard/execute", {}).get_json()
     check("安装长任务启动", bool(ex.get("task_id")), ex)
     tj = wait_task(c, ex["task_id"])
@@ -514,7 +526,7 @@ def main():
     check("初始化标记写入", bool(core.get_meta("initialized")))
     check("向导后 company.ovpn 存在", os.path.exists(os.path.join(core.DATA, "company.ovpn")))
     for path in ("/api/state", "/api/users", "/api/acl", "/api/settings", "/api/settings/preview",
-                 "/api/version", "/api/online", "/api/logs?kind=audit", "/api/logs?kind=auth",
+                 "/api/version", "/api/update/build-env", "/api/online", "/api/logs?kind=audit", "/api/logs?kind=auth",
                  "/api/logs?kind=deny", "/api/route-guide", "/api/selfcheck", "/api/backups"):
         check("GET " + path, c.get(path).status_code == 200)
     check("导出 ovpn", c.get("/api/client.ovpn").status_code == 200)

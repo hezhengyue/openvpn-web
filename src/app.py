@@ -1117,12 +1117,16 @@ def update_binary():
 
 @app.get("/api/update/build-env")
 def update_build_env():
-    """给前端提前判断「能不能在本机编译源码」，避免传完 100MB 才失败。
+    """给前端判断「能不能在本机编译源码」。
 
-    注意不能直接把 build_env() 塞进 ok()：它自己带一个 "ok" 字段（表示环境是否可用），
-    会把外层的 ok=True 覆盖掉，前端就当成请求失败——恰恰是没有编译器的机器上必现。
+    安装尾声与服务启动时已检查过一遍并记下时间，这里默认直接读缓存；
+    补装 gcc 等工具后可带 ?refresh=1 现场重测（不必重启服务）。
+
+    注意不能直接把结果塞进 ok()：它自带 "ok" 字段（表示环境是否可用），
+    会把外层 ok=True 覆盖掉，前端就当成请求失败——恰恰是没编译器的机器上必现。
     """
-    return ok({"env": core.build_env()})
+    refresh = request.args.get("refresh") == "1"
+    return ok({"env": core.check_build_env(force=refresh)})
 
 
 SRC_RE = re.compile(r"^openvpn[-_](\d+\.\d+\.\d+)[^/]*\.(tar\.gz|tgz)$", re.I)
@@ -1143,9 +1147,9 @@ def update_source():
     if not m:
         raise ValueError("文件名需形如 openvpn-2.6.24.tar.gz（官方/GitHub 的源码发布包）")
     ver = m.group(1)
-    be = core.build_env()
+    be = core.check_build_env(force=True)  # 真正编译前现场复核，别用可能过期的缓存
     if not be["ok"]:
-        raise ValueError("本机缺少编译环境：%s。请改装「静态二进制」，或先补装这些工具。"
+        raise ValueError("本机缺少编译环境：%s。请改装「静态二进制」，或先补装这些工具后再点【重新检测】。"
                          % "、".join(be["missing"]))
     core.ensure_dirs()
     staged = os.path.join(core.STAGING, name)
@@ -1392,10 +1396,20 @@ def main():
         print("请重启服务: systemctl restart openvpn-web && systemctl restart openvpn")
         sys.exit(0)
     bootstrap_admin()
+    # 服务启动时先查一遍编译环境并落库：缺 gcc 不该等用户点开「升级」页才发现。
+    # 这里只是记录能力，不会改动任何 OpenVPN 配置或二进制，服务照常起。
+    try:
+        be = core.check_build_env(force=True)
+        build_env_line = ("可用（gcc / make / pkg-config 齐备）" if be["ok"]
+                          else "不完整 · 缺 " + "、".join(be["missing"]))
+    except Exception as e:
+        build_env_line = "检测失败: %s" % e
     print("=" * 60)
     print(" OpenVPN Web 一体化管理系统  v%s" % core.WEB_VERSION)
     print(" 监听  0.0.0.0:%s   (MOCK=%s)" % (PORT, MOCK))
     print(" 数据  %s" % core.DB_PATH)
+    print(" 本机编译环境: %s" % build_env_line)
+    print("   （仅影响「上传源码本机编译」；缺工具请用构建机编好二进制替换，不影响现有服务）")
     print("=" * 60)
     # 显式单线程、关 reloader/debug：避免双进程同时全量重建 iptables 链
     app.run(host="0.0.0.0", port=PORT, threaded=False, use_reloader=False, debug=False)
