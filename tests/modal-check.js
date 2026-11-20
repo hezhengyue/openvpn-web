@@ -1,8 +1,8 @@
-// 真浏览器验证：改密弹窗里点【生成随机密码】→ 密码明文在输入框 → 保存 → 不再弹二次密码页
+// 真浏览器验证：编辑弹窗里点【生成随机密码】→ 密码明文在输入框 → 保存 → 不再弹二次密码页
 // 用法：
 //   node modal-check.js                      # 本地 MOCK（账号 alice）
 //   SHOT_BASE=http://ip:8800 SHOT_PW=xxx MODAL_USER=会话 node modal-check.js
-// 背景：早期保存后会再弹一个大字密码窗，用户要求去掉；生成阶段仍必须在输入框里看得见、复制得到。
+// 背景：早期保存后会再弹一个大字密码窗，用户要求去掉；改密已并入编辑，密码存台账明文。
 const {spawn, execSync} = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -99,8 +99,8 @@ function cdp(method, params, sessionId) {
     await evalJs(`go('users')`);
     await sleep(900);
 
-    // 打开改密弹窗 → 点「生成随机密码」→ 读回生成的密码
-    await evalJs(`userPwd(${JSON.stringify(USER)})`);
+    // 打开编辑弹窗 → 点「生成随机密码」→ 读回生成的密码
+    await evalJs(`userEdit(${JSON.stringify(USER)})`);
     await sleep(400);
     const pw = await evalJs(`(function(){
       const b=[...document.querySelectorAll('#mbody button')].find(x=>/生成随机密码/.test(x.textContent));
@@ -108,7 +108,7 @@ function cdp(method, params, sessionId) {
       b.click();
       return document.querySelector('#u_pw').value;
     })()`);
-    if (pw === '__NO_BTN__') fails.push('改密弹窗里找不到【生成随机密码】按钮');
+    if (pw === '__NO_BTN__') fails.push('编辑弹窗里找不到【生成随机密码】按钮');
     else if (!pw || pw.length < 8) fails.push('点生成后输入框没填上密码: ' + pw);
     else {
       // 输入框必须是明文可见，不是 password 点

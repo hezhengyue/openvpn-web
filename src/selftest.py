@@ -15,6 +15,7 @@ import shutil
 import tempfile
 import subprocess
 import tarfile
+from datetime import datetime, timedelta
 
 CODE = os.path.dirname(os.path.abspath(__file__))
 TMP = tempfile.mkdtemp(prefix="ovpnweb-selftest-")
@@ -185,9 +186,15 @@ def main():
     u2 = core.add_user("lisi", "10.8.0.11", real_name="李四", dept="财务部")
     check("自动分配 10.8.0.2", u1["vpn_ip"] == "10.8.0.2")
     check("姓名/部门入库", core.list_users()[0]["real_name"] in ("张三", "李四"))
+    byname = {u["username"]: u for u in core.list_users()}
+    check("新建账号带明文密码", byname["zhangsan"]["password_plain"] == u1["password"])
+    check("默认长期有效", byname["zhangsan"]["expires_at"] == "")
     # 账号名允许中文（OpenVPN 的 common name 就是原始字节，ccd 文件名跟着走）
     u_cn = core.add_user("张三", real_name="张三", dept="运维部")
     check("账号名可以是中文", u_cn["username"] == "张三")
+    core.update_user("张三", password="PlainPass1234")
+    check("改密同步明文", [u for u in core.list_users()
+                       if u["username"] == "张三"][0]["password_plain"] == "PlainPass1234")
     core.rebuild_ccd()
     check("中文账号生成 ccd（中文文件名）", os.path.exists(os.path.join(core.CCD, "张三")))
     for bad in ("a/b", "张 三", "..", ".", "x" * 33, ""):
@@ -305,50 +312,65 @@ def main():
     check("认证日志已落库", len(core.get_logs("auth")) >= 7)
 
     # ---------- Excel 全量同步 ----------
-    section("Excel 导入导出（唯一表格格式）")
+    section("Excel 导入导出（明文密码 / 有效期）")
     name, data, mime = core.export_users("xlsx")
     check("导出 xlsx", data[:2] == b"PK" and "sheet" in mime)
     _, csvdata, _ = core.export_users("csv")
-    head = csvdata.decode("utf-8-sig").splitlines()[0]
-    check("表头含姓名/部门", "姓名" in head and "部门" in head)
-    rows = [["用户名", "姓名", "部门", "密码", "VPN固定IP", "状态", "备注"],
-            ["zhangsan", "", "", "", "10.8.0.12", "启用", ""],
-            ["lisi", "", "", "", "10.8.0.11", "启用", ""],
-            ["wangwu", "王五", "外包", "", "10.8.0.13", "启用", "外包"]]
+    text = csvdata.decode("utf-8-sig")
+    head = text.splitlines()[0]
+    check("表头含姓名/部门/密码/有效期",
+          all(k in head for k in ("姓名", "部门", "密码", "有效期")))
+    check("导出带明文密码", u1["password"] in text)
+    # 空密码整批拒绝：先测解析层，再确认没有落盘
+    empty_rows = [["用户名", "姓名", "部门", "密码", "VPN固定IP", "状态", "有效期", "备注"],
+                  ["zhangsan", "", "", "", "10.8.0.12", "启用", "", ""]]
+    b = io.StringIO(); csv.writer(b).writerows(empty_rows)
+    try:
+        core.preview_import(("\ufeff" + b.getvalue()).encode(), "空密码.csv")
+        check("密码为空整批拒绝", False)
+    except ValueError as e:
+        check("密码为空整批拒绝", "密码为空" in str(e), e)
+    rows = [["用户名", "姓名", "部门", "密码", "VPN固定IP", "状态", "有效期", "备注"],
+            ["zhangsan", "", "", "ImpPass1234", "10.8.0.12", "启用", "", ""],
+            ["lisi", "", "", "ImpPass5678", "10.8.0.11", "启用", "2027-01-31", ""],
+            ["wangwu", "王五", "外包", "ImpPass9012", "10.8.0.13", "启用", "", "外包"]]
     buf = io.StringIO(); w = csv.writer(buf); w.writerows(rows)
     imp = core.preview_import(("\ufeff" + buf.getvalue()).encode(), "台账.csv")
     check("导入预览列出新增", any(x["op"] == "新增" and x["username"] == "wangwu" for x in imp["changes"]))
     check("预览令牌有效期 300s", imp["expires_in"] == 300)
-    # 按钮式提交：无需任何确认词，预览令牌仍在 5 分钟内防重放
     applied = core.apply_import(imp["token"])
     check("按钮式提交导入 3 个账号", applied["count"] == 3)
     check("导入带进姓名/部门", [u for u in core.list_users() if u["username"] == "wangwu"][0]["dept"] == "外包")
-    check("自动生成初始密码文件", bool(applied["initial_password_file"]))
+    check("导入后明文密码落库", [u for u in core.list_users()
+                           if u["username"] == "zhangsan"][0]["password_plain"] == "ImpPass1234")
+    check("导入后有效期落库", [u for u in core.list_users()
+                           if u["username"] == "lisi"][0]["expires_at"] == "2027-01-31")
+    check("不再生成一次性密码文件", not applied["initial_password_file"])
     check("导入自动备份台账", os.path.exists(applied["backup"]))
     try:
         core.apply_import("invalid-token"); check("无效预览令牌被拒", False)
     except ValueError:
         check("无效预览令牌被拒", True)
     bad = io.StringIO(); bw = csv.writer(bad)
-    bw.writerows(rows[:1] + [["wangwu", "", "", "", "10.8.0.13", "启用", ""],
-                             ["x", "", "", "", "10.8.0.13", "启用", ""]])
+    bw.writerows(rows[:1] + [["wangwu", "", "", "IpDup1234", "10.8.0.13", "启用", "", ""],
+                             ["x", "", "", "IpDup5678", "10.8.0.13", "启用", "", ""]])
     try:
         core.preview_import(bad.getvalue().encode(), "bad.csv"); check("IP 重复整批拒绝", False)
     except ValueError:
         check("IP 重复整批拒绝", True)
 
-    # ---------- Excel 导入的密码策略（有则覆盖 / 空则保留 / 可选重置） ----------
-    section("Excel 导入密码策略")
+    # ---------- 密码覆盖 / 有效期自动停用 ----------
+    section("密码覆盖与有效期自动停用")
     def _hash(n):
         con = core.db()
         r = con.execute("SELECT password_hash FROM users WHERE username=?", (n,)).fetchone()
         con.close()
         return r["password_hash"] if r else None
 
-    all_rows = [["用户名", "姓名", "部门", "密码", "VPN固定IP", "状态", "备注"],
-                ["zhangsan", "张三", "运维部", "", "10.8.0.12", "启用", ""],
-                ["lisi", "李四", "运维部", "", "10.8.0.11", "启用", ""],
-                ["wangwu", "王五", "外包", "KeepMe1234", "10.8.0.13", "启用", "外包"]]
+    all_rows = [["用户名", "姓名", "部门", "密码", "VPN固定IP", "状态", "有效期", "备注"],
+                ["zhangsan", "张三", "运维部", "NewPass1234", "10.8.0.12", "启用", "", ""],
+                ["lisi", "李四", "运维部", "KeepMe1234", "10.8.0.11", "启用", "", ""],
+                ["wangwu", "王五", "外包", "KeepMe5678", "10.8.0.13", "启用", "", "外包"]]
 
     def _imp(rows, **kw):
         b = io.StringIO()
@@ -357,26 +379,38 @@ def main():
         return core.apply_import(p["token"], **kw)
 
     h_zs = _hash("zhangsan")
-    r1 = _imp(all_rows)
-    check("密码列留空 -> 原密码不变", _hash("zhangsan") == h_zs)
-    check("留空账号进 kept 清单", "zhangsan" in r1["kept"] and "lisi" in r1["kept"])
-    check("全部留空时不产生新密码", r1["initial"] == [])
-
-    # 表里给了密码 -> 覆盖
-    rows_pw = [r[:] for r in all_rows]
-    rows_pw[1][3] = "NewPass1234"
-    r2 = _imp(rows_pw)
-    check("表里有密码 -> 覆盖原密码", _hash("zhangsan") != h_zs)
+    _imp(all_rows)
+    check("表里密码覆盖哈希", _hash("zhangsan") != h_zs)
     check("覆盖后新密码可用", core.verify_password("NewPass1234", _hash("zhangsan")))
-    check("覆盖的账号不在 kept 里", "zhangsan" not in r2["kept"])
+    check("明文同步为表中值", [u for u in core.list_users()
+                          if u["username"] == "zhangsan"][0]["password_plain"] == "NewPass1234")
 
-    # 老账号密码已经没人知道 -> 勾「空密码也重置」，一次拿到全部新密码
-    h_now = _hash("zhangsan")
-    r3 = _imp(all_rows, reset_empty=True)
-    check("勾选后空密码也重置", _hash("zhangsan") != h_now)
-    check("重置结果带明文密码", any(x["username"] == "zhangsan" for x in r3["initial"]))
-    check("重置后 kept 为空", r3["kept"] == [])
-    check("重置密码文件落盘", bool(r3["initial_password_file"]))
+    bad_exp = [r[:] for r in all_rows]
+    bad_exp[1][6] = "2027/01/31"
+    try:
+        _imp(bad_exp); check("有效期格式错误整批拒绝", False)
+    except ValueError as e:
+        check("有效期格式错误整批拒绝", "有效期" in str(e), e)
+
+    today = datetime.now()
+    yesterday = (today - timedelta(days=1)).strftime("%Y-%m-%d")
+    tomorrow = (today + timedelta(days=1)).strftime("%Y-%m-%d")
+    exp_user = core.add_user("临时账号", "10.8.0.16", password="ExpirePass123",
+                             expires_at=yesterday)
+    check("新建时可带有效期", exp_user["expires_at"] == yesterday)
+    check("到期账号自动停用", not [u for u in core.list_users()
+                              if u["username"] == "临时账号"][0]["enabled"])
+    check("到期账号不生成 ccd", (core.rebuild_ccd() or True) and
+          not os.path.exists(os.path.join(core.CCD, "临时账号")))
+    check("到期账号认证被拒", auth("临时账号", "ExpirePass123") == 1)
+    core.update_user("临时账号", expires_at=tomorrow, enabled=True)
+    check("改有效期后可重新启用", [u for u in core.list_users()
+                              if u["username"] == "临时账号"][0]["enabled"] == 1)
+    check("未来有效期不误停", auth("临时账号", "ExpirePass123") == 0)
+    core.update_user("临时账号", expires_at="")
+    check("清空有效期=长期有效", [u for u in core.list_users()
+                              if u["username"] == "临时账号"][0]["expires_at"] == "")
+    core.delete_user("临时账号")
 
     # ---------- 资产组 / 用户组 / 授权 ----------
     section("资产组 / 用户组 / 授权")

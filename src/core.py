@@ -46,7 +46,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "1.3.7"
+WEB_VERSION = "1.3.8"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -117,7 +117,8 @@ CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
 CREATE TABLE IF NOT EXISTS users (
   username TEXT PRIMARY KEY, vpn_ip TEXT UNIQUE NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
   password_hash TEXT NOT NULL, note TEXT DEFAULT '', real_name TEXT DEFAULT '',
-  dept TEXT DEFAULT '', created_at TEXT, updated_at TEXT);
+  dept TEXT DEFAULT '', created_at TEXT, updated_at TEXT,
+  password_plain TEXT DEFAULT '', expires_at TEXT DEFAULT '');
 -- 资产组（容器）与资产条目（真正的 目标/协议/端口）拆开：
 -- 一个组可以装 3 个 IP、也可以装 2 个网段，授权时按「组」一次性给
 CREATE TABLE IF NOT EXISTS asset_groups (
@@ -290,7 +291,38 @@ def _migrate(con):
     acols = {r[1] for r in con.execute("PRAGMA table_info(audit)")}
     if "ip" not in acols:
         con.execute("ALTER TABLE audit ADD COLUMN ip TEXT DEFAULT ''")
+    # 3) 明文密码 + 账号有效期。老库只有哈希，明文反推不出来：
+    #    给这些账号换一张新密码并写 600 清单，保证「所有账号都有明文可看、导出不报空」。
+    #    只跑一次，之后新建/改密都会同步维护 password_plain。
+    for col in ("password_plain", "expires_at"):
+        if col not in cols:
+            con.execute("ALTER TABLE users ADD COLUMN %s TEXT DEFAULT ''" % col)
     con.commit()
+    if not get_meta("plain_pw_v1", con=con):
+        legacy = con.execute(
+            "SELECT username FROM users WHERE COALESCE(password_plain,'')=''"
+        ).fetchall()
+        migrated = []
+        for r in legacy:
+            pw = rand_password()
+            con.execute("UPDATE users SET password_plain=?,password_hash=? WHERE username=?",
+                        (pw, hash_password(pw), r["username"]))
+            migrated.append((r["username"], pw))
+        if migrated:
+            ensure_dirs()
+            p = os.path.join(BACKUPS, "明文密码迁移-%s.txt"
+                             % datetime.now().strftime("%Y%m%d-%H%M%S"))
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("# 升级前只存哈希，已为下列账号换发新密码；请尽快通知本人修改。\n")
+                for name, pw in migrated:
+                    f.write("%s\t%s\n" % (name, pw))
+            try:
+                os.chmod(p, 0o600)
+            except Exception:
+                pass
+            print("[migrate] 补录 %d 个老账号的明文密码，清单: %s" % (len(migrated), p))
+        set_meta("plain_pw_v1", 1, con=con)
+        con.commit()
 
     if not get_meta("schema_v2", con=con):
         # 2) 「内网网段」并入「附加推送路由」：页面以后只留一个入口
@@ -718,11 +750,45 @@ def get_logs(kind="audit", limit=200):
 
 # --------------------------------------------------------------------------- 用户台账
 
+def validate_expires_at(value):
+    """账号有效期：YYYY-MM-DD（当天仍可用，次日零点起停用）；空 = 长期有效。"""
+    s = (value or "").strip()
+    if not s:
+        return ""
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").strftime("%Y-%m-%d")
+    except ValueError:
+        raise ValueError("有效期需写成 YYYY-MM-DD（如 2027-01-31），或留空表示长期有效")
+
+
+def expire_users(actor="system"):
+    """扫描并自动停用到期账号，返回本次被停用的用户名列表。
+
+    认证脚本、后台任意请求、台账读取都会调一次；重复调用是幂等的。
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    con = db()
+    rows = con.execute(
+        "SELECT username FROM users WHERE enabled=1 AND COALESCE(expires_at,'')<>'' "
+        "AND expires_at<?", (today,)).fetchall()
+    names = [r["username"] for r in rows]
+    for n in names:
+        con.execute("UPDATE users SET enabled=0,updated_at=? WHERE username=?", (now(), n))
+    con.commit()
+    con.close()
+    for n in names:
+        log_audit(actor, "user.expire", "%s 有效期已到，自动停用" % n)
+    return names
+
+
 def list_users(con=None):
+    expire_users()   # 任何读台账的地方都顺手扫一次，页面与认证都看得到最新状态
     own = con is None
     con = con or db()
-    rows = con.execute("SELECT username,vpn_ip,enabled,note,real_name,dept,created_at,updated_at "
-                       "FROM users ORDER BY vpn_ip").fetchall()
+    rows = con.execute(
+        "SELECT username,vpn_ip,enabled,note,real_name,dept,created_at,updated_at,"
+        "COALESCE(password_plain,'') AS password_plain,"
+        "COALESCE(expires_at,'') AS expires_at FROM users ORDER BY vpn_ip").fetchall()
     if own:
         con.close()
     return [dict(r) for r in rows]
@@ -740,10 +806,12 @@ def next_free_ip(c, con=None):
     raise ValueError("固定 IP 段已用完（当前网段可用 %d 个）" % static_capacity(c))
 
 
-def add_user(username, vpn_ip=None, password=None, note="", real_name="", dept="", actor="web"):
+def add_user(username, vpn_ip=None, password=None, note="", real_name="", dept="",
+             expires_at="", actor="web"):
     c = cfg()
     if not valid_username(username):
         raise ValueError("账号名只支持中文、字母、数字、点、下划线、连字符，1~32 位，不能有空格")
+    expires_at = validate_expires_at(expires_at)
     con = db()
     if con.execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone():
         con.close()
@@ -752,12 +820,16 @@ def add_user(username, vpn_ip=None, password=None, note="", real_name="", dept="
     validate_vpn_ip(ip, c, con=con)
     pw = password or rand_password()
     con.execute("INSERT INTO users(username,vpn_ip,enabled,password_hash,note,real_name,dept,"
-                "created_at,updated_at) VALUES(?,?,1,?,?,?,?,?,?)",
-                (username, ip, hash_password(pw), note, real_name or "", dept or "", now(), now()))
+                "created_at,updated_at,password_plain,expires_at) "
+                "VALUES(?,?,1,?,?,?,?,?,?,?,?)",
+                (username, ip, hash_password(pw), note, real_name or "", dept or "", now(), now(),
+                 pw, expires_at))
     con.commit()
     con.close()
-    log_audit(actor, "user.add", "%s -> %s%s" % (username, ip, ("（%s/%s）" % (real_name, dept)) if real_name or dept else ""))
-    return {"username": username, "vpn_ip": ip, "password": pw}
+    log_audit(actor, "user.add", "%s -> %s%s%s" % (
+        username, ip, ("（%s/%s）" % (real_name, dept)) if real_name or dept else "",
+        ("，有效期至 %s" % expires_at) if expires_at else ""))
+    return {"username": username, "vpn_ip": ip, "password": pw, "expires_at": expires_at}
 
 
 def _rename_user(con, old, new):
@@ -782,8 +854,9 @@ def _rename_user(con, old, new):
 
 
 def update_user(username, *, new_username=None, vpn_ip=None, enabled=None, note=None,
-                password=None, real_name=None, dept=None, actor="web"):
+                password=None, real_name=None, dept=None, expires_at=None, actor="web"):
     c = cfg()
+    expires_at = validate_expires_at(expires_at) if expires_at is not None else None
     con = db()
     row = con.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
     if not row:
@@ -814,8 +887,12 @@ def update_user(username, *, new_username=None, vpn_ip=None, enabled=None, note=
         fields.append("real_name=?"); vals.append(real_name)
     if dept is not None:
         fields.append("dept=?"); vals.append(dept)
+    if expires_at is not None:
+        fields.append("expires_at=?"); vals.append(expires_at)
+        changes.append("有效期 -> %s" % (expires_at or "长期有效"))
     if password:
         fields.append("password_hash=?"); vals.append(hash_password(password))
+        fields.append("password_plain=?"); vals.append(password)
         changes.append("重置密码")
     fields.append("updated_at=?"); vals.append(now())
     vals.append(username)
@@ -853,10 +930,16 @@ def backup_users(actor="web"):
     path = os.path.join(BACKUPS, "users-%s.tsv" % ts)
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f, delimiter="\t")
-        w.writerow(["用户名", "姓名", "部门", "密码", "VPN固定IP", "状态", "备注"])
+        w.writerow(["用户名", "姓名", "部门", "密码", "VPN固定IP", "状态", "有效期", "备注"])
         for u in list_users():
-            w.writerow([u["username"], u.get("real_name") or "", u.get("dept") or "", "",
-                        u["vpn_ip"], "启用" if u["enabled"] else "停用", u["note"] or ""])
+            w.writerow([u["username"], u.get("real_name") or "", u.get("dept") or "",
+                        u.get("password_plain") or "", u["vpn_ip"],
+                        "启用" if u["enabled"] else "停用", u.get("expires_at") or "",
+                        u["note"] or ""])
+    try:
+        os.chmod(path, 0o600)   # 台账备份现在含明文密码，不能让同机普通用户读走
+    except Exception:
+        pass
     con = db()
     con.execute("INSERT INTO backups(ts,kind,path,note) VALUES(?,?,?,?)",
                 (now(), "users", path, "台账变更自动备份"))
@@ -867,14 +950,20 @@ def backup_users(actor="web"):
 
 # --------------------------------------------------------------------------- Excel / CSV 台账（全量同步）
 
-EXPORT_HEADER = ["用户名", "姓名", "部门", "密码", "VPN固定IP", "状态", "备注"]
+EXPORT_HEADER = ["用户名", "姓名", "部门", "密码", "VPN固定IP", "状态", "有效期", "备注"]
 
 
 def export_users(fmt="xlsx"):
+    users = list_users()
+    blank = [u["username"] for u in users if not (u.get("password_plain") or "").strip()]
+    if blank:
+        raise ValueError("以下账号没有明文密码，不能导出：%s。请到「认证账号 → 编辑」补上密码再导出。"
+                         % "、".join(blank[:10]) + (" 等" if len(blank) > 10 else ""))
     rows = [EXPORT_HEADER]
-    for u in list_users():
-        rows.append([u["username"], u.get("real_name") or "", u.get("dept") or "", "",
-                     u["vpn_ip"], "启用" if u["enabled"] else "停用", u["note"] or ""])
+    for u in users:
+        rows.append([u["username"], u.get("real_name") or "", u.get("dept") or "",
+                     u["password_plain"], u["vpn_ip"], "启用" if u["enabled"] else "停用",
+                     u.get("expires_at") or "", u["note"] or ""])
     if fmt == "xlsx":
         try:
             from openpyxl import Workbook
@@ -887,7 +976,8 @@ def export_users(fmt="xlsx"):
             for cell in ws[1]:
                 cell.font = Font(bold=True, color="FFFFFF")
                 cell.fill = PatternFill("solid", fgColor="2C3E50")
-            for col, width in (("A", 18), ("B", 12), ("C", 16), ("D", 18), ("E", 15), ("F", 9), ("G", 26)):
+            for col, width in (("A", 18), ("B", 12), ("C", 16), ("D", 20), ("E", 15),
+                               ("F", 9), ("G", 13), ("H", 26)):
                 ws.column_dimensions[col].width = width
             ws.freeze_panes = "A2"
             buf = io.BytesIO()
@@ -920,9 +1010,9 @@ def parse_users_file(content, filename=""):
     if not rows:
         return [], ["空文件"]
     head = [x.replace(" ", "") for x in rows[0]]
-    if "用户名" not in head or "VPN固定IP" not in head:
-        return [], ["表头必须包含「用户名」和「VPN固定IP」两列（姓名/部门/密码列可留空）"]
-    keys = ("用户名", "姓名", "部门", "密码", "VPN固定IP", "状态", "备注")
+    if "用户名" not in head or "VPN固定IP" not in head or "密码" not in head:
+        return [], ["表头必须包含「用户名」「VPN固定IP」「密码」三列（密码必须逐行填写，留空整批拒绝）"]
+    keys = ("用户名", "姓名", "部门", "密码", "VPN固定IP", "状态", "有效期", "备注")
     idx = {k: head.index(k) for k in keys if k in head}
     out, errs = [], []
     for i, r in enumerate(rows[1:], start=2):
@@ -942,9 +1032,17 @@ def parse_users_file(content, filename=""):
         state = cell("状态") or "启用"
         if state not in ("启用", "停用", "1", "0"):
             errs.append("第 %d 行状态只能是 启用/停用" % i); continue
-        out.append({"username": name, "password": cell("密码"), "vpn_ip": ip,
+        pw = cell("密码")
+        if not pw:
+            errs.append("第 %d 行（%s）密码为空：明文密码必填，留空整批拒绝" % (i, name)); continue
+        try:
+            expires_at = validate_expires_at(cell("有效期"))
+        except ValueError as e:
+            errs.append("第 %d 行（%s）%s" % (i, name, e)); continue
+        out.append({"username": name, "password": pw, "vpn_ip": ip,
                     "enabled": state in ("启用", "1"), "note": cell("备注"),
-                    "real_name": cell("姓名"), "dept": cell("部门")})
+                    "real_name": cell("姓名"), "dept": cell("部门"),
+                    "expires_at": expires_at})
     seen = {}
     for o in out:
         if o["username"] in seen:
@@ -981,16 +1079,20 @@ def preview_import(content, filename="", actor="web"):
     for name, r in new.items():
         if name not in old:
             changes.append({"op": "新增", "username": name,
-                            "detail": "%s，%s" % (r["vpn_ip"],
-                                                  "使用表中密码" if r["password"] else "自动生成初始密码")})
+                            "detail": "%s，使用表中明文密码%s" % (
+                                r["vpn_ip"],
+                                ("，有效期至 %s" % r["expires_at"]) if r.get("expires_at") else "")})
         else:
             bits = []
             if old[name]["vpn_ip"] != r["vpn_ip"]:
                 bits.append("IP %s -> %s（重连生效）" % (old[name]["vpn_ip"], r["vpn_ip"]))
             if bool(old[name]["enabled"]) != r["enabled"]:
                 bits.append("状态 -> %s" % ("启用" if r["enabled"] else "停用"))
-            # 密码列留空 = 不动原密码（避免拿一份没填密码的台账把所有人密码冲掉）
-            bits.append("密码 -> 按表中值覆盖" if r["password"] else "密码保持不变（列留空）")
+            # 密码列必填：整表覆盖，表里写什么就落什么明文
+            bits.append("密码 -> 按表中明文覆盖")
+            exp = r.get("expires_at") or ""
+            if (old[name].get("expires_at") or "") != exp:
+                bits.append("有效期 -> %s" % (exp or "长期有效"))
             if old[name]["note"] != r["note"]:
                 bits.append("备注变更")
             if (old[name].get("real_name") or "") != (r.get("real_name") or ""):
@@ -1017,11 +1119,8 @@ def apply_import(token, actor="web", reset_empty=False):
     """正式提交全量同步。二次确认由前端弹窗按钮完成；
     这里靠 5 分钟预览令牌防重放，并在写入前自动备份台账。
 
-    密码策略（reset_empty 控制）：
-      表里有密码        -> 覆盖（这是用户明确要的「有就覆盖」）
-      表里密码为空      -> 默认保留原密码；reset_empty=True 时改为重新生成随机密码
-                            （用于「老账号密码已经没人知道了」的批量救急）
-      新账号且密码为空  -> 一定生成随机密码，否则建成的是个连不上的死号
+    密码列必填（parse_users_file 已整批校验），表里写什么明文就落什么；
+    reset_empty 只为兼容旧脚本保留，已不再有任何作用。
     """
     con = db()
     row = con.execute("SELECT payload,created_at FROM preview_tokens WHERE token=?", (token,)).fetchone()
@@ -1032,8 +1131,8 @@ def apply_import(token, actor="web", reset_empty=False):
     path = backup_users(actor)   # 先备份，误删可把此文件当台账重新导入
     c = cfg()
     con = db()
-    initial = []      # 本次产生/重置的明文密码（只在这里出现一次）
-    kept = []         # 保留了原密码、没动的账号
+    initial = []      # 兼容旧调用方的返回字段：现在密码全在表里，不再另发一次性清单
+    kept = []
     try:
         names = [r["username"] for r in rows]
         keep = set(names)
@@ -1048,28 +1147,20 @@ def apply_import(token, actor="web", reset_empty=False):
             con.execute("DELETE FROM users")
         for r in rows:
             old = con.execute("SELECT * FROM users WHERE username=?", (r["username"],)).fetchone()
+            exp = r.get("expires_at") or ""
             if old:
-                if r["password"]:
-                    h = hash_password(r["password"])
-                elif reset_empty:
-                    pw = rand_password()
-                    initial.append({"username": r["username"], "password": pw})
-                    h = hash_password(pw)
-                else:
-                    h = old["password_hash"]
-                    kept.append(r["username"])
-                con.execute("UPDATE users SET vpn_ip=?,enabled=?,password_hash=?,note=?,"
-                            "real_name=?,dept=?,updated_at=? WHERE username=?",
-                            (r["vpn_ip"], 1 if r["enabled"] else 0, h, r["note"],
-                             r.get("real_name") or "", r.get("dept") or "", now(), r["username"]))
+                con.execute("UPDATE users SET vpn_ip=?,enabled=?,password_hash=?,password_plain=?,"
+                            "expires_at=?,note=?,real_name=?,dept=?,updated_at=? WHERE username=?",
+                            (r["vpn_ip"], 1 if r["enabled"] else 0, hash_password(r["password"]),
+                             r["password"], exp, r["note"], r.get("real_name") or "",
+                             r.get("dept") or "", now(), r["username"]))
             else:
-                pw = r["password"] or rand_password()
-                initial.append({"username": r["username"], "password": pw})
-                con.execute("INSERT INTO users(username,vpn_ip,enabled,password_hash,note,"
-                            "real_name,dept,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                con.execute("INSERT INTO users(username,vpn_ip,enabled,password_hash,password_plain,"
+                            "expires_at,note,real_name,dept,created_at,updated_at) "
+                            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                             (r["username"], r["vpn_ip"], 1 if r["enabled"] else 0,
-                             hash_password(pw), r["note"], r.get("real_name") or "",
-                             r.get("dept") or "", now(), now()))
+                             hash_password(r["password"]), r["password"], exp, r["note"],
+                             r.get("real_name") or "", r.get("dept") or "", now(), now()))
         con.commit()
     except Exception:
         con.rollback(); con.close()
@@ -1078,18 +1169,8 @@ def apply_import(token, actor="web", reset_empty=False):
     db2 = db()
     db2.execute("DELETE FROM preview_tokens WHERE token=?", (token,))
     db2.commit(); db2.close()
-    if initial:
-        p = os.path.join(BACKUPS, "初始密码-%s.txt" % datetime.now().strftime("%Y%m%d-%H%M%S"))
-        with open(p, "w", encoding="utf-8") as f:
-            for x in initial:
-                f.write("%s\t%s\n" % (x["username"], x["password"]))
-        os.chmod(p, 0o600)
-    else:
-        p = ""
-    log_audit(actor, "import.apply",
-              "%d 个账号，重置密码 %d 个，保留原密码 %d 个，备份 %s"
-              % (len(rows), len(initial), len(kept), path))
-    return {"count": len(rows), "backup": path, "initial_password_file": p,
+    log_audit(actor, "import.apply", "%d 个账号，密码按表中明文覆盖，备份 %s" % (len(rows), path))
+    return {"count": len(rows), "backup": path, "initial_password_file": "",
             "initial": initial, "kept": kept}
 
 

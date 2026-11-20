@@ -60,13 +60,18 @@ def main():
             con.close()
             deny(username, src, "失败次数过多，锁定 10 分钟")
 
-        row = con.execute("SELECT enabled,password_hash FROM users WHERE username=?", (username,)).fetchone()
+        # 有效期到了就自动停用：哪怕管理员没打开过后台，也不能再拨进来
+        try:
+            core.expire_users(actor="auth")
+        except Exception:
+            pass
+        row = con.execute("SELECT enabled,password_hash,expires_at FROM users WHERE username=?", (username,)).fetchone()
         if not row:
             con.close()
             deny(username, src, "账号不存在")
         if not row["enabled"]:
             con.close()
-            deny(username, src, "账号已停用")
+            deny(username, src, "账号已停用" + ("（有效期已到）" if row["expires_at"] else ""))
         ok = core.verify_password(password, row["password_hash"])
         con.execute("INSERT INTO auth_attempts(k,ts,ok) VALUES(?,?,?)", (key, time.time(), 1 if ok else 0))
         if ok:

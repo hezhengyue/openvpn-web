@@ -69,6 +69,9 @@ async function waitUp() {
     if (/value\.trim\(\)\|\|'admin'/.test(html)) errors.push('登录逻辑仍把空账户兜底成 admin');
     if (!/忘记管理凭据/.test(html)) errors.push('登录页缺少重置凭据入口说明');
     if (!/async function doForce\(/.test(html)) errors.push('缺少首登改密提交逻辑 doForce');
+    if (/function userPwd\(/.test(html)) errors.push('前端仍保留独立的改密弹窗 userPwd');
+    if (!/显示密码列/.test(html)) errors.push('账号页缺少【显示密码列】开关');
+    if (!/有效期/.test(html)) errors.push('账号页缺少有效期字段');
     const jar = {};
     const dom = new JSDOM(html, {url: base + '/', runScripts: 'dangerously', virtualConsole: vc,
       pretendToBeVisual: true, beforeParse(w) {
@@ -217,14 +220,15 @@ async function waitUp() {
       if (!w.document.querySelector('.pager')) errors.push('在线用户表格缺少分页条');
     } catch (e) { errors.push('在线页交互抛错: ' + e.message); }
 
-    // 导入面板：密码策略开关
+    // 导入面板：密码必填，不再有「空密码也重置」开关
     try {
       w.go('users'); await wait(400);
       w.impOpen(); await wait(150);
       const box = w.document.querySelector('#impbox');
       if (!box) errors.push('导入面板没打开');
-      else if (!box.querySelector('#imp_reset')) errors.push('导入面板缺少「空密码也重置」开关');
-      else if (!/保留原密码/.test(box.textContent)) errors.push('导入面板没说明密码留空的处理规则');
+      else if (box.querySelector('#imp_reset')) errors.push('导入面板仍保留「空密码也重置」开关');
+      else if (!/密码列\s*必须逐行填写|密码列必填/.test(box.textContent)) errors.push('导入面板没说明密码列必填');
+      else if (/留空则保留原密码/.test(box.textContent)) errors.push('导入面板仍说密码留空可保留');
     } catch (e) { errors.push('导入面板抛错: ' + e.message); }
 
     // 账号页：搜索、生成密码可见
@@ -240,33 +244,46 @@ async function waitUp() {
       if (!/导入 Excel（全量覆盖）/.test(pt) || !/导出 Excel（全部账号）/.test(pt))
         errors.push('认证账号导入导出按钮缺少全量说明');
       kw.value = ''; kw.dispatchEvent(new w.Event('input'));
-      // 台账页只做台账：操作列不该再有「踢」（踢下线统一放在在线用户页）
+      // 台账页只做台账：操作列不该再有「踢」，也不再有独立「改密」（统一进编辑）
       const ubtns = [...w.document.querySelectorAll('#ubox button')].map(b => b.textContent.trim());
       if (ubtns.some(t => t === '踢')) errors.push('账号管理页操作列仍有「踢」按钮');
-      // 添加账号：留空密码首点确定只生成并停在弹窗，复制后再点一次才保存，保存后不弹密码页
+      if (ubtns.some(t => t === '改密')) errors.push('账号管理页操作列仍有独立的「改密」按钮');
+      if (typeof w.userPwd !== 'undefined') errors.push('前端仍保留独立的 userPwd 改密入口');
+      // 密码默认不进显示列，点开关后才展开明文
+      if (/Passw0rd!23/.test(w.document.querySelector('#ubox').textContent))
+        errors.push('密码列默认就显示了明文（应默认隐藏）');
+      w.togglePwCol(); await wait(120);
+      if (!/Passw0rd!23/.test(w.document.querySelector('#ubox').textContent))
+        errors.push('点【显示密码列】后没看到明文密码');
+      w.togglePwCol(); await wait(120);
+      // 添加账号：留空密码一次生成并直接保存，不再要求复制后二次确认
       w.userAdd(); await wait(100);
       w.document.querySelector('#u_name').value = '新建测试';
-      w.document.querySelector('#mok').click(); await wait(200);
-      if (w.document.querySelector('#mask').style.display !== 'flex') errors.push('添加账号首点确定就关闭了弹窗，来不及复制密码');
-      const genPw = w.document.querySelector('#u_pw').value;
-      if (!genPw || genPw.length < 8) errors.push('留空初始密码未生成可见明文');
       w.document.querySelector('#mok').click(); await wait(1200);
-      if (w.document.querySelector('#mask').style.display === 'flex') errors.push('账号创建后仍弹出一次性密码页（已要求去掉）');
-      // 编辑弹窗必须能改账号名（原来只能改姓名/部门/IP，工号写错没法纠正）
+      if (w.document.querySelector('#mask').style.display === 'flex')
+        errors.push('添加账号保存后弹窗未关闭');
+      // 编辑弹窗：账号可改名、密码明文可见可改、有有效期
       w.userEdit('alice'); await wait(100);
       const uname = w.document.querySelector('#u_name');
       if (!uname) errors.push('编辑弹窗里没有「账号」输入框（应支持改名）');
       else if (uname.value !== 'alice') errors.push('编辑弹窗的账号没有回填: ' + uname.value);
-      w.closeModal();
-      w.userPwd('alice'); await wait(100);
       const inp = w.document.querySelector('#u_pw');
-      if (!inp || inp.type === 'password') errors.push('改密弹窗的密码框不可见');
-      // 保存后不能再弹一次性密码页：密码只在上面的输入框里可见，先复制再保存
-      inp.value = 'ResetPw12345!';
+      if (!inp || inp.value !== 'Passw0rd!23') errors.push('编辑弹窗密码框未回填当前明文: ' + (inp && inp.value));
+      else if (inp.type === 'password') errors.push('编辑弹窗的密码框默认不可见');
+      if (!w.document.querySelector('#u_exp')) errors.push('编辑弹窗缺少有效期输入框');
+      const genBtn = [...w.document.querySelectorAll('#mbody button')].find(b => /生成随机密码/.test(b.textContent));
+      if (!genBtn) errors.push('编辑弹窗缺少【生成随机密码】按钮');
+      else {
+        genBtn.click();
+        if (!w.document.querySelector('#u_pw').value || w.document.querySelector('#u_pw').value.length < 8)
+          errors.push('点生成后密码框没填上可见明文');
+      }
+      // 保存后不能再弹一次性密码页：密码留在台账里，列表/编辑随时可看
+      w.document.querySelector('#u_pw').value = 'ResetPw12345!';
       w.document.querySelector('#mok').click();
       await wait(1500);
       const mask = w.document.querySelector('#mask');
-      if (mask.style.display === 'flex') errors.push('改密保存后仍弹出一次性密码页（已要求去掉）');
+      if (mask.style.display === 'flex') errors.push('编辑保存后仍弹出一次性密码页（已要求去掉）');
     } catch (e) { errors.push('账号页交互抛错: ' + e.message); }
 
     // 这一轮：最大客户端去掉、动态地址池改成手动设置、管理账户免密、审计带 IP

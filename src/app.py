@@ -140,6 +140,15 @@ def guard():
         return jsonify(ok=False, allow=core.allow_list(),
                        msg="来源 IP %s 不在管理端白名单内；要放行请在服务器上执行 "
                            "python3 app.py --allow <网段>" % ip), 403
+    # 到期的账号自动停用：改 ccd、踢掉在线会话，别让人到期了还挂着
+    try:
+        expired = core.expire_users()
+        if expired:
+            core.write_all_config()
+            for name in expired:
+                sudo_worker(uuid.uuid4().hex, "kick-user", {"username": name})
+    except Exception:
+        pass
     # 首页本身就是登录页容器，未登录也要能加载
     if request.path in ("/", "/favicon.ico", "/api/login", "/self") or \
             request.path.startswith("/api/session") or request.path.startswith("/api/self"):
@@ -702,7 +711,8 @@ def users_add():
     core.backup_users()
     r = core.add_user(d.get("username", ""), d.get("vpn_ip") or None,
                       d.get("password") or None, d.get("note", ""),
-                      d.get("real_name", ""), d.get("dept", ""))
+                      d.get("real_name", ""), d.get("dept", ""),
+                      expires_at=d.get("expires_at", ""))
     r["_need"] = "rebuild"
     after_change(kick=False)
     return ok(r)
@@ -717,7 +727,8 @@ def users_update(name):
     changes = core.update_user(name, new_username=new_name or None,
                                vpn_ip=d.get("vpn_ip"), enabled=d.get("enabled"),
                                note=d.get("note"), password=d.get("password"),
-                               real_name=d.get("real_name"), dept=d.get("dept"))
+                               real_name=d.get("real_name"), dept=d.get("dept"),
+                               expires_at=d.get("expires_at") if "expires_at" in d else None)
     # 改名后 management 里记的还是旧 CN，要按旧名踢，否则踢不到
     kick = (renamed or any("IP " in x for x in changes)
             or ("enabled" in d and not d["enabled"]))
@@ -762,8 +773,7 @@ def users_import():
         r = core.preview_import(content, f.filename or "")
         return ok(r)
     token = request.form.get("token", "")
-    reset_empty = request.form.get("reset_empty", "") in ("1", "true", "on", "yes")
-    r = core.apply_import(token, reset_empty=reset_empty)
+    r = core.apply_import(token)
     after_change(kick=False)
     return ok(r)
 

@@ -418,21 +418,6 @@ function copyText(t){const done=()=>toast('已复制到剪贴板','ok');
  if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t).then(done,()=>fb())}else fb();
  function fb(){const ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.opacity='0';
   document.body.appendChild(ta);ta.select();try{document.execCommand('copy');done()}catch(e){toast('复制失败，请手动选中','err')}ta.remove()}}
-/* 批量导入后：本次生成的所有初始密码必须能看见、能一次复制走 */
-function showBatchSecret(list,kept){
- const txt=list.map(x=>x.username+'\t'+x.password).join('\n');
- modal('本次生成的初始密码（'+list.length+' 个）',
-  `<div class="hint">密码只在这里显示一次，台账里只存哈希，查不回来。请先复制或下载，再关闭。</div>
-   <div class="sec" style="max-height:320px;overflow:auto">
-   ${list.map(x=>`<div style="display:flex;gap:10px;padding:4px 0;border-bottom:1px dashed var(--border)">
-     <div class="mono" style="min-width:140px">${esc(x.username)}</div>
-     <div class="mono" style="color:var(--primary);letter-spacing:.5px">${esc(x.password)}</div></div>`).join('')}
-   </div>
-   ${kept&&kept.length?`<div class="hint warn">另有 ${kept.length} 个账号的密码保持不变（表里密码列为空）：${esc(kept.slice(0,12).join('、'))}${kept.length>12?' 等':''}。如果这些账号的原密码已经没人知道，可勾选「空密码也重置」重新导入一次。</div>`:''}
-   <div class="bar" style="margin-top:10px"><button class="btn" onclick="copyText(window.__pwall||'')">全部复制</button>
-    <button class="btn" onclick="downloadText('初始密码.txt',window.__pwall||'')">下载为 txt</button></div>`,
-  ()=>{},'知道了',false,true);window.__pwall=txt}
-
 /* ---------------- 任务轮询 ---------------- */
 function taskBox(){return '<div class="card"><h3>执行进度 <small id="tstat"></small></h3><div class="prog"><i id="tprog"></i></div><pre id="tlog" style="height:220px"></pre></div>'}
 function pollTask(tid,done){
@@ -650,56 +635,60 @@ async function stopUser(n){
 }
 
 /* ---------------- 账号管理 ---------------- */
-let U={list:[],kw:'',state:'all'};
+let U={list:[],kw:'',state:'all',showPw:false};
 async function pgUsers(){const j=await get('/api/users');U.list=j.users;
- $('#page').innerHTML=`<div class="card"><h3>认证账号 <small>一人一账号一固定 IP；账号可中文；密码只存哈希</small></h3>
+ $('#page').innerHTML=`<div class="card"><h3>认证账号 <small>一人一账号一固定 IP；账号可中文；密码可查看 / 编辑 / 导出明文</small></h3>
  <div class="bar"><input type="text" id="ukw" placeholder="搜索账号 / 姓名 / 部门 / IP" value="${esc(U.kw)}" style="width:230px" oninput="U.kw=this.value;PG.users=0;renderUsers()">
  <select onchange="U.state=this.value;PG.users=0;renderUsers()"><option value="all">全部状态</option><option value="on" ${U.state==='on'?'selected':''}>启用</option><option value="off" ${U.state==='off'?'selected':''}>停用</option></select>
  <button class="btn pri" onclick="userAdd()">添加账号</button>
+ <button class="btn" onclick="togglePwCol()">${U.showPw?'隐藏密码列':'显示密码列'}</button>
  <button class="btn" onclick="impOpen()">导入 Excel（全量覆盖）</button>
  <button class="btn" onclick="download('/api/users/export')">导出 Excel（全部账号）</button>
  <span class="muted">共 ${U.list.length} 个账号 · 列表全部显示，不分页</span></div>
  <div id="ubox"></div>
- <div class="hint">导入 / 导出<b>只针对全部账号</b>，不用也不提供「选中某个人」：导出是当前整张台账，导入是整张表覆盖同步（表里没有的账号会被删除，预览时可逐项核对）。<br>
+ <div class="hint">密码<b>默认不在列表里显示</b>，点【显示密码列】才展开明文；也可以在【编辑】里查看、生成、复制和修改。<br>
+ 导入 / 导出<b>只针对全部账号</b>，不用也不提供「选中某个人」：导出是当前整张台账（含明文密码），导入是整张表覆盖同步（表里没有的账号会被删除，预览时可逐项核对）。<b>密码列必填，留空整批拒绝。</b><br>
+ 有效期写到日（YYYY-MM-DD），当天仍可用，<b>次日自动停用并断开在线会话</b>；留空表示长期有效。<br>
  固定 IP 由服务端下发，客户端改不了；改 IP 会自动重建 ACL 并断开该账号当前连接。<br>
  要断开某人当前连接并阻止重连，直接把状态改成<b>停用</b>（在线用户页也有【停用账号】按钮）。<br>
  员工自助改密：<span class="mono" id="selfurl"></span></div></div>`;
  renderUsers();
  setTimeout(function(){const e=document.getElementById('selfurl');if(e)e.textContent=location.origin+'/self'},0)}
+function togglePwCol(){U.showPw=!U.showPw;renderUsers()}
 function renderUsers(){
  const box=document.getElementById('ubox');if(!box)return;
  const kw=(U.kw||'').trim().toLowerCase();
  const all=U.list.filter(u=>(U.state==='all'||(U.state==='on'?u.enabled:!u.enabled))&&
-   (!kw||[u.username,u.real_name,u.dept,u.vpn_ip,u.note].some(x=>String(x||'').toLowerCase().includes(kw))));
- box.innerHTML=tbl(['账号','姓名','部门','固定 IP','状态','备注','操作'],all.map(u=>[
-  '<b>'+esc(u.username)+'</b>',esc(u.real_name||''),esc(u.dept||''),
-  '<span class="mono">'+esc(u.vpn_ip)+'</span>',
-  u.enabled?badge('启用','ok'):badge('停用','warn'),esc(u.note||''),
-  `<button class="btn sm" onclick="userEdit('${esc(u.username)}')">编辑</button>
-   <button class="btn sm" onclick="userPwd('${esc(u.username)}')">改密</button>
+   (!kw||[u.username,u.real_name,u.dept,u.vpn_ip,u.note,u.expires_at].some(x=>String(x||'').toLowerCase().includes(kw))));
+ const heads=['账号','姓名','部门','固定 IP','有效期','状态','备注'].concat(U.showPw?['密码']:[]).concat(['操作']);
+ const rows=all.map(u=>{
+  const exp=u.expires_at||'';
+  const expCell=exp?(new Date(exp+'T23:59:59')<new Date()?badge(exp+' 已到期','err'):'<span class="mono">'+esc(exp)+'</span>'):'<span class="muted">长期有效</span>';
+  const row=['<b>'+esc(u.username)+'</b>',esc(u.real_name||''),esc(u.dept||''),
+   '<span class="mono">'+esc(u.vpn_ip)+'</span>',expCell,
+   u.enabled?badge('启用','ok'):badge('停用','warn'),esc(u.note||'')];
+  if(U.showPw)row.push('<span class="mono">'+esc(u.password_plain||'')+'</span>');
+  row.push(`<button class="btn sm" onclick="userEdit('${esc(u.username)}')">编辑</button>
    <button class="btn sm" onclick="userToggle('${esc(u.username)}',${u.enabled?0:1})">${u.enabled?'停用':'启用'}</button>
-   <button class="btn sm danger" onclick="userDel('${esc(u.username)}')">删除</button>`]),'没有匹配的账号')}
+   <button class="btn sm danger" onclick="userDel('${esc(u.username)}')">删除</button>`);
+  return row;
+ });
+ box.innerHTML=tbl(heads,rows,'没有匹配的账号')}
 function userAdd(){modal('添加认证账号',`<label class="f"><span>账号</span><input id="u_name" placeholder="张三 或 zhangsan（支持中文）"></label>
  <label class="f"><span>姓名</span><input id="u_real" placeholder="用于台账检索"></label>
  <label class="f"><span>部门</span><input id="u_dept" placeholder="如 运维部"></label>
  <label class="f"><span>固定 IP</span><input id="u_ip" placeholder="留空自动分配下一个可用">
    <button type="button" class="btn sm" onclick="fillNextIp('u_ip')">自动分配</button></label>
- <label class="f"><span>初始密码</span><input id="u_pw" placeholder="留空则点确定生成，复制后再点一次确定">
+ <label class="f"><span>初始密码</span><input id="u_pw" placeholder="留空自动生成明文密码">
    <button type="button" class="btn sm" onclick="document.getElementById('u_pw').value=genPw()">生成</button>
    <button type="button" class="btn sm" onclick="copyText(document.getElementById('u_pw').value)">复制</button></label>
+ <label class="f"><span>有效期</span><input type="date" id="u_exp"><span class="muted" style="margin-left:8px">留空 = 长期有效；到期次日自动停用</span></label>
  <label class="f"><span>备注</span><input id="u_note"></label>
- <div class="hint">密码只在这个输入框里明文出现一次，保存后不再弹窗。生成后请先复制，再点确定保存。</div>`,async()=>{
- let pw=$('#u_pw').value;
- if(!pw){ // 第一次点确定：生成并停在弹窗里，让人先复制走
-  pw=genPw();$('#u_pw').value=pw;
-  $('#mok').textContent='已复制，确认创建';
-  toast('已生成初始密码，请先复制，再点一次确定','warn');
-  throw new Error('先复制生成的密码');
- }
+ <div class="hint">密码会以明文保存在台账里，可在列表【显示密码列】或【编辑】里随时查看、复制、修改；不再一次性弹窗。留空自动生成随机密码。</div>`,async()=>{
  await post('/api/users',{username:$('#u_name').value.trim(),vpn_ip:$('#u_ip').value.trim(),
-   password:pw,note:$('#u_note').value.trim(),
+   password:$('#u_pw').value,expires_at:$('#u_exp').value,note:$('#u_note').value.trim(),
    real_name:$('#u_real').value.trim(),dept:$('#u_dept').value.trim()});
- toast('账号已创建 · 密码请先从输入框复制','ok');await pgUsers();
+ toast('账号已创建 · 密码可在编辑里查看','ok');await pgUsers();
  });}
 async function fillNextIp(id){try{const j=await get('/api/users/next-ip');$('#'+id).value=j.vpn_ip;toast('已填入 '+j.vpn_ip,'ok')}catch(e){}}
 function userEdit(n){const u=U.list.find(x=>x.username===n)||{};
@@ -709,27 +698,30 @@ function userEdit(n){const u=U.list.find(x=>x.username===n)||{};
  <label class="f"><span>部门</span><input id="u_dept" value="${esc(u.dept||'')}"></label>
  <label class="f"><span>固定 IP</span><input id="u_ip" value="${esc(u.vpn_ip||'')}">
    <button type="button" class="btn sm" onclick="fillNextIp('u_ip')">换一个</button></label>
+ <label class="f"><span>密码（明文，可直接修改）</span><input id="u_pw" type="text" value="${esc(u.password_plain||'')}" autocomplete="off">
+  <div class="bar"><button type="button" class="btn" onclick="document.getElementById('u_pw').value=genPw()">生成随机密码</button>
+  <button type="button" class="btn" onclick="var e=document.getElementById('u_pw');e.type=e.type==='password'?'text':'password'">显示 / 隐藏</button>
+  <button type="button" class="btn" onclick="copyText(document.getElementById('u_pw').value)">复制密码</button></div>
+  <span class="muted">框里就是当前生效的明文密码；改了再保存即重置，留空会报错。</span></label>
+ <label class="f"><span>有效期</span><input type="date" id="u_exp" value="${esc(u.expires_at||'')}">
+  <span class="muted" style="margin-left:8px">留空 = 长期有效；到期次日自动停用并断开</span></label>
  <label class="f"><span>备注</span><input id="u_note" value="${esc(u.note||'')}"></label>
  <div class="hint warn">改 IP 会断开该用户当前连接，重连后生效；ACL 会全量重建。</div>`,async()=>{
  const nn=$('#u_name').value.trim();
  if(!nn){toast('账号不能为空','err');return}
- await post('/api/users/'+encodeURIComponent(n),{new_username:nn,vpn_ip:$('#u_ip').value.trim(),
-   note:$('#u_note').value.trim(),
-   real_name:$('#u_real').value.trim(),dept:$('#u_dept').value.trim()});
+ const pw=$('#u_pw').value;
+ if(!pw){toast('密码不能为空','err');throw new Error('密码不能为空')}
+ const body={new_username:nn,vpn_ip:$('#u_ip').value.trim(),
+   note:$('#u_note').value.trim(),expires_at:$('#u_exp').value,
+   real_name:$('#u_real').value.trim(),dept:$('#u_dept').value.trim()};
+ if(pw!==u.password_plain)body.password=pw;
+ await post('/api/users/'+encodeURIComponent(n),body);
  toast(nn===n?'已保存':('已改名为 '+nn+'，请通知本人用新账号拨入'),'ok');pgUsers()})}
-function userPwd(n){modal('重置密码 · '+n,
- `<label class="f"><span>新密码</span><input id="u_pw" autocomplete="new-password" placeholder="至少 8 位"></label>
-  <div class="bar"><button type="button" class="btn" onclick="document.getElementById('u_pw').value=genPw()">生成随机密码</button>
-  <button type="button" class="btn" onclick="var e=document.getElementById('u_pw');e.type=e.type==='password'?'text':'password'">显示 / 隐藏</button>
-  <button type="button" class="btn" onclick="copyText(document.getElementById('u_pw').value)">复制密码</button></div>
-  <div class="hint">点【生成随机密码】会直接填进上面的输入框并显示出来，先复制再保存；保存后不会再弹窗，请自觉存好。</div>`,
- async()=>{const pw=$('#u_pw').value;if(!pw){toast('请填写新密码','err');throw new Error('请填写新密码')}
-  await post('/api/users/'+encodeURIComponent(n),{password:pw});toast('密码已重置 · 请确认已复制','ok')})}
 async function userToggle(n,v){await post('/api/users/'+encodeURIComponent(n),{enabled:v});toast('状态已更新','ok');pgUsers()}
 async function userDel(n){confirmAct('删除账号 · '+n,'该账号及其授权会一并删除（台账已自动备份，可回滚）。不可撤销。',
  async()=>{await del('/api/users/'+encodeURIComponent(n));toast('已删除','ok');pgUsers()},'删除账号')}
 let IMP={token:'',file:null};
-function impOpen(){IMP={token:'',file:null,changes:[]};$('#page').insertAdjacentHTML('beforeend','<div class="card" id="impbox"><h3>Excel 全量同步 <small>只有 Excel 一种表格，不再有 CSV 两套</small></h3><div class="bar"><input type="file" id="impfile" accept=".xlsx"><button class="btn pri" onclick="impPreview()">预览变更</button><button class="btn" onclick="download(\'/api/users/export\')">下载模板</button></div><div id="impres" class="muted">列：用户名 / 姓名 / 部门 / 密码 / VPN固定IP / 状态 / 备注。先点【下载模板】照格式填，再【预览变更】。</div><div class="hint">Excel 能改姓名、部门、固定 IP、密码、状态、备注。但<b>「用户名」是身份本身</b>：把某行的用户名改掉，等于删掉旧号、新建一个号（新号密码会重生成）。只想给某人换个账号名，请用列表里的<b>【编辑】</b>，改完授权和用户组会跟着走。</div><div class="hint">密码列规则：<b>填了就用表里的值覆盖</b>；<b>留空则保留原密码不动</b>（新账号留空会自动生成初始密码，导入完弹窗给你）。<br>如果老账号的密码已经没人知道了，勾上下面这个开关，留空也会重新生成：<label style="display:inline-block;margin-top:8px"><input type="checkbox" id="imp_reset" class="ck"> 密码列为空时也重新生成</label></div></div>');$('#impbox').scrollIntoView()}
+function impOpen(){IMP={token:'',file:null,changes:[]};$('#page').insertAdjacentHTML('beforeend','<div class="card" id="impbox"><h3>Excel 全量同步 <small>只有 Excel 一种表格，不再有 CSV 两套</small></h3><div class="bar"><input type="file" id="impfile" accept=".xlsx"><button class="btn pri" onclick="impPreview()">预览变更</button><button class="btn" onclick="download(\'/api/users/export\')">下载模板</button></div><div id="impres" class="muted">列：用户名 / 姓名 / 部门 / 密码 / VPN固定IP / 状态 / 有效期 / 备注。先点【下载模板】照格式填，再【预览变更】。</div><div class="hint">Excel 能改姓名、部门、固定 IP、密码、有效期、状态、备注。<b>导出的表已含明文密码，改完直接导回来即可。</b>但<b>「用户名」是身份本身</b>：把某行的用户名改掉，等于删掉旧号、新建一个号。只想给某人换个账号名，请用列表里的<b>【编辑】</b>，改完授权和用户组会跟着走。</div><div class="hint warn">密码列<b>必须逐行填写明文，留空整批拒绝</b>，不再支持「留空保留原密码」或自动生成。有效期写 YYYY-MM-DD，留空为长期有效；到期次日自动停用。</div></div>');$('#impbox').scrollIntoView()}
 async function impPreview(){const f=$('#impfile').files[0];if(!f){toast('请选择文件','err');return}
  try{const j=await upload('/api/users/import',f,{step:'preview'});IMP.token=j.token;IMP.file=f;IMP.changes=j.changes;
  const dels=j.changes.filter(c=>c.op==='删除').length;
@@ -739,13 +731,10 @@ async function impPreview(){const f=$('#impfile').files[0];if(!f){toast('请选�
  }catch(e){}}
 function impApply(){
  const dels=IMP.changes.filter(c=>c.op==='删除').length;
- const rst=!!($('#imp_reset')&&$('#imp_reset').checked);
  confirmAct('确认 Excel 全量同步',
-   '将按预览清单写入 '+IMP.changes.length+' 项变更'+(dels?'，其中<b>删除 '+dels+' 个账号</b>':'')+'。表里没有的账号都会被删除；提交前会自动备份台账，误删可用备份回滚。'
-   +(rst?'<br><b>已勾选「空密码也重新生成」</b>：密码列为空的账号密码会被换掉。':''),
-   async()=>{const j=await upload('/api/users/import',IMP.file,{step:'apply',token:IMP.token,reset_empty:rst?'1':''});
-    toast('已同步 '+j.count+' 个账号，备份：'+j.backup,'ok');pgUsers();
-    if((j.initial||[]).length){showBatchSecret(j.initial,j.kept)}else{toast('密码均按原样保留，未产生新密码','ok')}},'确认同步');
+   '将按预览清单写入 '+IMP.changes.length+' 项变更'+(dels?'，其中<b>删除 '+dels+' 个账号</b>':'')+'。表里没有的账号都会被删除；表里每行密码按明文覆盖，提交前会自动备份台账。',
+   async()=>{const j=await upload('/api/users/import',IMP.file,{step:'apply',token:IMP.token});
+    toast('已同步 '+j.count+' 个账号，备份：'+j.backup,'ok');pgUsers();},'确认同步');
 }
 
 /* ---------------- 资产与授权（用户组 / 资产组 / 授权） ---------------- */

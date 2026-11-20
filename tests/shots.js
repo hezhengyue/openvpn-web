@@ -126,10 +126,10 @@ function cdp(method, params, sessionId) {
       await sleep(700);
       await shot('acl-' + (i + 2) + '-' + t);
     }
-    // 一个弹窗（改密）看看表单排版
+    // 一个弹窗（账号编辑，内含明文密码框）看看表单排版
     await evalJs(`go('users');a=0`);
     await sleep(600);
-    await evalJs(`userPwd('alice')`);
+    await evalJs(`userEdit('alice')`);
     await sleep(500);
     await shot('modal-pwd');
     console.log('截图输出：' + OUT);
