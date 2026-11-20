@@ -50,6 +50,8 @@ cp -f "$ROOT/README.md" "$OUT"/ 2>/dev/null || true
 # 目标机「上传源码自动编译」要用这个脚本，worker.py 是按 ROOT/build-static-openvpn.sh 找的
 cp -f "$BUILD/build-static-openvpn.sh" "$OUT"/ 2>/dev/null || true
 chmod 755 "$OUT"/*.sh
+# 安装码脚本能造令牌 → 只给 root 执行，别在包里就摆成 755
+[ -f "$OUT/install-code.sh" ] && chmod 700 "$OUT/install-code.sh"
 # 收进仓库里已编好的东西：静态 openvpn + 静态 openssl（签证书用，最小化系统可能没有 openssl）
 if [ -d "$ROOT/bin" ]; then
     for f in "$ROOT"/bin/*; do [ -f "$f" ] && cp -f "$f" "$OUT/bin/"; done
