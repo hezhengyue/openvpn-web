@@ -17,6 +17,7 @@ import sys
 import json
 import time
 import shutil
+import hashlib
 import zipfile
 import subprocess
 import traceback
@@ -37,6 +38,82 @@ ACTIONS = {
     "install-timer", "replace-binary", "build-openvpn", "collect-deny", "selfcheck-system",
     "restore-snapshot", "update-web", "restorecon", "kick-user",
 }
+
+
+# ---------------------------------------------------------------- 安装码闸门
+# 有三个动作会把「从外面传进来的代码」落到系统里：替换 openvpn 二进制、本机编译
+# 源码、更新 Web 自身。装上去之后下次启动就是 root 身份，等于「能登录面板的人=root」。
+# Web 侧再怎么校验都挡不住这件事（上传的 ELF 编个版本号就能过 check_binary），
+# 所以在 root 这一侧再加一道门：必须带一个只有本机 root 能生成的一次性安装码。
+ETC = os.environ.get("OVPN_WEB_ETC", "/etc/openvpn-web")
+GATED = ("replace-binary", "build-openvpn", "update-web")
+GATE_FAIL_LIMIT = 5
+
+
+def token_path():
+    return os.path.join(ETC, "install.token")
+
+
+def code_hash(code):
+    return hashlib.sha256(("openvpn-web:" + (code or "").strip().upper()).encode("utf-8")).hexdigest()
+
+
+def _read_token():
+    """返回令牌字典；文件不存在返回 None；存在但坏了返回 {}"""
+    try:
+        with open(token_path(), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return {}
+
+
+def _drop_token():
+    try:
+        os.remove(token_path())
+    except OSError:
+        pass
+
+
+def require_install_code(code):
+    """校验一次性安装码，通过即作废该码。失败抛 RuntimeError（信息直接给到界面）。"""
+    hint = ("请在本机执行 sudo %s/install-code.sh 生成一次性安装码"
+            "（15 分钟内有效，只能用一次）" % ROOT)
+    tok = _read_token()
+    if tok is None:
+        raise RuntimeError("未开启安装窗口：" + hint)
+    if not tok:
+        _drop_token()
+        raise RuntimeError("安装码文件已损坏，已作废：" + hint)
+    code = (code or "").strip()
+    if not code:
+        raise RuntimeError("缺少安装码：" + hint)
+    if time.time() > float(tok.get("exp") or 0):
+        _drop_token()
+        raise RuntimeError("安装码已过期，已作废：" + hint)
+    if code_hash(code) != str(tok.get("hash") or ""):
+        tok["fail"] = int(tok.get("fail") or 0) + 1
+        if tok["fail"] >= GATE_FAIL_LIMIT:
+            _drop_token()
+            raise RuntimeError("安装码连续错 %d 次，已作废：%s" % (GATE_FAIL_LIMIT, hint))
+        try:
+            with open(token_path(), "w", encoding="utf-8") as f:
+                json.dump(tok, f)
+        except OSError:
+            pass
+        raise RuntimeError("安装码不正确（已错 %d 次，错满 %d 次作废）"
+                           % (tok["fail"], GATE_FAIL_LIMIT))
+    _drop_token()
+
+
+def scrub_install_code(job, spec):
+    """安装码不留痕：从任务文件里抹掉，免得明文躺在 data/tasks 里"""
+    try:
+        with open(job, "w", encoding="utf-8") as f:
+            json.dump(spec, f, ensure_ascii=False)
+    except OSError:
+        pass
 
 
 def log(msg):
@@ -409,8 +486,15 @@ def main():
     params = spec.get("params", {}) or {}
     if act not in ACTIONS:
         log("动作不在白名单: %s" % act); sys.exit(2)
+    # 安装码一码一次，用完作废；先把它从任务文件里抹掉，别让明文躺在 data/tasks 里
+    code = ""
+    if "install_code" in params:
+        code = str(params.pop("install_code") or "")
+        scrub_install_code(job, spec)
     log("开始执行: %s" % act)
     try:
+        if act in GATED and not MOCK:
+            require_install_code(code)   # 闸门过不了就不抢锁、不动系统
         lock = take_sys_lock()      # 拿到锁再动手；拿不到就不动系统
         try:
             DISPATCH[act](params)

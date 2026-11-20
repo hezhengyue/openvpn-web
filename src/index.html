@@ -272,7 +272,7 @@ pre::-webkit-scrollbar-thumb{background:oklch(.45 .02 250);background-clip:conte
 <script>
 /* 页面版本：每次升级手动同步 core.WEB_VERSION（selftest 会校验两者一致）。
    浏览器若缓存了旧 HTML（标签页常开不重载、或中间层缓存），靠这个跟服务端版本比对来自愈。 */
-const PAGE_VERSION='1.3.22';
+const PAGE_VERSION='1.3.23';
 const S={csrf:'',logged:false,cfg:null,page:'overview',task:null};
 const $=s=>document.querySelector(s);
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -512,8 +512,10 @@ async function pgWizard(){
     <div class="bar"><button class="btn pri" onclick="wCheck()">重新检测</button><span class="muted">x86_64 / tun / 静态二进制 / 端口 / openssl / iptables</span></div>
     <div id="witems">${tbl(['检查项','结果','说明'],W.items.map(i=>[esc(i.name),i.ok?badge('通过','ok'):badge(i.fatal?'不通过':'注意',i.fatal?'err':'warn'),esc(i.detail)]),'点【重新检测】开始')}</div></div>
   <div class="card"><h3>第 2 步 · 放置 openvpn 静态二进制 <small>≥ 2.6.23，glibc 2.17 ABI</small></h3>
-    <div class="hint">包内已自带 <span class="mono">bin/openvpn</span>；缺失时可在此上传，校验项与自动编译一致。</div>
-    <div class="bar"><input type="file" id="wbin"><button class="btn pri" onclick="wUpload()">上传并校验</button><span id="wver" class="muted">${esc(W.ver)}</span></div></div>
+    <div class="hint">包内已自带 <span class="mono">bin/openvpn</span>；缺失时可在此上传，校验项与自动编译一致。
+     <br>替换二进制等于把一个外部程序装成 root 服务，所以要填<b>一次性安装码</b>：在服务器上执行
+     <span class="mono">sudo /opt/openvpn-web/install-code.sh</span> 拿码（安装完成时也会直接打印一个，24 小时有效）；一码一次，填错 5 次作废。</div>
+    <div class="bar"><input id="wcode" placeholder="安装码（8 位）" maxlength="12" style="width:150px;letter-spacing:1px"><input type="file" id="wbin"><button class="btn pri" onclick="wUpload()">上传并校验</button><span id="wver" class="muted">${esc(W.ver)}</span></div></div>
   <div class="card"><h3>第 3 步 · 参数</h3>${cfgForm()}
    <label class="f" style="margin-top:8px"><span>网络模式</span><select id="w_nat">
      <option value="nat" ${(S.cfg&&S.cfg.nat_mode==='no-nat')?'':'selected'}>NAT（默认）· 开箱可用，不需要网关回程路由，但内网日志不可溯源到人</option>
@@ -645,7 +647,8 @@ async function wCheck(){try{const j=await post('/api/wizard/check');W.items=j.it
  $('#witems').innerHTML=tbl(['检查项','结果','说明'],W.items.map(i=>[esc(i.name),i.ok?badge('通过','ok'):badge(i.fatal?'不通过':'注意',i.fatal?'err':'warn'),esc(i.detail)]));
  const bad=W.items.filter(i=>i.fatal&&!i.ok);if(!bad.length){W.step=2;pgWizard()}else toast('存在 '+bad.length+' 项致命检查未通过','err')}catch(e){}}
 async function wUpload(){const f=$('#wbin').files[0];if(!f){toast('请选择文件','err');return}
- try{const j=await upload('/api/wizard/binary',f);W.ver='已放置 '+j.version+'（'+j.branch+'）';$('#wver').textContent=W.ver;toast(j.msg,'ok');W.step=3;pgWizard()}catch(e){}}
+ const code=$('#wcode').value.trim();
+ try{const j=await upload('/api/wizard/binary',f,{install_code:code});W.ver='已放置 '+j.version+'（'+j.branch+'）';$('#wver').textContent=W.ver;toast(j.msg,'ok');W.step=3;pgWizard()}catch(e){}}
 async function wParams(){try{await post('/api/wizard/params',Object.assign(readCfg(),{nat_mode:$('#w_nat').value}));toast('参数已保存','ok');W.step=4;await loadState();pgWizard()}catch(e){}}
 async function wExec(){
  confirmAct('执行安装',
@@ -1065,7 +1068,9 @@ async function pgUpdate(){const v=await get('/api/version'),
    <span class="muted">${be.ok?'gcc / make / pkg-config 齐备，约 1~3 分钟':'缺 '+be.missing.join('、')}</span>
    <button class="btn sm" onclick="recheckBuildEnv()">重新检测</button></div>
   <div class="muted" style="font-size:12px;margin-bottom:6px">安装完成与服务启动时已自动检查${be.checked_at?'，最近一次：'+esc(be.checked_at):''}。补装工具后点【重新检测】即可刷新，无需重启。</div>
-  ${be.ok?`<div class="bar"><input type="file" id="upsrc" accept=".gz,.tgz"></div>
+  ${be.ok?`<div class="bar"><input id="upcode" placeholder="安装码（8 位）" maxlength="12" style="width:150px;letter-spacing:1px">
+   <span class="muted" style="font-size:12px">在服务器上执行 <span class="mono">sudo /opt/openvpn-web/install-code.sh</span> 拿码 · 一码一次</span></div>
+   <div class="bar"><input type="file" id="upsrc" accept=".gz,.tgz"></div>
    <div class="bar"><label style="font-size:12px"><input type="checkbox" id="upsrcmajor"> 允许跨大版本</label>
     <button class="btn pri" onclick="upSource()">编译并更新</button></div><div id="uptask2"></div>`
    :'<div class="hint">本机没有编译工具，<b>不影响当前 OpenVPN 服务和客户端使用</b>，只是不能在这里从源码编译新版本。请在构建机上用 <span class="mono">build/build-static-openvpn.sh</span> 编好后，到下方「恢复」导入替换 <span class="mono">bin/openvpn</span> 再重启服务。</div>'}
@@ -1105,8 +1110,10 @@ async function pgUpdate(){const v=await get('/api/version'),
 
 async function recheckBuildEnv(){try{await get('/api/update/build-env?refresh=1');toast('已重新检测编译环境','ok');pgUpdate()}catch(e){}}
 async function upSource(){const f=$('#upsrc').files[0];if(!f){toast('请选择 openvpn 源码包','err');return}
+ const code=$('#upcode').value.trim();
+ if(!code){toast('请先填安装码（服务器上执行 install-code.sh）','err');return}
  confirmAct('上传源码并编译','将在本机编译 OpenVPN 源码并重启服务，<b>在线连接会断开并自动重连</b>。编译失败会自动回滚到备份点。',
- async()=>{const j=await upload('/api/update/source',f,{allow_major:$('#upsrcmajor').checked?'1':'0'});
+ async()=>{const j=await upload('/api/update/source',f,{allow_major:$('#upsrcmajor').checked?'1':'0',install_code:code});
   $('#uptask2').innerHTML=taskBox();pollTask(j.task_id,ok=>{if(ok){toast('已升级到 '+j.version,'ok');loadState()}})},'开始编译')}
 /* ---------------- 备份与恢复 ---------------- */
 let FB={token:'',name:''};

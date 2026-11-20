@@ -1131,6 +1131,96 @@ def main():
     con.close()
     check("没有上下文时审计仍能落一个操作者", _last == "admin", _last)
 
+    # ---------- 安装码：给「上传即 root」这条路加一道人闸 ----------
+    section("安装码闸门（替换二进制 / 编译源码 / 更新 Web）")
+    import worker as wk
+    _etc = os.path.join(TMP, "etc-installcode")
+    os.makedirs(_etc, exist_ok=True)
+    wk.ETC = _etc
+    _tokp = os.path.join(_etc, "install.token")
+
+    def _put_token(code, exp, fail=0):
+        with open(_tokp, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"hash": wk.code_hash(code), "exp": exp, "fail": fail}))
+
+    _code = "ABCD2345"
+    try:
+        wk.require_install_code(_code)
+        _no_token = False
+    except RuntimeError as e:
+        _no_token = "install-code.sh" in str(e)
+    check("没有安装码文件时拒绝执行，并告诉人怎么生成", _no_token)
+
+    _put_token(_code, time.time() + 60)
+    try:
+        wk.require_install_code("")
+        _empty_ok = True
+    except RuntimeError:
+        _empty_ok = False
+    check("安装码为空时拒绝", not _empty_ok)
+
+    _put_token(_code, time.time() + 60)
+    try:
+        wk.require_install_code("WRONG234")
+        _wrong_ok = True
+    except RuntimeError:
+        _wrong_ok = False
+    check("安装码不对时拒绝，且令牌保留（还能继续试）",
+          (not _wrong_ok) and os.path.exists(_tokp))
+
+    _put_token(_code, time.time() + 60)
+    try:
+        wk.require_install_code(_code.lower())      # 大小写不敏感
+        _pass_ok = True
+    except RuntimeError:
+        _pass_ok = False
+    check("正确的码能通过，并且用后立即作废（一码一次）",
+          _pass_ok and not os.path.exists(_tokp))
+
+    _put_token(_code, time.time() - 1)
+    _exp_msg = ""
+    try:
+        wk.require_install_code(_code)
+        _exp_ok = True
+    except RuntimeError as e:
+        _exp_ok = False
+        _exp_msg = str(e)
+    check("过期的码不能用，并顺手作废", (not _exp_ok) and "过期" in _exp_msg)
+
+    _put_token(_code, time.time() + 60)
+    _burst = 0
+    for _i in range(5):
+        try:
+            wk.require_install_code("WRONG%02d" % _i)
+        except RuntimeError:
+            _burst += 1
+    check("连错 5 次令牌作废（挡在线爆破）", _burst == 5 and not os.path.exists(_tokp))
+
+    check("三个「装外部代码」的动作都在闸门名单里，一个都不能漏",
+          set(wk.GATED) == {"replace-binary", "build-openvpn", "update-web"}, wk.GATED)
+
+    if POSIX:
+        _r = subprocess.run(["bash", os.path.join(CODE, "install-code.sh"), "600"],
+                            capture_output=True, text=True,
+                            env=dict(os.environ, OVPN_WEB_ETC=_etc, OVPN_CODE_QUIET="1"))
+        _c = _r.stdout.strip()
+        check("install-code.sh 能生成 8 位码，且字母表里没有 0/O/1/I",
+              _r.returncode == 0 and len(_c) == 8
+              and all(ch in "23456789ABCDEFGHJKLMNPQRSTUVWXYZ" for ch in _c),
+              (_r.returncode, _c, _r.stderr[-200:]))
+        _mode = oct(os.stat(_tokp).st_mode & 0o777)
+        check("安装码文件权限 600（同机其他用户读不到）", _mode == "0o600", _mode)
+        try:
+            wk.require_install_code(_c)
+            _gen_ok = True
+        except RuntimeError:
+            _gen_ok = False
+        check("脚本生成出来的码能直接通过 worker 校验", _gen_ok)
+
+    check("install.sh 把 bin/ 收给 root（Web 用户不能再写要被 root 执行的程序）",
+          'chown -R root:root "$DEST/bin"' in open(os.path.join(CODE, "install.sh"),
+                                                   encoding="utf-8").read())
+
     if POSIX:
         import worker as wk
         f1 = wk.take_sys_lock(2)

@@ -29,6 +29,7 @@ SRC="$(cd "$(dirname "$0")" && pwd)"
 UNIT="/etc/systemd/system/openvpn-web.service"
 SUDOERS="/etc/sudoers.d/openvpn-web"
 USER="ovpnweb"
+ETC="${OVPN_WEB_ETC:-/etc/openvpn-web}"
 PORT="${OVPN_WEB_PORT:-8800}"
 PY=""
 
@@ -123,11 +124,12 @@ purge_all() {
         say "      无 firewalld，跳过"
     fi
 
-    step "[6/7] 删目录、sudoers、sysctl、运行账号"
+    step "[6/7] 删目录、sudoers、sysctl、安装码、运行账号"
     rm -rf "$DEST"
     rm -f /etc/sudoers.d/openvpn-web /etc/sysctl.d/99-openvpn-web.conf
+    rm -rf "$ETC"
     userdel ovpnweb >/dev/null 2>&1 || true
-    say "      已删 $DEST / sudoers / sysctl 配置 / ovpnweb 账号"
+    say "      已删 $DEST / sudoers / sysctl 配置 / 安装码 / ovpnweb 账号"
 
     step "[7/7] 残留自查"
     left=0
@@ -228,10 +230,21 @@ if ! id "$USER" >/dev/null 2>&1; then
     useradd -r -s /sbin/nologin -d "$DEST" "$USER" 2>/dev/null || \
     useradd -r -s /usr/sbin/nologin -d "$DEST" "$USER"
 fi
-chown -R "$USER:$USER" "$DEST/data" "$DEST/bin"
+chown -R "$USER:$USER" "$DEST/data"
+# bin/ 不交给 Web 用户：二进制由 root 侧的 worker 落盘，Web 只要有可执行位就够了。
+# 万一 Web 进程被打穿，也改不了这个「下次启动会以 root 跑」的程序。
+chown -R root:root "$DEST/bin" 2>/dev/null || true
+chmod 755 "$DEST/bin" 2>/dev/null || true
+chmod 755 "$DEST/bin"/* 2>/dev/null || true
 chown root:root "$DEST" "$DEST"/*.py "$DEST"/*.html "$DEST"/*.sh 2>/dev/null || true
 chmod 644 "$DEST"/*.py "$DEST"/*.html 2>/dev/null || true
 chmod 755 "$DEST"/*.sh 2>/dev/null || true
+# 安装码脚本是「装外部代码」的唯一人工闸门，只能 root 执行
+if [ -f "$DEST/install-code.sh" ]; then
+    chown root:root "$DEST/install-code.sh" && chmod 700 "$DEST/install-code.sh"
+fi
+# 安装码存放目录（600 的令牌文件由 install-code.sh 写）
+install -d -m 700 -o root -g root "$ETC" 2>/dev/null || { mkdir -p "$ETC" && chmod 700 "$ETC"; }
 
 # ---------------------------------------------------------------- 4) 提权白名单
 step "[4/8] 配置提权白名单（Web 只能执行 worker.py 一个命令）"
@@ -351,6 +364,14 @@ PYEOF
 [ -n "$IP" ] || IP="$(ip -4 addr show scope global 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)"
 
 VERSION="$("$DEST/bin/openvpn" --version 2>/dev/null | head -1 | awk '{print $2}')"
+
+# 首装时向导第 2 步就要上传二进制，当场预授权一个 24 小时的安装码印在下面，
+# 省得装完还要另开一个终端。之后每次替换二进制 / 编译源码 / 更新 Web，
+# 都要重新执行 install-code.sh 拿新码（一次性，填错 5 次作废）。
+FIRSTCODE=""
+if [ -x "$DEST/install-code.sh" ]; then
+    FIRSTCODE="$(OVPN_CODE_QUIET=1 "$DEST/install-code.sh" 86400 2>/dev/null || true)"
+fi
 CLIENT_IP="$("$PY" - "$DEST" <<'PYEOF' 2>/dev/null || true
 import os, sys, json, sqlite3
 root = sys.argv[1]
@@ -373,6 +394,7 @@ cat <<EOF
  管理账户:   admin
  管理密码:   $( [ "$NEWPW" = 1 ] && echo "admin（首次登录强制修改）" || echo "（沿用已有 data/admin_password.txt）" )
  OpenVPN:    ${VERSION:-未知版本}  监听 ${CLIENT_IP:-$IP}:1194
+ 安装码:     ${FIRSTCODE:-（生成失败，请执行 $DEST/install-code.sh）}   ← 向导第 2 步上传二进制时填，24 小时内有效
  本机编译:   ${BUILD_ENV}
  客户端配置: $DEST/data/company.ovpn   （全员共用，含 CA 与 tls-crypt）
  服务端配置: $DEST/data/server.conf

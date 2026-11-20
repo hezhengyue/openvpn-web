@@ -728,9 +728,22 @@ def wizard_params():
     return ok({"cfg": c})
 
 
+def _install_code():
+    """安装码：只在这一次请求里透传给 worker，不落库、不写日志
+
+    替换/编译二进制、更新 Web 会把外部代码装进系统（装上去下次启动就是 root），
+    所以 worker 要求带一个只有本机 root 能生成的一次性码，一码一次。
+    """
+    return (request.form.get("install_code") or "").strip()
+
+
 @app.post("/api/wizard/binary")
 def wizard_binary():
-    """向导里直接上传静态 openvpn 二进制 —— 全 Web，不用命令行"""
+    """向导里直接上传静态 openvpn 二进制 —— 全 Web，不用命令行
+
+    落盘交给 root 侧的 worker（和「版本与更新」页同一条路）：bin/ 归 root，
+    Web 没有写它的权限；顺带拿到旧二进制快照，并用 rename 替换，不会 ETXTBSY。
+    """
     f = request.files.get("file")
     if not f:
         raise ValueError("未选择文件")
@@ -742,12 +755,26 @@ def wizard_binary():
     if not chk["ok"]:
         os.remove(staged)
         raise ValueError(chk["msg"])
-    os.makedirs(os.path.dirname(core.BIN), exist_ok=True)
-    shutil.copy2(staged, core.BIN)
-    os.chmod(core.BIN, 0o755)
+    try:
+        if MOCK or getattr(os, "geteuid", lambda: -1)() == 0:
+            # 手工以 root 跑（试用 / 自检）时没有 sudoers 也能用：直接落盘。
+            # 正常安装下 Web 以 ovpnweb 运行，走下面的 worker 路径，这个口子用不到。
+            dst = core.BIN
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            tmp = dst + ".new"
+            shutil.copy2(staged, tmp)
+            os.chmod(tmp, 0o755)
+            os.replace(tmp, dst)
+            os.remove(staged)
+        else:
+            sudo_worker(uuid.uuid4().hex, "replace-binary",
+                        {"staged": staged, "install_code": _install_code()}, timeout=120)
+    except Exception:
+        if os.path.exists(staged):
+            os.remove(staged)
+        raise
     v, br = core.binary_version(core.BIN)
     core.set_meta("openvpn_version", v)
-    os.remove(staged)
     core.log_audit("admin", "wizard.binary", "上传 %s" % v)
     return ok({"version": v, "branch": br, "msg": chk["msg"]})
 
@@ -1279,6 +1306,7 @@ def update_binary():
     if not f:
         raise ValueError("未选择文件")
     allow_major = request.form.get("allow_major") == "1"
+    code = _install_code()      # 后台线程里拿不到 request，先取出来闭包带进去
     core.ensure_dirs()
     staged = os.path.join(core.STAGING, "openvpn.new")
     f.save(staged)
@@ -1299,7 +1327,8 @@ def update_binary():
             tlog(tid, "回滚失败: %s" % e)
 
     def s1():
-        sudo_worker(CTX["tid"], "replace-binary", {"staged": staged, "allow_major": allow_major})
+        sudo_worker(CTX["tid"], "replace-binary",
+                    {"staged": staged, "allow_major": allow_major, "install_code": code})
         v, br = core.binary_version(core.BIN)
         return "已替换: %s（%s，EOL %s）" % (v, br, core.BRANCH_EOL.get(br, "未知"))
     def s2():
@@ -1367,6 +1396,7 @@ def update_source():
         os.remove(staged)
         raise
     allow_major = request.form.get("allow_major") == "1"
+    code = _install_code()      # 同上：后台线程里没有 request 上下文
     old_fp = core.get_meta("config_fingerprint")
     snap = core.snapshot("编译升级前")
 
@@ -1380,7 +1410,8 @@ def update_source():
 
     def s1():
         sudo_worker(CTX["tid"], "build-openvpn",
-                    {"staged": staged, "allow_major": allow_major}, timeout=1500)
+                    {"staged": staged, "allow_major": allow_major, "install_code": code},
+                    timeout=1500)
         v, br = core.binary_version(core.BIN)
         return "已编译并替换为 %s（%s 分支）" % (v, br)
 
@@ -1417,7 +1448,7 @@ def update_web():
     f.save(staged)
     core.snapshot("更新 Web 前")
     tid = uuid.uuid4().hex
-    sudo_worker(tid, "update-web", {"staged": staged})
+    sudo_worker(tid, "update-web", {"staged": staged, "install_code": _install_code()})
     core.log_audit("admin", "update.web", "上传更新包")
     return ok({"task_id": tid, "msg": "Web 正在更新并重启，页面会自动重连；请勿关闭浏览器"})
 
