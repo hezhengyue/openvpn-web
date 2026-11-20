@@ -46,7 +46,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "1.3.4"
+WEB_VERSION = "1.3.5"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -181,7 +181,8 @@ def init_db():
     for k, v in (("initialized", 0), ("wizard_step", 0), ("admin_hash", ""),
                  ("admin_salt", ""), ("config_fingerprint", ""), ("openvpn_version", ""),
                  ("last_update", ""), ("csrf", ""), ("schema_v2", 0),
-                 ("admin_user", "admin"), ("allow_init_v2", 0)):
+                 ("admin_user", "admin"), ("allow_init_v2", 0),
+                 ("admin_must_change", 0)):
         con.execute("INSERT OR IGNORE INTO meta(k,v) VALUES(?,?)", (k, json.dumps(v, ensure_ascii=False)))
     con.commit()
     # 迁移只搬数据，不建表（表已由 SCHEMA 建好）；万一某台机器上老库结构特殊，
@@ -2496,6 +2497,24 @@ def set_admin_user(name):
     return name
 
 
+def admin_must_change():
+    """是否还卡在「首次登录必须改密」状态。"""
+    try:
+        return bool(int(get_meta("admin_must_change") or 0))
+    except (TypeError, ValueError):
+        return False
+
+
+def _write_admin_password_note(text):
+    """覆盖初始凭据文件：默认口令一旦改掉，磁盘上就不再留可用明文。"""
+    try:
+        with open(os.path.join(DATA, "admin_password.txt"), "w") as f:
+            f.write(text)
+        os.chmod(os.path.join(DATA, "admin_password.txt"), 0o600)
+    except Exception:
+        pass
+
+
 def admin_login(user, pw):
     """账户 + 密码双要素。用户名用常量时间比较，避免时序侧漏账户名。"""
     import hmac
@@ -2512,6 +2531,8 @@ def admin_reset_credentials():
     pw = rand_password(18)
     set_meta("admin_user", name)
     set_meta("admin_hash", hash_password(pw))
+    # 重置生成的是一次性随机凭据，不会再走「默认 admin/admin 首登强改」流程。
+    set_meta("admin_must_change", 0)
     log_audit("admin", "admin.reset", "管理账户与密码已重新生成")
     # 同步覆盖初始凭据文件，避免有人照着旧文件登录失败。
     # 第一行必须是纯密码：bootstrap_admin() 只取第一行。
@@ -2525,11 +2546,14 @@ def admin_reset_credentials():
     return {"username": name, "password": pw}
 
 
-def admin_set_password(pw):
+def admin_set_password(pw, note=""):
     if len(pw) < 8:
         raise ValueError("管理密码至少 8 位")
     set_meta("admin_hash", hash_password(pw))
-    log_audit("admin", "password.change", "管理密码已修改")
+    # 不管是首登强改还是日常改密，改成功就解除默认口令状态。
+    set_meta("admin_must_change", 0)
+    _write_admin_password_note("# 管理密码已修改，明文不再保存（%s）。\n" % now())
+    log_audit("admin", "password.change", note or "管理密码已修改")
 
 
 def admin_verify(pw):

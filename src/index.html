@@ -30,10 +30,11 @@ button,input,select,textarea{font-family:inherit;font-size:13px}
 *::-webkit-scrollbar-thumb:hover{background:oklch(.78 .01 250);background-clip:content-box}
 *::-webkit-scrollbar-track{background:transparent}
 
-/* ---------- 登录 ---------- */
-#login{height:100vh;display:flex;align-items:center;justify-content:center;background:
+/* ---------- 登录 / 首登强制改密 ---------- */
+#login,#force{height:100vh;display:flex;align-items:center;justify-content:center;background:
  radial-gradient(1200px 600px at 15% -10%,oklch(.90 .05 258/.55),transparent 60%),
  radial-gradient(900px 500px at 100% 110%,oklch(.93 .04 200/.5),transparent 55%),var(--background)}
+#force{display:none}
 .lbox{background:var(--card);padding:32px 30px;border-radius:var(--r-xl);width:352px;border:1px solid var(--border);box-shadow:var(--shadow-lg)}
 .lbox h1{font-size:18px;margin:0 0 3px;letter-spacing:-.01em}
 .lbox p{color:var(--muted-foreground);font-size:12.5px;margin:0 0 22px;line-height:1.6}
@@ -220,10 +221,20 @@ pre::-webkit-scrollbar-thumb{background:oklch(.45 .02 250);background-clip:conte
 <div id="login"><div class="lbox">
   <div class="lm"><svg viewBox="0 0 24 24"><rect x="4.8" y="10.4" width="14.4" height="9.6" rx="2.6"/><path d="M8.2 10.4V8a3.8 3.8 0 0 1 7.6 0v2.4"/><circle cx="12" cy="15.2" r="1.15" fill="currentColor" stroke="none"/></svg></div>
   <h1>OpenVPN 管理后台</h1><p>账号接入 · 访问控制 · 审计一体化</p>
-  <label class="f"><span>管理账户</span><input id="lu" style="width:100%" placeholder="默认 admin" autocomplete="username" onkeydown="if(event.key==='Enter')$('#lp').focus()"></label>
+  <label class="f"><span>管理账户</span><input id="lu" style="width:100%" value="admin" placeholder="默认 admin" autocomplete="username" onkeydown="if(event.key==='Enter')$('#lp').focus()"></label>
   <label class="f"><span>管理密码</span><input type="password" id="lp" style="width:100%" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()"></label>
   <button class="btn pri" style="width:100%;height:36px" onclick="doLogin()">登录</button>
-  <p style="margin:16px 0 0">初始凭据见 <span class="mono">data/admin_password.txt</span>（账户名默认 admin）；忘了密码就在服务器上执行 <span class="mono">bash /opt/openvpn-web/reset-admin.sh</span> 重置。</p>
+  <p style="margin:16px 0 0">新装默认账户 <span class="mono">admin</span>、密码 <span class="mono">admin</span>，首次登录会强制修改。忘了密码就在服务器上执行 <span class="mono">bash /opt/openvpn-web/reset-admin.sh</span> 重置。</p>
+</div></div>
+
+<div id="force"><div class="lbox">
+  <div class="lm"><svg viewBox="0 0 24 24"><rect x="4.8" y="10.4" width="14.4" height="9.6" rx="2.6"/><path d="M8.2 10.4V8a3.8 3.8 0 0 1 7.6 0v2.4"/><circle cx="12" cy="15.2" r="1.15" fill="currentColor" stroke="none"/></svg></div>
+  <h1>首次登录 · 修改管理密码</h1><p>当前使用的是默认密码 <span class="mono">admin</span>。出于安全考虑，必须先设置一个新密码才能进入后台。</p>
+  <label class="f"><span>新密码（至少 8 位）</span><input type="password" id="fp1" style="width:100%" autocomplete="new-password" oninput="forcePwMeter()" onkeydown="if(event.key==='Enter')$('#fp2').focus()"></label>
+  <label class="f"><span>重复新密码</span><input type="password" id="fp2" style="width:100%" autocomplete="new-password" oninput="forcePwMeter()" onkeydown="if(event.key==='Enter')doForce()"></label>
+  <div class="muted" id="fpm" style="font-size:12px;margin:-4px 0 12px;min-height:18px"></div>
+  <button class="btn pri" style="width:100%;height:36px" onclick="doForce()">保存新密码并进入</button>
+  <button class="btn" style="width:100%;height:34px;margin-top:8px" onclick="forceLogout()">退出登录</button>
 </div></div>
 
 <div id="app">
@@ -270,6 +281,8 @@ async function api(path,opt={}){
   const r=await fetch(path,{method:opt.method||'GET',headers:h,body,credentials:'same-origin'});
   let j;try{j=await r.json()}catch(e){j={ok:false,msg:'HTTP '+r.status}}
   if(r.status===401||j.need_login){S.logged=false;showLogin();throw new Error('请先登录')}
+  // 后端拦住了「未改默认密码就想访问别的接口」：回到首登改密页，不显示误导性的报错。
+  if(j.must_change){S.logged=true;showForce();throw new Error('首次登录请先修改管理密码')}
   if(!r.ok||!j.ok){toast(j.msg||('HTTP '+r.status),'err');throw new Error(j.msg||'HTTP '+r.status)}
   return j;
 }
@@ -282,14 +295,31 @@ function downloadText(name,text){
  const b=new Blob(['\ufeff'+text],{type:'text/plain;charset=utf-8'});
  const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=name;
  document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},500)}
-function showLogin(){$('#login').style.display='flex';$('#app').style.display='none'}
-function showApp(){$('#login').style.display='none';$('#app').style.display='block'}
+function showLogin(){$('#login').style.display='flex';$('#force').style.display='none';$('#app').style.display='none'}
+function showForce(){$('#login').style.display='none';$('#force').style.display='flex';$('#app').style.display='none'}
+function showApp(){$('#login').style.display='none';$('#force').style.display='none';$('#app').style.display='block'}
 async function doLogin(){
   try{const j=await api('/api/login',{method:'POST',body:{username:$('#lu').value.trim()||'admin',password:$('#lp').value}});
-    S.csrf=j.csrf;S.logged=true;showApp();await loadState();
+    S.csrf=j.csrf;S.logged=true;$('#lp').value='';
+    if(j.must_change){showForce();return}
+    showApp();await loadState();
     go(S.initialized?(location.hash.slice(2)||'overview'):'wizard');
   }catch(e){}
 }
+function forcePwMeter(){const a=$('#fp1').value,b=$('#fp2').value,m=$('#fpm');
+ if(!a&&!b){m.textContent='';return}
+ if(a.length&&a.length<8){m.innerHTML='<span style="color:var(--err)">新密码至少 8 位</span>';return}
+ m.innerHTML=(a&&a===b)?'<span style="color:var(--ok)">两次一致</span>':'<span style="color:var(--err)">两次输入不一致</span>'}
+async function doForce(){
+  const a=$('#fp1').value,b=$('#fp2').value;
+  if(a.length<8){$('#fpm').innerHTML='<span style="color:var(--err)">新密码至少 8 位</span>';return}
+  if(a!==b){$('#fpm').innerHTML='<span style="color:var(--err)">两次输入不一致</span>';return}
+  try{await post('/api/password',{new:a,confirm:b});
+    $('#fp1').value='';$('#fp2').value='';forcePwMeter();
+    showApp();await loadState();go(S.initialized?(location.hash.slice(2)||'overview'):'wizard');
+  }catch(e){}
+}
+async function forceLogout(){try{await post('/api/logout')}catch(e){}S.logged=false;showLogin()}
 async function logout(){try{await post('/api/logout')}catch(e){}S.logged=false;showLogin()}
 async function loadState(){try{const j=await get('/api/state');S.cfg=j.cfg;S.initialized=j.initialized;
  /* 顶栏三个状态片：进程、服务端版本、配置指纹 */
@@ -1096,7 +1126,7 @@ async function pgSecurity(){
    <label class="f"><span>重复新密码</span><input type="password" id="np2" oninput="pwMeter()"></label>
    <div class="muted" id="npm" style="font-size:12px;margin:-4px 0 10px"></div>
    <button class="btn pri" onclick="chPwd()">修改密码</button>
-   <div class="muted" style="font-size:12px;margin-top:8px">两次必须一致，避免手滑输错把自己锁在外面。</div></div>
+   <div class="muted" style="font-size:12px;margin-top:8px">两次必须一致，避免手滑输错把自己锁在外面。新装默认密码 <span class="mono">admin</span> 已在首次登录时强制改掉；这里日常改密仍需填原密码。</div></div>
   <div class="card"><h3>重新生成账户与密码 <small>忘了凭据时用</small></h3>
    <button class="btn danger" onclick="resetAdmin()">一键重置</button>
    <div class="hint">忘了账户名或密码、进不来后台时用这个：不用验证当前密码，直接生成全新的账户名和密码，旧的立刻作废。
@@ -1150,8 +1180,9 @@ async function chPwd(){
  toast('管理密码已修改','ok');$('#op').value='';$('#np').value='';$('#np2').value='';pwMeter()}
 
 /* ---------------- 启动 ---------------- */
-(async()=>{try{const j=await get('/api/session');S.csrf=j.csrf;if(j.logged){S.logged=true;showApp();await loadState();
-  go(j.initialized?(location.hash.slice(2)||'overview'):'wizard')}else showLogin()}catch(e){showLogin()}})();
+(async()=>{try{const j=await get('/api/session');S.csrf=j.csrf;if(j.logged){S.logged=true;
+  if(j.must_change){showForce();return}
+  showApp();await loadState();go(j.initialized?(location.hash.slice(2)||'overview'):'wizard')}else showLogin()}catch(e){showLogin()}})();
 </script>
 </body>
 </html>

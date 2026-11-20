@@ -263,10 +263,9 @@ EOF
 step "[6/8] 初始管理密码"
 NEWPW=0
 if [ ! -s "$DEST/data/admin_password.txt" ]; then
-    # 注意：`tr </dev/urandom | head -c N` 在 pipefail 下会因 tr 收到 SIGPIPE(141) 而整体失败，
-    # 脚本会在写完 unit 之后静默退出。改成有限输入 + cut。
-    # 字符集里 '-' 放末尾，否则 tr 当成区间（'%-_' 会带出 \ [ ] ^ 等难输入的字符）
-    PW="$(head -c 8192 /dev/urandom | tr -dc 'A-Za-z0-9!@#%_-' | cut -c1-18)"
+    # 新装统一用默认账户 admin / 默认密码 admin；首次登录由 Web 强制改密，
+    # 不再随机生成一串让人抄写（也避免抄错把自己锁在外面）。
+    PW="admin"
     printf '%s\n' "$PW" > "$DEST/data/admin_password.txt"
     NEWPW=1
 fi
@@ -335,7 +334,8 @@ cat <<EOF
  安装完成
 ------------------------------------------------------------
  管理后台:   http://${IP:-<服务器IP>}:$PORT
- 管理密码:   $( [ "$NEWPW" = 1 ] && echo "$PW" || echo "（沿用已有 data/admin_password.txt）" )
+ 管理账户:   admin
+ 管理密码:   $( [ "$NEWPW" = 1 ] && echo "admin（首次登录强制修改）" || echo "（沿用已有 data/admin_password.txt）" )
  OpenVPN:    ${VERSION:-未知版本}  监听 ${CLIENT_IP:-$IP}:1194
  客户端配置: $DEST/data/company.ovpn   （全员共用，含 CA 与 tls-crypt）
  服务端配置: $DEST/data/server.conf
@@ -349,7 +349,7 @@ cat <<EOF
 EOF
 
 if [ "$NEWPW" = 1 ]; then
-    say "提示: 密码只在这里和 $DEST/data/admin_password.txt 出现，登录后请立刻修改。"
+    say "提示: 默认密码 admin 只在首次登录有效，登录后系统会强制你设置新密码。"
 fi
 if [ "$SRC" != "$DEST" ] && [ -d "$SRC" ]; then
     say "提示: 安装源目录 $SRC 已不再需要，可删掉腾空间（rm -rf $SRC）"

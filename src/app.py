@@ -64,17 +64,25 @@ app.secret_key = os.environ.get("OVPN_WEB_SECRET") or _default_secret()
 
 
 def bootstrap_admin():
-    """首次启动：读取 install.sh 生成的初始管理密码"""
+    """首次启动：默认 admin/admin；已有凭据文件则沿用其中的密码。"""
     if core.get_meta("admin_hash"):
         return
     p = os.path.join(core.DATA, "admin_password.txt")
+    pw = ""
     if os.path.exists(p):
         # 只取第一行：重置凭据时会在第二行追加账户名说明
         lines = [x.strip() for x in open(p).read().splitlines() if x.strip() and not x.startswith("#")]
         pw = lines[0] if lines else ""
-        if pw:
-            core.set_meta("admin_hash", core.hash_password(pw))
-            core.log_audit("system", "bootstrap", "初始管理密码已导入")
+    if not pw:
+        # 新装默认口令，首次登录后由 Web 强制改掉；不再生成随机密码让人抄。
+        pw = "admin"
+        core._write_admin_password_note("admin\n")
+    core.set_meta("admin_user", core.admin_user())
+    core.set_meta("admin_hash", core.hash_password(pw))
+    # 只有真正用了默认口令才强改；老机器带着随机初始密码升级不受影响。
+    core.set_meta("admin_must_change", 1 if pw == "admin" else 0)
+    core.log_audit("system", "bootstrap",
+                   "管理凭据已初始化，首次登录需修改密码" if pw == "admin" else "初始管理密码已导入")
 
 
 # --------------------------------------------------------------------------- 鉴权
@@ -108,6 +116,18 @@ def no_cache_html(resp):
     return resp
 
 
+def admin_must_change_session():
+    """以库里的标记为准同步会话，避免改完密码旧会话还卡在强改页。"""
+    if not session.get("user"):
+        return False
+    if core.admin_must_change():
+        session["must_change"] = True
+        return True
+    if session.pop("must_change", None):
+        return False
+    return False
+
+
 @app.before_request
 def guard():
     ip = client_ip()
@@ -126,6 +146,10 @@ def guard():
         return None
     if not session.get("user"):
         return jsonify(ok=False, msg="未登录", need_login=True), 401
+    # 默认 admin/admin 首次登录：只放行改密和退出，其他接口一律挡住，
+    # 防止有人绕开首屏直接改配置 / 看审计 / 改账户名。
+    if admin_must_change_session() and request.path not in ("/api/session", "/api/logout", "/api/password"):
+        return jsonify(ok=False, msg="首次登录请先修改管理密码", must_change=True), 403
     if request.method in ("POST", "PUT", "DELETE", "PATCH"):
         token = request.headers.get("X-CSRF-Token") or (request.get_json(silent=True) or {}).get("csrf")
         if not token or token != session.get("csrf"):
@@ -163,6 +187,7 @@ def api_session():
     return ok({"logged": bool(session.get("user")), "csrf": session["csrf"],
                "initialized": bool(core.get_meta("initialized")),
                "web_version": core.WEB_VERSION, "mock": MOCK,
+               "must_change": admin_must_change_session(),
                "admin_user": core.admin_user(), "src_ip": client_ip(),
                "allow": core.allow_list()})
 
@@ -184,9 +209,11 @@ def api_login():
     # 审计里的操作者就是管理员登录账户名，不再单独配「操作者名称」
     session["user"] = core.admin_user()
     session["csrf"] = uuid.uuid4().hex
+    forced = core.admin_must_change()
+    session["must_change"] = forced
     core.log_audit(session["user"], "login", "登录成功")
     return ok({"csrf": session["csrf"], "initialized": bool(core.get_meta("initialized")),
-               "admin_user": core.admin_user()})
+               "must_change": forced, "admin_user": core.admin_user()})
 
 
 @app.post("/api/logout")
@@ -202,10 +229,13 @@ def api_password():
     new = d.get("new", "")
     if new != d.get("confirm", ""):
         raise ValueError("两次输入的新密码不一致")
-    if not core.admin_verify(d.get("old", "")):
+    forced = admin_must_change_session()
+    # 首登强制改密时会话本身已经证明知道默认口令，不再要求手填旧密码。
+    if not forced and not core.admin_verify(d.get("old", "")):
         raise ValueError("原密码错误")
-    core.admin_set_password(new)
-    return ok(msg="管理密码已修改")
+    core.admin_set_password(new, "首次登录已强制修改默认密码" if forced else "管理密码已修改")
+    session.pop("must_change", None)
+    return ok(msg="管理密码已修改", must_change=False)
 
 
 @app.post("/api/admin-user")

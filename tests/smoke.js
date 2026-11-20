@@ -64,6 +64,9 @@ async function waitUp() {
     vc.on('jsdomError', e => errors.push('jsdomError: ' + (e.message || e)));
     vc.on('error', (...a) => errors.push('console.error: ' + a.join(' ')));
     const html = await (await fetch(base + '/')).text();
+    if (!html.includes('id="force"')) errors.push('缺少首登强制改密界面 #force');
+    if (!/新装默认账户/.test(html) || !/首次登录会强制修改/.test(html)) errors.push('登录页未说明默认 admin/admin 与首登强改');
+    if (!/async function doForce\(/.test(html)) errors.push('缺少首登改密提交逻辑 doForce');
     const jar = {};
     const dom = new JSDOM(html, {url: base + '/', runScripts: 'dangerously', virtualConsole: vc,
       pretendToBeVisual: true, beforeParse(w) {
@@ -88,6 +91,7 @@ async function waitUp() {
       }});
     const w = dom.window;
     const wait = ms => new Promise(r => setTimeout(r, ms));
+    if (w.document.querySelector('#lu').value !== 'admin') errors.push('登录页账户框未预填默认账户 admin');
     w.document.querySelector('#lu').value = 'admin';
     w.document.querySelector('#lp').value = 'SmokePass123!';
     await w.doLogin();

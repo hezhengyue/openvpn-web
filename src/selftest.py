@@ -53,6 +53,33 @@ def wait_task(cli, tid, timeout=40):
 
 def main():
     core.init_db()
+    web.bootstrap_admin()
+
+    # ---------- 默认凭据 / 首次登录强制改密 ----------
+    section("默认 admin/admin 与首登强改")
+    check("默认管理账户是 admin", core.admin_user() == "admin", core.admin_user())
+    check("默认管理密码是 admin", core.admin_verify("admin"))
+    check("新装标记首次登录必须改密", core.admin_must_change())
+    _init_pw = open(os.path.join(core.DATA, "admin_password.txt")).read().splitlines()[0]
+    check("默认凭据文件写入 admin", _init_pw == "admin", _init_pw)
+    fc = web.app.test_client()
+    lr = fc.post("/api/login", json={"username": "admin", "password": "admin"})
+    check("默认 admin/admin 可登录", lr.get_json().get("ok") is True, lr.get_json())
+    check("登录返回 must_change", lr.get_json().get("must_change") is True, lr.get_json())
+    FH = {"X-CSRF-Token": lr.get_json()["csrf"]}
+    check("未改密前业务接口被拦", fc.get("/api/state", headers=FH).status_code == 403)
+    check("未改密前改账户名被拦",
+          fc.post("/api/admin-user", json={"username": "boss"}, headers=FH).status_code == 403)
+    rr = fc.post("/api/password", json={"new": "TestPass123!", "confirm": "TestPass123!"}, headers=FH)
+    check("首登改密无需手填旧密码", rr.get_json().get("ok") is True, rr.get_json())
+    check("改密后强改标记清除", core.admin_must_change() is False)
+    check("改密后业务接口放行", fc.get("/api/state", headers=FH).status_code == 200)
+    check("改密后默认密码失效", core.admin_verify("admin") is False)
+    check("凭据文件不再留明文口令",
+          open(os.path.join(core.DATA, "admin_password.txt")).read().startswith("#"))
+    check("新密码可登录", web.app.test_client().post(
+        "/api/login", json={"username": "admin", "password": "TestPass123!"}).get_json().get("ok") is True)
+
     core.set_meta("admin_hash", core.hash_password("TestPass123!"))
     web.bootstrap_admin()
     c = web.app.test_client()
@@ -530,6 +557,7 @@ def main():
     H["X-CSRF-Token"] = c.get("/api/session").get_json()["csrf"]
     check("非法账户名被拒", P("/api/admin-user", {"username": "a b"}).status_code == 400)
     check("重置凭据不需要密码", P("/api/admin-reset", {}).get_json()["ok"])
+    check("重置后不触发首登强改", core.admin_must_change() is False)
     _reset = core.admin_reset_credentials()   # 直接取明文用于登录断言
     check("重置返回新账户名", _reset.get("username", "").startswith("admin-"), _reset)
     check("重置返回新密码", len(_reset.get("password", "")) >= 12, _reset)
