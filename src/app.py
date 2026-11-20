@@ -163,7 +163,7 @@ def api_session():
     return ok({"logged": bool(session.get("user")), "csrf": session["csrf"],
                "initialized": bool(core.get_meta("initialized")),
                "web_version": core.WEB_VERSION, "mock": MOCK,
-               "admin_name": core.admin_name(), "src_ip": client_ip(),
+               "admin_user": core.admin_user(), "src_ip": client_ip(),
                "allow": core.allow_list()})
 
 
@@ -181,17 +181,17 @@ def api_login():
     LOGIN_FAILS.pop(ip, None)
     session.clear()
     session.permanent = True
-    # 登录只有密码没有用户名，所以会话里的「操作者」就是可配置的操作者名称
-    session["user"] = core.admin_name()
+    # 审计里的操作者就是管理员登录账户名，不再单独配「操作者名称」
+    session["user"] = core.admin_user()
     session["csrf"] = uuid.uuid4().hex
     core.log_audit(session["user"], "login", "登录成功")
     return ok({"csrf": session["csrf"], "initialized": bool(core.get_meta("initialized")),
-               "admin_name": session["user"], "admin_user": core.admin_user()})
+               "admin_user": core.admin_user()})
 
 
 @app.post("/api/logout")
 def api_logout():
-    core.log_audit(session.get("user") or core.admin_name(), "logout", "退出登录")
+    core.log_audit(session.get("user") or core.admin_user(), "logout", "退出登录")
     session.clear()
     return ok()
 
@@ -199,48 +199,35 @@ def api_logout():
 @app.post("/api/password")
 def api_password():
     d = request.get_json(silent=True) or {}
+    new = d.get("new", "")
+    if new != d.get("confirm", ""):
+        raise ValueError("两次输入的新密码不一致")
     if not core.admin_verify(d.get("old", "")):
         raise ValueError("原密码错误")
-    core.admin_set_password(d.get("new", ""))
+    core.admin_set_password(new)
     return ok(msg="管理密码已修改")
 
 
 @app.post("/api/admin-user")
 def api_admin_user():
-    """改管理账户名（独立于操作者显示名），需验当前密码防止会话被劫持后改锁"""
+    """改管理账户名：忘了密码时也要能改，因此不校验当前密码。"""
     d = request.get_json(silent=True) or {}
-    if not core.admin_verify(d.get("password", "")):
-        raise ValueError("当前密码错误")
     name = core.set_admin_user(d.get("username", ""))
     return ok({"username": name, "msg": "管理账户名已改为 " + name})
 
 
 @app.post("/api/admin-reset")
 def api_admin_reset():
-    """一键重置管理账户 + 密码：需验当前密码，返回明文只此一次"""
-    d = request.get_json(silent=True) or {}
-    if not core.admin_verify(d.get("password", "")):
-        raise ValueError("当前密码错误")
+    """一键重置管理账户 + 密码：忘了凭据时用，不校验当前密码，返回明文只此一次。"""
     r = core.admin_reset_credentials()
     return ok({"username": r["username"], "password": r["password"],
                "msg": "管理账户与密码已重置，请用新凭据重新登录"})
 
 
-@app.post("/api/admin-name")
-def api_admin_name():
-    """改操作者名称：审计日志里的「操作者」列就显示这个名字"""
-    d = request.get_json(silent=True) or {}
-    name = core.set_admin_name(d.get("name", ""))
-    session["user"] = name          # 立即生效，不用重新登录
-    core.log_audit(name, "admin.rename", "操作者名称已修改")
-    return ok({"name": name, "msg": "操作者名称已改为 " + name})
-
-
 @app.get("/api/security/allow")
 def api_allow_get():
     return ok({"allow": core.allow_list(), "detected": core.local_subnets(),
-               "current_ip": client_ip(), "admin_name": core.admin_name(),
-               "admin_user": core.admin_user(),
+               "current_ip": client_ip(), "admin_user": core.admin_user(),
                "vpn_cidr": core.cfg().get("vpn_cidr", "")})
 
 
@@ -544,7 +531,7 @@ def api_state():
     con.close()
     return ok({
         "initialized": bool(core.get_meta("initialized")),
-        "version": vi, "cfg": c, "admin_name": core.admin_name(), "src_ip": client_ip(),
+        "version": vi, "cfg": c, "admin_user": core.admin_user(), "src_ip": client_ip(),
         "web_version": core.WEB_VERSION,
         "stats": {"users": len(users), "enabled": len([u for u in users if u["enabled"]]),
                   "online": len(online), "grants": n_grants, "peers": n_peers,

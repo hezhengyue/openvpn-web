@@ -194,6 +194,7 @@ async function waitUp() {
       if (!/openvpn\//.test(t) || !/web\//.test(t)) errors.push('备份说明没写清两块内容');
       if (!/立即备份/.test(t)) errors.push('备份卡片缺少手动备份入口');
       if (!/来源/.test(t)) errors.push('备份列表缺少来源标记');
+      if (/安全线|分支 EOL|达标|偏低/.test(t)) errors.push('版本页仍显示毫无作用的安全线/分支 EOL');
       const cards = [...w.document.querySelectorAll('#page > .card')];
       const upIdx = cards.findIndex(c => c.textContent.includes('升级 OpenVPN'));
       const bkIdx = cards.findIndex(c => c.textContent.includes('备份与恢复'));
@@ -227,6 +228,10 @@ async function waitUp() {
       await wait(120);
       const t = w.document.querySelector('#ubox').textContent;
       if (!/爱丽丝|卡罗/.test(t)) errors.push('按部门/姓名搜索无效');
+      if (w.document.querySelector('#ubox .pager')) errors.push('认证账号表格仍分页（应全部显示）');
+      const pt = w.document.querySelector('#page').textContent;
+      if (!/导入 Excel（全量覆盖）/.test(pt) || !/导出 Excel（全部账号）/.test(pt))
+        errors.push('认证账号导入导出按钮缺少全量说明');
       kw.value = ''; kw.dispatchEvent(new w.Event('input'));
       // 台账页只做台账：操作列不该再有「踢」（踢下线统一放在在线用户页）
       const ubtns = [...w.document.querySelectorAll('#ubox button')].map(b => b.textContent.trim());
@@ -250,7 +255,7 @@ async function waitUp() {
       w.closeModal();
     } catch (e) { errors.push('账号页交互抛错: ' + e.message); }
 
-    // 这一轮：最大客户端去掉、动态地址池改成手动设置、白名单/操作者名称、审计带 IP
+    // 这一轮：最大客户端去掉、动态地址池改成手动设置、管理账户免密、审计带 IP
     try {
       w.go('settings'); await wait(500);
       const pg = w.document.querySelector('#page');
@@ -269,20 +274,24 @@ async function waitUp() {
         pool.checked = false; w.poolToggle();
       }
       const who = w.document.querySelector('#vwho');
-      if (!who || !(who.textContent || '').trim()) errors.push('顶栏没有显示操作者名称');
+      if (!who || !(who.textContent || '').trim()) errors.push('顶栏没有显示管理员账户');
     } catch (e) { errors.push('设置页地址池交互抛错: ' + e.message); }
 
     try {
       w.go('security'); await wait(500);
       const t = w.document.querySelector('#page').textContent;
-      if (!/操作者名称/.test(t)) errors.push('安全页缺少操作者名称设置');
+      if (/操作者名称/.test(t)) errors.push('安全页仍有已废弃的「操作者名称」设置');
       if (!/访问白名单/.test(t)) errors.push('安全页缺少管理端访问白名单');
       if (!w.document.querySelector('#tg_web_allow')) errors.push('白名单没有标签式输入区');
       else if (w.document.querySelectorAll('#tgchip_web_allow .chip').length < 1)
         errors.push('白名单初始条目没渲染出来');
-      if (!w.document.querySelector('#adn')) errors.push('缺少操作者名称输入框');
+      if (w.document.querySelector('#adn')) errors.push('操作者名称输入框应已移除');
       if (!w.document.querySelector('#au')) errors.push('安全页缺少独立管理账户名输入框');
+      if (w.document.querySelector('#aup') || w.document.querySelector('#rp'))
+        errors.push('改账户名/重置仍要求输入当前密码（忘了密码时无法使用）');
+      if (!w.document.querySelector('#np2')) errors.push('改密码缺少「重复新密码」输入框');
       if (!/重新生成账户与密码/.test(t)) errors.push('安全页缺少一键重置管理凭据入口');
+      if (!/reset-admin\.sh/.test(t)) errors.push('安全页缺少 Linux 重置脚本提示');
     } catch (e) { errors.push('安全页交互抛错: ' + e.message); }
 
     try {

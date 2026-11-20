@@ -223,7 +223,7 @@ pre::-webkit-scrollbar-thumb{background:oklch(.45 .02 250);background-clip:conte
   <label class="f"><span>管理账户</span><input id="lu" style="width:100%" placeholder="默认 admin" autocomplete="username" onkeydown="if(event.key==='Enter')$('#lp').focus()"></label>
   <label class="f"><span>管理密码</span><input type="password" id="lp" style="width:100%" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()"></label>
   <button class="btn pri" style="width:100%;height:36px" onclick="doLogin()">登录</button>
-  <p style="margin:16px 0 0">初始凭据见 <span class="mono">data/admin_password.txt</span>（账户名默认 admin）</p>
+  <p style="margin:16px 0 0">初始凭据见 <span class="mono">data/admin_password.txt</span>（账户名默认 admin）；忘了密码就在服务器上执行 <span class="mono">bash /opt/openvpn-web/reset-admin.sh</span> 重置。</p>
 </div></div>
 
 <div id="app">
@@ -248,7 +248,7 @@ pre::-webkit-scrollbar-thumb{background:oklch(.45 .02 250);background-clip:conte
     <span class="chipv" id="vstat"><i class="dot"></i><b>—</b></span>
     <span class="chipv" id="vver">—</span>
     <span class="chipv" id="vfp">—</span>
-    <span class="chipv" id="vwho" title="操作者名称，审计日志里显示它">—</span>
+    <span class="chipv" id="vwho" title="当前管理员账户 · 来源 IP">—</span>
     <a class="btn sm" href="javascript:logout()">退出</a></div></div>
   <div class="content" id="page"></div>
  </div>
@@ -299,7 +299,7 @@ async function loadState(){try{const j=await get('/api/state');S.cfg=j.cfg;S.ini
  // 带上 Web 版本：改完刷新就能对照，避免"看到的是缓存旧页面"这种扯不清的情况
  if(ve)ve.textContent='OpenVPN '+j.version.version+' · Web '+(j.web_version||'');
  const fp=document.getElementById('vfp');if(fp)fp.innerHTML='<b>'+(j.version.fingerprint||'—')+'</b>';
- const who=document.getElementById('vwho');if(who)who.innerHTML='<b>'+esc(j.admin_name||'管理员')+'</b> · '+esc(j.src_ip||'');
+ const who=document.getElementById('vwho');if(who)who.innerHTML='<b>'+esc(j.admin_user||'管理员')+'</b> · '+esc(j.src_ip||'');
  /* 安装向导只在「还没装完」时存在：装完就藏起来，避免日常运维误点进去重跑一遍 */
  const nw=document.getElementById('navWizard');if(nw)nw.style.display=j.initialized?'none':'';
 }catch(e){}}
@@ -445,8 +445,7 @@ async function pgOverview(){
     ${tbl(['项目','值'],[
       ['初始化',j.initialized?badge('已完成','ok'):badge('未完成','warn')+' <button class="btn sm" onclick="go(\'wizard\')">去安装</button>'],
       ['OpenVPN 进程',j.vpn_alive?badge('运行中','ok'):badge('未运行','err')],
-      ['服务端版本',esc(v.version)+' '+(v.secure?badge('≥ 安全线','ok'):badge('低于安全线','err'))],
-      ['分支 EOL',esc(v.eol)],['配置指纹','<span class="mono">'+esc(v.fingerprint||'—')+'</span>'],
+      ['服务端版本',esc(v.version)],['配置指纹','<span class="mono">'+esc(v.fingerprint||'—')+'</span>'],
       ['网段 / 端口',esc(j.cfg.vpn_cidr)+' · '+esc(j.cfg.proto)+'/'+esc(j.cfg.port)],
     ])}
     <div class="bar" style="margin-top:12px"><button class="btn" onclick="restartSvc()">重启服务</button>
@@ -629,11 +628,13 @@ async function pgUsers(){const j=await get('/api/users');U.list=j.users;
  $('#page').innerHTML=`<div class="card"><h3>认证账号 <small>一人一账号一固定 IP；账号可中文；密码只存哈希</small></h3>
  <div class="bar"><input type="text" id="ukw" placeholder="搜索账号 / 姓名 / 部门 / IP" value="${esc(U.kw)}" style="width:230px" oninput="U.kw=this.value;PG.users=0;renderUsers()">
  <select onchange="U.state=this.value;PG.users=0;renderUsers()"><option value="all">全部状态</option><option value="on" ${U.state==='on'?'selected':''}>启用</option><option value="off" ${U.state==='off'?'selected':''}>停用</option></select>
- <button class="btn pri" onclick="userAdd()">添加账号</button><button class="btn" onclick="impOpen()">导入 Excel</button>
- <button class="btn" onclick="download('/api/users/export')">导出 Excel</button>
- <span class="muted">共 ${U.list.length} 个账号</span></div>
+ <button class="btn pri" onclick="userAdd()">添加账号</button>
+ <button class="btn" onclick="impOpen()">导入 Excel（全量覆盖）</button>
+ <button class="btn" onclick="download('/api/users/export')">导出 Excel（全部账号）</button>
+ <span class="muted">共 ${U.list.length} 个账号 · 列表全部显示，不分页</span></div>
  <div id="ubox"></div>
- <div class="hint">固定 IP 由服务端下发，客户端改不了；改 IP 会自动重建 ACL 并断开该账号当前连接。<br>
+ <div class="hint">导入 / 导出<b>只针对全部账号</b>，不用也不提供「选中某个人」：导出是当前整张台账，导入是整张表覆盖同步（表里没有的账号会被删除，预览时可逐项核对）。<br>
+ 固定 IP 由服务端下发，客户端改不了；改 IP 会自动重建 ACL 并断开该账号当前连接。<br>
  要断开某人当前连接并阻止重连，直接把状态改成<b>停用</b>（在线用户页也有【停用账号】按钮）。<br>
  员工自助改密：<span class="mono" id="selfurl"></span></div></div>`;
  renderUsers();
@@ -650,7 +651,7 @@ function renderUsers(){
   `<button class="btn sm" onclick="userEdit('${esc(u.username)}')">编辑</button>
    <button class="btn sm" onclick="userPwd('${esc(u.username)}')">改密</button>
    <button class="btn sm" onclick="userToggle('${esc(u.username)}',${u.enabled?0:1})">${u.enabled?'停用':'启用'}</button>
-   <button class="btn sm danger" onclick="userDel('${esc(u.username)}')">删除</button>`]),'没有匹配的账号','users',20,'renderUsers')}
+   <button class="btn sm danger" onclick="userDel('${esc(u.username)}')">删除</button>`]),'没有匹配的账号')}
 function userAdd(){modal('添加认证账号',`<label class="f"><span>账号</span><input id="u_name" placeholder="张三 或 zhangsan（支持中文）"></label>
  <label class="f"><span>姓名</span><input id="u_real" placeholder="用于台账检索"></label>
  <label class="f"><span>部门</span><input id="u_dept" placeholder="如 运维部"></label>
@@ -958,8 +959,6 @@ async function pgUpdate(){const v=await get('/api/version'),
  be=(await get('/api/update/build-env')).env,fb=await get('/api/full-backup/list'),fr=fb.items||[];
  $('#page').innerHTML=`<div class="grid">
   <div class="stat"><div class="n">${esc(v.version)}</div><div class="t">服务端版本</div></div>
-  <div class="stat"><div class="n">${v.secure?'达标':'偏低'}</div><div class="t">安全线 ≥ ${esc(v.min_secure)}</div></div>
-  <div class="stat"><div class="n">${esc(v.eol)}</div><div class="t">分支 EOL</div></div>
   <div class="stat"><div class="n">${esc(v.web_version)}</div><div class="t">Web 版本</div></div></div>
  <div class="card"><h3>升级 OpenVPN <small>上传官方源码包，本机编译</small></h3>
   <div class="bar">${be.ok?badge('编译环境可用','ok'):badge('编译环境不完整','warn')}
@@ -1034,7 +1033,8 @@ const ACTCN={
  'assetitem.add':'新增资产','assetitem.update':'修改资产','assetitem.delete':'删除资产',
  'usergroup.add':'新增用户组','usergroup.update':'修改用户组','usergroup.delete':'删除用户组',
  'grant.add':'新增授权','grant.delete':'删除授权',
- 'ca.reinit':'重签 CA 与 tls-crypt','password.change':'修改管理密码','admin.rename':'修改操作者名称',
+ 'ca.reinit':'重签 CA 与 tls-crypt','password.change':'修改管理密码',
+ 'admin.reset':'重置管理账户与密码','admin_user.change':'修改管理账户名',
  'backup.create':'生成备份','backup.restore':'恢复备份',
  'backup.full_create':'生成备份','backup.full_download':'下载备份',
  'backup.full_delete':'删除备份','backup.full_restore':'恢复备份',
@@ -1087,22 +1087,21 @@ async function pgSecurity(){
  $('#page').innerHTML=`
  <div class="row">
   <div class="card"><h3>管理账户 <small>登录后台用账户 + 密码</small></h3>
-   <label class="f"><span>当前账户名</span><input id="au" value="${esc(a.admin_user||'admin')}" placeholder="如 admin"></label>
-   <div class="muted" style="font-size:12px;margin:6px 0 10px">3~32 位，字母 / 数字 / 下划线 / 短横线。改账户名需验证当前密码。</div>
-   <label class="f"><span>当前密码（改账户名时验证）</span><input type="password" id="aup"></label>
+   <label class="f"><span>管理账户名</span><input id="au" value="${esc(a.admin_user||'admin')}" placeholder="如 admin"></label>
+   <div class="muted" style="font-size:12px;margin:6px 0 10px">3~32 位，字母 / 数字 / 下划线 / 短横线。忘了密码时也能直接改账户名，不用验证密码。</div>
    <button class="btn pri" onclick="saveAdminUser()">保存账户名</button></div>
   <div class="card"><h3>修改管理密码</h3>
    <label class="f"><span>原密码</span><input type="password" id="op"></label>
-   <label class="f"><span>新密码（≥8位）</span><input type="password" id="np"></label>
-   <button class="btn pri" onclick="chPwd()">修改密码</button></div>
+   <label class="f"><span>新密码（≥8位）</span><input type="password" id="np" oninput="pwMeter()"></label>
+   <label class="f"><span>重复新密码</span><input type="password" id="np2" oninput="pwMeter()"></label>
+   <div class="muted" id="npm" style="font-size:12px;margin:-4px 0 10px"></div>
+   <button class="btn pri" onclick="chPwd()">修改密码</button>
+   <div class="muted" style="font-size:12px;margin-top:8px">两次必须一致，避免手滑输错把自己锁在外面。</div></div>
   <div class="card"><h3>重新生成账户与密码 <small>忘了凭据时用</small></h3>
-   <label class="f"><span>当前密码（验证身份）</span><input type="password" id="rp"></label>
    <button class="btn danger" onclick="resetAdmin()">一键重置</button>
-   <div class="hint">生成全新的账户名和密码，旧的立刻作废。重置后必须用新凭据重新登录。</div></div>
-  <div class="card"><h3>操作者名称 <small>审计日志「操作者」列显示它</small></h3>
-   <label class="f"><span>名称</span><input id="adn" value="${esc(a.admin_name||'')}" placeholder="如 运维-小王"></label>
-   <button class="btn pri" onclick="saveAdminName()">保存</button>
-   <div class="hint">这是审计日志里显示的称呼，和登录账户名是两回事——可以写真实姓名。</div></div>
+   <div class="hint">忘了账户名或密码、进不来后台时用这个：不用验证当前密码，直接生成全新的账户名和密码，旧的立刻作废。
+    重置后必须用新凭据重新登录。<br>
+    如果连后台都打不开，就在服务器上用 root 执行 <span class="mono">bash /opt/openvpn-web/reset-admin.sh</span>（会自动重启服务）。</div></div>
  </div>
  <div class="card"><h3>管理端访问白名单 <small>控制谁能打开这个后台</small></h3>
   <div class="bar"><span class="muted">你当前的来源 IP：<b class="mono">${esc(a.current_ip)}</b></span>
@@ -1124,25 +1123,31 @@ async function pgSecurity(){
    <li>NAT 由自建 OVPNWEB_NAT 链接管，不要再执行 firewall-cmd --add-masquerade</li>
    <li>不要把它直接暴露公网，远程管理走 HTTPS 反代或堡垒机</li></ul></div>
  </div>`}
-async function saveAdminName(){const j=await post('/api/admin-name',{name:$('#adn').value});
- toast(j.msg,'ok');loadState()}
-async function saveAdminUser(){const j=await post('/api/admin-user',{username:$('#au').value.trim(),password:$('#aup').value});
- toast(j.msg,'ok');$('#aup').value='';loadState();pgSecurity()}
+async function saveAdminUser(){const j=await post('/api/admin-user',{username:$('#au').value.trim()});
+ toast(j.msg,'ok');loadState();pgSecurity()}
+function pwMeter(){const a=$('#np').value,b=$('#np2').value,m=$('#npm');if(!m)return;
+ if(!a&&!b){m.innerHTML='';return}
+ if(a.length&&a.length<8){m.innerHTML='<span style="color:var(--err)">新密码至少 8 位</span>';return}
+ m.innerHTML=(a&&a===b)?'<span style="color:var(--ok)">两次一致</span>'
+   :'<span style="color:var(--err)">两次输入不一致</span>'}
 async function resetAdmin(){
- const pw=$('#rp').value.trim();if(!pw){toast('请先填当前密码','err');return}
- confirmAct('重置管理账户与密码','将生成全新的账户名和密码，<b>旧凭据立即作废</b>。重置后需要用新凭据重新登录。',
- async()=>{const j=await post('/api/admin-reset',{password:pw});
+ confirmAct('重置管理账户与密码','将生成全新的账户名和密码，<b>旧凭据立即作废</b>，不用验证当前密码。重置后需要用新凭据重新登录。',
+ async()=>{const j=await post('/api/admin-reset',{});
   modal('新管理凭据 · 请保存',`<div class="hint">这是唯一一次显示，关掉就看不到了。</div>
    <label class="f"><span>账户名</span><input id="ncu" readonly value="${esc(j.username)}"></label>
    <label class="f"><span>密码</span><input id="ncp" readonly value="${esc(j.password)}"></label>
    <button class="btn" onclick="downloadText('openvpn-admin.txt','管理账户: '+document.getElementById('ncu').value+'\\n管理密码: '+document.getElementById('ncp').value)">下载凭据</button>`,
   ()=>{},'知道了',false,true);
-  $('#rp').value='';
  },'确认重置')}
 async function saveAllow(){
  const j=await post('/api/security/allow',{allow:TAGS.web_allow||[]});
  toast(j.msg,'ok');SEC.allow=j.allow;pgSecurity()}
-async function chPwd(){await post('/api/password',{old:$('#op').value,new:$('#np').value});toast('管理密码已修改','ok');$('#op').value='';$('#np').value=''}
+async function chPwd(){
+ const np=$('#np').value,np2=$('#np2').value;
+ if(np!==np2){toast('两次输入的新密码不一致','err');return}
+ if(np.length<8){toast('新密码至少 8 位','err');return}
+ await post('/api/password',{old:$('#op').value,new:np,confirm:np2});
+ toast('管理密码已修改','ok');$('#op').value='';$('#np').value='';$('#np2').value='';pwMeter()}
 
 /* ---------------- 启动 ---------------- */
 (async()=>{try{const j=await get('/api/session');S.csrf=j.csrf;if(j.logged){S.logged=true;showApp();await loadState();

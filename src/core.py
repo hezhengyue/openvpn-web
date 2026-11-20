@@ -46,7 +46,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "1.3.3"
+WEB_VERSION = "1.3.4"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -181,7 +181,7 @@ def init_db():
     for k, v in (("initialized", 0), ("wizard_step", 0), ("admin_hash", ""),
                  ("admin_salt", ""), ("config_fingerprint", ""), ("openvpn_version", ""),
                  ("last_update", ""), ("csrf", ""), ("schema_v2", 0),
-                 ("admin_name", ""), ("admin_user", "admin"), ("allow_init_v2", 0)):
+                 ("admin_user", "admin"), ("allow_init_v2", 0)):
         con.execute("INSERT OR IGNORE INTO meta(k,v) VALUES(?,?)", (k, json.dumps(v, ensure_ascii=False)))
     con.commit()
     # 迁移只搬数据，不建表（表已由 SCHEMA 建好）；万一某台机器上老库结构特殊，
@@ -655,30 +655,15 @@ def validate_cfg(c):
 
 # --------------------------------------------------------------------------- 日志 / 审计
 
-# 当前请求的审计上下文：actor=操作者名称，ip=来源 IP，由 app.py 在每个请求开头写入。
+# 当前请求的审计上下文：actor=管理员账户名，ip=来源 IP，由 app.py 在每个请求开头写入。
 # log_audit 缺省时从这里取值，这样 core 内部（add_user / update_user …）记的日志
 # 也能自动带上「谁、从哪个 IP 操作的」，不用把参数一路透传。
 AUDIT_CTX = {"actor": "", "ip": ""}
 
 
-def admin_name():
-    """后台操作者名称（可在「管理密码与安全」里改），审计日志用它代替写死的 admin"""
-    return (get_meta("admin_name") or "").strip() or "管理员"
-
-
-def set_admin_name(name):
-    name = (name or "").strip()
-    if not name or len(name) > 32:
-        raise ValueError("操作者名称 1~32 个字符")
-    if re.search(r"[\r\n\t]", name):
-        raise ValueError("操作者名称不能包含换行或制表符")
-    set_meta("admin_name", name)
-    return name
-
-
 def log_audit(actor, action, detail, ip=None):
     ctx = AUDIT_CTX
-    # 没登录时的兜底 actor（"admin"/"web"）换成配置里的操作者名称
+    # 没登录时的兜底 actor（"admin"/"web"）换成当前管理员账户名
     if actor in (None, "", "admin", "web") and ctx.get("actor"):
         actor = ctx["actor"]
     if ip is None:

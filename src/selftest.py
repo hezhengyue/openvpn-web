@@ -143,12 +143,8 @@ def main():
           "no-store" in (_h.headers.get("Cache-Control") or ""), _h.headers.get("Cache-Control"))
     check("缺 CSRF 被拒", c.post("/api/users", json={}).status_code == 403)
     check("带 CSRF 通过", c.get("/api/state").status_code == 200)
-    check("登录后操作者名称默认不是写死的 admin", core.admin_name() not in ("", "admin"),
-          core.admin_name())
-    jn = P("/api/admin-name", {"name": "运维-小王"}).get_json()
-    check("可配置操作者名称", jn.get("name") == "运维-小王", jn)
-    check("会话立即用新名称", c.get("/api/state").get_json()["admin_name"] == "运维-小王")
-    check("空名称被拒", P("/api/admin-name", {"name": "  "}).status_code == 400)
+    check("审计操作者用管理员账户，不再单独配名称", core.admin_user() == "admin")
+    check("状态接口返回管理员账户名", c.get("/api/state").get_json()["admin_user"] == "admin")
     # 来源白名单：远程地址换成公网 IP 必须被挡在门外
     check("白名单外的来源 403",
           c.get("/api/state", environ_base={"REMOTE_ADDR": "8.8.8.8"}).status_code == 403)
@@ -482,7 +478,7 @@ def main():
     # ---------- 审计 IP / 白名单 ----------
     rows = core.get_logs("audit", 80)
     check("审计日志带操作者 IP", any(r.get("ip") == "127.0.0.1" for r in rows), rows[:1])
-    check("审计日志的操作者是配置名称", any(r["actor"] == "运维-小王" for r in rows))
+    check("审计日志的操作者是管理员账户", any(r["actor"] == "admin" for r in rows), rows[:1])
     a0 = c.get("/api/security/allow").get_json()
     check("白名单接口返回当前来源 IP", a0["current_ip"] == "127.0.0.1", a0)
     check("白名单接口返回候选网段", isinstance(a0.get("detected"), list) and a0["detected"])
@@ -521,21 +517,20 @@ def main():
     check("ACL 接口返回资产组/用户组", "asset_groups" in c.get("/api/acl").get_json()
           and "user_groups" in c.get("/api/acl").get_json())
     check("重启服务 API", P("/api/service/restart").get_json()["ok"])
-    check("改管理密码", P("/api/password", {"old": "TestPass123!", "new": "NewPass456!"}).get_json()["ok"])
-    check("改账户名需验当前密码", P("/api/admin-user",
-          {"username": "boss", "password": "wrong"}).status_code == 400)
-    check("改账户名成功", P("/api/admin-user",
-          {"username": "boss", "password": "NewPass456!"}).get_json()["ok"])
+    check("改密码：两次不一致被拒", P("/api/password",
+          {"old": "TestPass123!", "new": "NewPass456!", "confirm": "typo"}).status_code == 400)
+    check("改管理密码（带确认）", P("/api/password",
+          {"old": "TestPass123!", "new": "NewPass456!", "confirm": "NewPass456!"}).get_json()["ok"])
+    check("改账户名不需要密码", P("/api/admin-user", {"username": "boss"}).get_json()["ok"])
     check("旧账户名已失效", c.post("/api/login",
           json={"username": "admin", "password": "NewPass456!"}).status_code == 401)
     check("新账户名可登录", c.post("/api/login",
           json={"username": "boss", "password": "NewPass456!"}).get_json()["ok"])
     # 登录会重建会话并换 CSRF，刷新测试用的 token 再继续
     H["X-CSRF-Token"] = c.get("/api/session").get_json()["csrf"]
-    check("非法账户名被拒", P("/api/admin-user",
-          {"username": "a b", "password": "NewPass456!"}).status_code == 400)
-    check("重置凭据需验当前密码", P("/api/admin-reset", {"password": "wrong"}).status_code == 400)
-    _reset = P("/api/admin-reset", {"password": "NewPass456!"}).get_json()
+    check("非法账户名被拒", P("/api/admin-user", {"username": "a b"}).status_code == 400)
+    check("重置凭据不需要密码", P("/api/admin-reset", {}).get_json()["ok"])
+    _reset = core.admin_reset_credentials()   # 直接取明文用于登录断言
     check("重置返回新账户名", _reset.get("username", "").startswith("admin-"), _reset)
     check("重置返回新密码", len(_reset.get("password", "")) >= 12, _reset)
     check("旧账户名+旧密码失效", c.post("/api/login",
