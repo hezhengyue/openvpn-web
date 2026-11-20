@@ -34,6 +34,10 @@ POSIX = os.name == "posix"
 
 
 def check(name, cond, detail=""):
+    # cond=None 表示「这条在当前位置不适用」（例如构建脚本只在仓库里有，装机目录是平铺的）
+    if cond is None:
+        print("  [SKIP] " + name + (("  -> " + str(detail)) if detail else ""))
+        return
     (PASS if cond else FAIL).append(name)
     print(("  [PASS] " if cond else "  [FAIL] ") + name + (("  -> " + str(detail)) if detail and not cond else ""))
 
@@ -1277,10 +1281,13 @@ def main():
     _prepsrc = open(_prep, encoding="utf-8").read() if os.path.isfile(_prep) else ""
     check("缺二进制时就地编译（源码与依赖都在包内，不联网）",
           "VENDOR_ONLY=1" in _prepsrc and "OPENVPN_SRC" in _prepsrc)
-    _bo = open(os.path.join(CODE, "..", "build", "build-offline.sh"),
-               encoding="utf-8").read()
-    check("打包脚本把源码包一起带上（否则目标机想编也没料）",
-          'vendor/src' in _bo and '"$VENDOR"/src/*.tar.gz' in _bo)
+    _bo_p = os.path.join(CODE, "..", "build", "build-offline.sh")
+    if os.path.isfile(_bo_p):
+        _bo = open(_bo_p, encoding="utf-8").read()
+        _bo_ok = 'vendor/src' in _bo and '"$VENDOR"/src/*.tar.gz' in _bo
+    else:
+        _bo_ok = None      # 装机目录没有 build/，这条只在仓库里适用
+    check("打包脚本把源码包一起带上（否则目标机想编也没料）", _bo_ok)
 
     # 闸门做在 worker 里，但用户得能在界面上把码填进来，否则这功能等于没有
     _html = open(os.path.join(CODE, "index.html"), encoding="utf-8").read()
