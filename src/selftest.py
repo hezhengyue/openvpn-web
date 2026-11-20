@@ -452,6 +452,39 @@ def main():
     check("改 IP 后旧权限不残留", "-s 10.8.0.13" not in rr3 and "-s 10.8.0.14" in rr3)
     core.set_meta("acl_mode", "observe")
 
+    # 用户反馈的三行示例：新建组 / 批量新增 / 编辑条目必须共用同一套解析
+    sample = ("1.1.1.1/32 any 22,33,55,900-1000,10001\n"
+              "2.2.2.2 icmp\n"
+              "3.3.3.3 tcp 23,55,100-222")
+    items = core.parse_item_lines(sample)
+    check("三行示例全部解析成功", len(items) == 3)
+    check("any 保留端口", items[0] == ("1.1.1.1/32", "any", "22,33,55,900-1000,10001"))
+    check("icmp 端口清空", items[1] == ("2.2.2.2/32", "icmp", ""))
+    check("tcp 端口规范化", items[2] == ("3.3.3.3/32", "tcp", "23,55,100-222"))
+    g3 = core.add_asset_group("协议格式组", "", items)
+    check("批量建组落库 3 条", g3["count"] == 3 and len(
+        [g for g in core.list_asset_groups() if g["name"] == "协议格式组"][0]["items"]) == 3)
+    core.add_asset_items(g3["id"], core.parse_item_lines("4.4.4.4 udp 53\n5.5.5.5\n6.6.6.6"))
+    g3items = [g for g in core.list_asset_groups() if g["name"] == "协议格式组"][0]["items"]
+    check("条目批量新增共用同一解析", len(g3items) == 6 and
+          any(i["cidr"] == "5.5.5.5/32" and i["proto"] == "any" and not i["ports"] for i in g3items))
+    _edit_id = next(i["id"] for i in g3items if i["cidr"] == "5.5.5.5/32")
+    _edit = core.parse_item_lines("5.5.5.5 any 8000-9000")[0]
+    core.update_asset_item(_edit_id, *_edit)
+    check("编辑条目也用同一格式", any(i["id"] == _edit_id and i["ports"] == "8000-9000"
+                                 for i in [g for g in core.list_asset_groups()
+                                           if g["name"] == "协议格式组"][0]["items"]))
+    core.add_grant("user", "wangwu", g3["id"])
+    rr6 = core.render_rules(core.cfg())
+    check("any+端口生成 TCP/UDP 两条规则",
+          "-d 1.1.1.1/32 -p tcp --dport 900:1000 -j ACCEPT" in rr6 and
+          "-d 1.1.1.1/32 -p udp --dport 900:1000 -j ACCEPT" in rr6)
+    check("icmp 规则不带端口", "-d 2.2.2.2/32 -p icmp -j ACCEPT" in rr6
+          and "--dport" not in [l for l in rr6.splitlines() if "2.2.2.2/32" in l][0])
+    check("any 无端口仍然是全放通",
+          any("-d 6.6.6.6/32 -j ACCEPT" in l for l in rr6.splitlines()))
+    core.delete_asset_group(g3["id"])
+
     # ---------- 客户端互访 P2P ----------
     section("客户端互访（P2P）")
     core.add_peer_grant("zhangsan", "wangwu", "tcp", "22,3389")

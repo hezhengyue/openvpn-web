@@ -46,7 +46,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "1.3.11"
+WEB_VERSION = "1.3.12"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -1222,25 +1222,30 @@ def norm_item(cidr, proto="any", ports=""):
         raise ValueError("协议只能是 tcp/udp/icmp/any")
     cidr = norm_cidr(cidr)
     ports = norm_ports(ports)
-    if proto in ("icmp", "any"):
+    if proto == "icmp":
+        # ICMP 没有端口概念，用户写了也一律清空，避免规则生成出错。
         ports = ""
     else:
+        # any 带端口表示 TCP + UDP 都按这组端口放通，所以同样需要校验。
         _check_ports(ports)
     return cidr, proto, ports
 
 
 def parse_item_lines(text):
-    """批量粘贴解析，一行一条：目标 [协议] [端口]
+    """批量解析资产条目，一行一条：目标 [协议] [端口]
 
-        10.10.1.1                      -> 10.10.1.1/32  any
-        10.10.1.2 tcp 22,3389          -> 精确到端口
-        10.10.2.0/24 tcp 8000-9000
-        10.10.3.5:443                   -> 兼容 host:port 写法
+        1.1.1.1/32 any 22,33,55,900-1000,10001  -> 保留端口（any 也允许写端口，便于原样记录）
+        2.2.2.2 icmp                            -> icmp 端口自动为空
+        3.3.3.3 tcp 23,55,100-222
+        10.10.3.5:443                           -> 兼容 host:port 写法
         # 井号开头是注释
+
+    协议允许 tcp/udp/icmp/any 及其常见别名；端口支持逗号和短横线范围。
+    非法行会明确报出「第 N 行」和原文，避免只弹一个模糊错误。
     """
     out = []
-    for line in str(text or "").replace("，", ",").splitlines():
-        line = line.split("#", 1)[0].strip()
+    for lineno, raw in enumerate(str(text or "").replace("，", ",").splitlines(), 1):
+        line = raw.split("#", 1)[0].strip()
         if not line:
             continue
         parts = [x for x in re.split(r"[\s]+", line) if x]
@@ -1250,8 +1255,11 @@ def parse_item_lines(text):
             target, ports = target.split(":", 1)
         elif len(parts) >= 2:
             proto = parts[1]
-            ports = parts[2] if len(parts) >= 3 else ""
-        out.append(norm_item(target, proto or "any", ports))
+            ports = " ".join(parts[2:])
+        try:
+            out.append(norm_item(target, proto or "any", ports))
+        except ValueError as e:
+            raise ValueError("第 %d 行「%s」：%s" % (lineno, line, e))
     return out
 
 
@@ -1356,6 +1364,22 @@ def delete_asset_group(gid, actor="web"):
     if not r.rowcount:
         raise ValueError("资产组不存在")
     log_audit(actor, "assetgroup.delete", "id=%s" % gid)
+
+
+def add_asset_items(gid, items, note="", actor="web"):
+    """一次向资产组加入多条条目（同一事务，任一条重复则整批回滚）"""
+    con = db()
+    try:
+        if not con.execute("SELECT 1 FROM asset_groups WHERE id=?", (gid,)).fetchone():
+            raise ValueError("资产组不存在")
+        added = [_insert_item(con, gid, c, p, po, note) for c, p, po in items]
+        con.commit()
+    except Exception:
+        con.rollback(); con.close()
+        raise
+    con.close()
+    log_audit(actor, "assetitem.add", "组 %s 批量新增 %d 条" % (gid, len(added)))
+    return {"count": len(added), "items": added}
 
 
 def add_asset_item(gid, cidr, proto="any", ports="", note="", actor="web"):
@@ -1652,15 +1676,15 @@ def add_peer_grant(src, dst, proto="any", ports="", expires_at="", note="", acto
     if src not in names or dst not in names:
         con.close()
         raise ValueError("源/目标账号不存在或已停用")
-    if proto in ("tcp", "udp") and ports:
-        for p in ports.split(","):
-            p = p.strip()
-            if "-" in p:
-                a, b = p.split("-", 1)
-                if not (a.isdigit() and b.isdigit() and 1 <= int(a) <= int(b) <= 65535):
-                    raise ValueError("端口范围非法: %s" % p)
-            elif not (p.isdigit() and 1 <= int(p) <= 65535):
-                raise ValueError("端口非法: %s" % p)
+    if proto == "icmp":
+        ports = ""
+    else:
+        try:
+            ports = norm_ports(ports)
+            _check_ports(ports)
+        except ValueError:
+            con.close()
+            raise
     if expires_at:
         try:
             datetime.strptime(expires_at, "%Y-%m-%d %H:%M")
@@ -1681,12 +1705,19 @@ def delete_peer_grant(pid, actor="web"):
 
 
 def _render_accept(L, src, dst, proto, ports):
+    plist = [p.strip() for p in (ports or "").split(",") if p.strip()]
     if proto == "any":
-        L.append("$IPT -A OVPN_ACL -s %s -d %s -j ACCEPT" % (src, dst))
+        if not plist:
+            L.append("$IPT -A OVPN_ACL -s %s -d %s -j ACCEPT" % (src, dst))
+        else:
+            # any + 端口 = TCP 和 UDP 都按同一组端口放通
+            for p in plist:
+                for pr in ("tcp", "udp"):
+                    L.append("$IPT -A OVPN_ACL -s %s -d %s -p %s --dport %s -j ACCEPT"
+                             % (src, dst, pr, p.replace("-", ":")))
     elif proto == "icmp":
         L.append("$IPT -A OVPN_ACL -s %s -d %s -p icmp -j ACCEPT" % (src, dst))
     else:
-        plist = [p.strip() for p in ports.split(",")] if ports else []
         if not plist:
             L.append("$IPT -A OVPN_ACL -s %s -d %s -p %s -j ACCEPT" % (src, dst, proto))
         for p in plist:

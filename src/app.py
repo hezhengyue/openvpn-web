@@ -859,8 +859,15 @@ def asset_group_del(gid):
 @app.post("/api/asset-groups/<int:gid>/items")
 def asset_item_add(gid):
     d = request.get_json(silent=True) or {}
-    r = core.add_asset_item(gid, d.get("cidr", ""), d.get("proto", "any"),
-                            d.get("ports", ""), d.get("note", ""))
+    if "lines" in d:
+        # 和「新建资产组」使用同一套多行解析：目标 [协议] [端口]
+        items = core.parse_item_lines(d.get("lines", ""))
+        if not items:
+            raise ValueError("没有可添加的有效条目")
+        r = core.add_asset_items(gid, items)
+    else:
+        r = core.add_asset_item(gid, d.get("cidr", ""), d.get("proto", "any"),
+                                d.get("ports", ""), d.get("note", ""))
     after_change()
     return ok(r)
 
@@ -868,8 +875,16 @@ def asset_item_add(gid):
 @app.post("/api/asset-items/<int:iid>")
 def asset_item_update(iid):
     d = request.get_json(silent=True) or {}
-    r = core.update_asset_item(iid, d.get("cidr"), d.get("proto"),
-                               d.get("ports"), d.get("note"))
+    if "line" in d:
+        # 编辑条目统一按一行文本提交，和新增/批量保持同一套格式
+        items = core.parse_item_lines(d.get("line", ""))
+        if len(items) != 1:
+            raise ValueError("请只填写一条目标（一行）")
+        cidr, proto, ports = items[0]
+        r = core.update_asset_item(iid, cidr, proto, ports, d.get("note"))
+    else:
+        r = core.update_asset_item(iid, d.get("cidr"), d.get("proto"),
+                                   d.get("ports"), d.get("note"))
     after_change()
     return ok(r)
 

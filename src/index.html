@@ -272,7 +272,7 @@ pre::-webkit-scrollbar-thumb{background:oklch(.45 .02 250);background-clip:conte
 <script>
 /* 页面版本：每次升级手动同步 core.WEB_VERSION（selftest 会校验两者一致）。
    浏览器若缓存了旧 HTML（标签页常开不重载、或中间层缓存），靠这个跟服务端版本比对来自愈。 */
-const PAGE_VERSION='1.3.11';
+const PAGE_VERSION='1.3.12';
 const S={csrf:'',logged:false,cfg:null,page:'overview',task:null};
 const $=s=>document.querySelector(s);
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -409,10 +409,17 @@ function tagKey(e,id){if(e.key==='Enter'||e.key===','||e.key==='，'){e.preventD
 function tagBlur(id,el){const v=(el.value||'').replace(/[,，\s]/g,'');el.value='';if(v)tagAdd(id,v)}
 function tagAdd(id,v){const a=TAGS[id]||(TAGS[id]=[]);if(!a.includes(v))a.push(v);tagRender(id)}
 function tagDel(id,i){(TAGS[id]||[]).splice(i,1);tagRender(id)}
-function tagBulk(id){modal('批量粘贴 · '+(TAGS[id]||[]).length+' 条',
- `<div class="hint">一行一个，支持逗号/空格分隔。写错的行在保存时会报出来。</div>
-  <textarea id="tbk" style="width:100%;height:220px;font-family:ui-monospace,Menlo,Consolas,monospace" placeholder="10.10.1.0/24&#10;10.10.2.0/24">${esc((TAGS[id]||[]).join('\n'))}</textarea>`,
- ()=>{const t=$('#tbk').value.split(/[\s,，]+/).filter(Boolean);TAGS[id]=[...new Set(t)];tagRender(id)},'替换列表')}
+function tagBulk(id){const c=TAG_BULK[id]||{};
+ modal('批量粘贴 · '+(TAGS[id]||[]).length+' 条',
+ `<div class="hint">${c.hint||'一行一个；原样保留，不按空格或逗号拆分。'}</div>
+  <textarea id="tbk" style="width:100%;height:220px;font-family:ui-monospace,Menlo,Consolas,monospace" placeholder="${esc(c.ph||'一行一个').replace(/\n/g,'&#10;')}">${esc((TAGS[id]||[]).join('\n'))}</textarea>`,
+ ()=>{const t=$('#tbk').value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);TAGS[id]=[...new Set(t)];tagRender(id)},'替换列表')}
+/* 不同标签输入框的批量提示，避免把账号/网段/路由混在一起 */
+const TAG_BULK={
+ ugm:{hint:'一行一个<b>已存在的账号名</b>，支持中文账号；不是 IP／网段。写错的名字保存时会明确报出来。',ph:'张三\n李四\nwangwu'},
+ extra_routes:{hint:'一行一个回程网段，格式 <span class="mono">10.20.0.0/16</span>；VPN 客户端会按这些网段走隧道。',ph:'10.20.0.0/16\n172.16.5.0/24'},
+ web_allow:{hint:'一行一个来源 IP 或网段，例如 <span class="mono">10.20.30.0/24</span>；保存时不能删掉你当前的 IP。',ph:'10.20.30.0/24\n192.168.1.7'}
+};
 
 /* ---------------- 分页 / 复制 / 明文密码 ---------------- */
 const PG={users:0,ag:0,ug:0,grants:0,p2p:0,online:0,logs:0,backups:0,pki:0,selfcheck:0,userbackups:0,agitems:0};
@@ -798,8 +805,8 @@ function agHtml(){
 function agNew(){modal('新建资产组',
  `<label class="f"><span>组名</span><input id="agn" placeholder="如 核心数据库"></label>
   <div class="muted" style="margin-bottom:5px">目标清单 <span style="color:var(--muted-foreground);opacity:.8">· 一行一条，可一次贴 3 个 IP</span></div>
-  <textarea id="agl" style="width:100%;height:150px;font-family:ui-monospace,Menlo,Consolas,monospace" placeholder="10.10.1.11 tcp 3306&#10;10.10.1.12 tcp 3306&#10;10.10.1.13 tcp 3306"></textarea>
-  <div class="hint">格式：<span class="mono">目标 [协议] [端口]</span>。协议 tcp/udp/icmp/any，省略默认 any（全部协议、全部端口）；端口可写 <span class="mono">22,3389</span> 或 <span class="mono">8000-9000</span>。</div>
+  <textarea id="agl" style="width:100%;height:150px;font-family:ui-monospace,Menlo,Consolas,monospace" placeholder="1.1.1.1/32 any 22,33,55,900-1000,10001&#10;2.2.2.2 icmp&#10;3.3.3.3 tcp 23,55,100-222"></textarea>
+  <div class="hint">统一格式：<span class="mono">目标 [协议] [端口]</span>，一行一条。<b>any</b> 留端口表示全部放通，写端口表示 TCP + UDP 都按这组端口放通；<b>icmp</b> 不需要端口（写了也会自动清空）；tcp/udp 可写 <span class="mono">22,3389</span> 或 <span class="mono">8000-9000</span>。单 IP 自动补 /32。</div>
   <label class="f"><span>备注</span><input id="agnote"></label>`,
  async()=>{const j=await post('/api/asset-groups',{name:$('#agn').value.trim(),lines:$('#agl').value,note:$('#agnote').value.trim()});
   toast('已创建，共 '+j.count+' 条目标','ok');await pgAcl()},'创建')}
@@ -810,24 +817,20 @@ function agItems(id){const g=A.ag.find(x=>x.id===id);if(!g)return;
     <button class="btn sm danger" onclick="agItemDel(${i.id})">删除</button>`]);
  modal('条目管理 · '+g.name,
   tbl(['目标','协议','端口','操作'],rows,'这个组还是空的，加一条吧','agitems',10,'agItemsPg')
-  +`<div class="bar" style="margin-top:10px;flex-wrap:wrap"><input id="ni_cidr" placeholder="10.10.1.20 或 10.10.2.0/24" style="width:200px">
-   <select id="ni_proto" style="width:90px"><option>any</option><option>tcp</option><option>udp</option><option>icmp</option></select>
-   <input id="ni_ports" placeholder="端口，如 22,3389" style="width:150px">
-   <button class="btn pri" onclick="agItemAdd(${id})">添加条目</button></div>
+  +`<div class="muted" style="margin:10px 0 5px">新增条目 <span style="opacity:.8">· 一行一条，格式和「新建资产组」完全一样</span></div>
+   <textarea id="ail" style="width:100%;height:90px;font-family:ui-monospace,Menlo,Consolas,monospace" placeholder="1.1.1.1/32 any 22,33,55,900-1000&#10;2.2.2.2 icmp&#10;3.3.3.3 tcp 23,55,100-222"></textarea>
+   <div class="bar" style="margin-top:8px"><button class="btn pri" onclick="agItemAdd(${id})">添加条目</button>
+    <span class="muted">any 带端口 = TCP + UDP；icmp 端口自动为空</span></div>
    <div class="hint">同一「目标+协议+端口」不允许重复；端口先后顺序无所谓（80,22 与 22,80 视为同一条）。</div>`,
   async()=>{},'关闭')}
-async function agItemAdd(id){try{await post('/api/asset-groups/'+id+'/items',
-  {cidr:$('#ni_cidr').value.trim(),proto:$('#ni_proto').value,ports:$('#ni_ports').value.trim()});
-  toast('已添加','ok');await pgAcl();agItems(id)}catch(e){}}
+async function agItemAdd(id){try{const j=await post('/api/asset-groups/'+id+'/items',{lines:$('#ail').value});
+  toast('已添加 '+j.count+' 条','ok');await pgAcl();agItems(id)}catch(e){}}
 function agItemEdit(gid,iid){const g=A.ag.find(x=>x.id===gid),it=g&&g.items.find(x=>x.id===iid);if(!it)return;
+ const line=it.cidr+' '+it.proto+(it.ports?' '+it.ports:'');
  modal('编辑条目 · '+g.name,
-  `<label class="f"><span>目标 IP / 网段</span><input id="ei_cidr" value="${esc(it.cidr)}" placeholder="10.10.1.20 或 10.10.2.0/24"></label>
-  <div class="bar"><label class="f" style="min-width:120px"><span>协议</span><select id="ei_proto">
-   ${['any','tcp','udp','icmp'].map(p=>`<option ${it.proto===p?'selected':''}>${p}</option>`).join('')}</select></label>
-   <label class="f" style="flex:1"><span>端口</span><input id="ei_ports" value="${esc(it.ports||'')}" placeholder="22,3389 或 8000-9000，留空全部"></label></div>
-  <div class="hint">保存后立即重建防火墙规则。协议改成 any / icmp 时端口会被自动清空。</div>`,
-  async()=>{await post('/api/asset-items/'+iid,{cidr:$('#ei_cidr').value.trim(),
-   proto:$('#ei_proto').value,ports:$('#ei_ports').value.trim()});
+  `<label class="f"><span>目标 [协议] [端口]</span><input id="eil" class="mono" value="${esc(line)}" placeholder="3.3.3.3 tcp 23,55,100-222"></label>
+  <div class="hint">和新增使用同一套规则：一行一条；icmp 不需要端口；any 带端口表示 TCP + UDP 都按这组端口放通。保存后立即重建防火墙规则。</div>`,
+  async()=>{await post('/api/asset-items/'+iid,{line:$('#eil').value});
    toast('条目已更新，规则已重建','ok');await pgAcl();agItems(gid)},'保存')}
 async function agItemDel(iid){confirmAct('删除条目','该条目会从资产组里移除，所有通过这个组的授权立即失效对应规则。',
  async()=>{await del('/api/asset-items/'+iid);toast('已删除','ok');await pgAcl()},'删除')}
