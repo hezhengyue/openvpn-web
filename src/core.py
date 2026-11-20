@@ -46,7 +46,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "1.3.17"
+WEB_VERSION = "1.3.18"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -880,6 +880,168 @@ def next_free_ip(c, con=None):
     raise ValueError("固定 IP 段已用完（当前网段可用 %d 个）" % static_capacity(c))
 
 
+def shift_pool_with_cfg(new_cfg, old_cfg):
+    """改 VPN 网段时，把动态地址池按同样的相对位置搬到新网段。
+
+    用户只改网段、没动池子时，池子起止还停在旧网段里，validate_cfg 会直接拒绝保存。
+    这里先把池子平移过去（长度不变、起点不会落到 .1），
+    用户自己填了新网段里的合法池子则原样尊重。
+    """
+    if not new_cfg.get("pool_enabled"):
+        return new_cfg
+    try:
+        new_net = ipaddress.IPv4Network(str(new_cfg["vpn_cidr"]), strict=False)
+        old_net = ipaddress.IPv4Network(str((old_cfg or {}).get("vpn_cidr") or new_cfg["vpn_cidr"]),
+                                        strict=False)
+        a = ipaddress.IPv4Address(str(new_cfg.get("pool_start")).strip())
+        b = ipaddress.IPv4Address(str(new_cfg.get("pool_end")).strip())
+        if a in new_net and b in new_net:
+            return new_cfg                       # 已经是新网段里的池子，别动
+        oa = ipaddress.IPv4Address(str((old_cfg or {}).get("pool_start")).strip())
+        ob = ipaddress.IPv4Address(str((old_cfg or {}).get("pool_end")).strip())
+        if oa not in old_net or ob not in old_net:
+            return new_cfg                       # 旧值本身就不成对，交给 validate_cfg 报错
+    except Exception:
+        return new_cfg
+    off_a = int(oa) - int(old_net.network_address)
+    off_b = int(ob) - int(old_net.network_address)
+    if off_a < FIRST_HOST or off_b > int(new_net.num_addresses) - 2:
+        return new_cfg                           # 新网段放不下，留给校验去报「池子越界」
+    new_cfg["pool_start"] = str(new_net.network_address + off_a)
+    new_cfg["pool_end"] = str(new_net.network_address + off_b)
+    return new_cfg
+
+
+def plan_ip_migration(new_cfg, old_cfg=None, con=None):
+    """改了 VPN 网段（或动态地址池）后，算出每个账号固定 IP 的新归属——只算不写。
+
+    规则：优先保持「相对网络地址的偏移量」。10.8.0.2 从 10.8.0.0/24 换到
+    10.8.1.0/24，仍然是 10.8.1.2；账号、证书、授权关系全都不动，客户端重连即生效。
+    偏移在新网段里不可用（网络/广播/.1/动态池/已被占用）时，从这个偏移往后找第一个空位。
+
+    返回 {"moves": [{"username","old","new"}], "kept": n, "blocked": [username...]}
+    blocked 非空表示新网段容量不够，调用方应当直接拒绝这次改动，别写半个状态。
+    """
+    own = con is None
+    con = con or db()
+    rows = con.execute("SELECT username,vpn_ip FROM users ORDER BY vpn_ip").fetchall()
+    if own:
+        con.close()
+
+    new_net = vpn_network(new_cfg)
+    new_usable = usable_host_ips(new_cfg)
+    usable_set = set(new_usable)
+    # 偏移上限跟着「台账能用的地址」走（/24 只到 .254），不要用整个网段的地址数，
+    # 否则大网段算出来的期望偏移会落在永不分配的区间里。
+    last_off = FIRST_HOST
+    if new_usable:
+        last_off = int(ipaddress.IPv4Address(new_usable[-1])) - int(new_net.network_address)
+
+    try:
+        old_net = ipaddress.IPv4Network(str((old_cfg or {}).get("vpn_cidr") or new_cfg["vpn_cidr"]),
+                                        strict=False)
+    except Exception:
+        old_net = new_net
+
+    def prefer_off(ip):
+        """旧地址在新网段里「希望落在」的偏移；不合法就排到最后"""
+        try:
+            addr = ipaddress.IPv4Address(ip)
+        except Exception:
+            return None
+        off = int(addr) - int(old_net.network_address)
+        if 0 <= off <= last_off:
+            return off
+        # 历史遗留：旧地址本来就不在旧网段里（比如网段改过、账号没跟着迁），
+        # 退化成「用最后一段当偏移」，10.8.0.2 -> 10.8.1.2 仍然对得上。
+        tail = int(addr) & 0xFF
+        if FIRST_HOST <= tail <= last_off:
+            return tail
+        return None
+
+    taken, pending, kept = set(), [], 0
+    for r in rows:
+        ip = str(r["vpn_ip"] or "").strip()
+        if ip in usable_set and ip not in taken:
+            taken.add(ip)
+            kept += 1
+        else:
+            pending.append((r["username"], ip))
+
+    free = [ip for ip in new_usable if ip not in taken]
+    blocked = [u for u, _ in pending[len(free):]] if len(pending) > len(free) else []
+    pending = pending[:len(free)]
+
+    # 稳定排序：旧地址靠前的先挑，换网段后名单顺序看起来才和原来一致
+    pending.sort(key=lambda x: (prefer_off(x[1]) is None, prefer_off(x[1]) or 0, x[1]))
+
+    free_set = set(free)
+    moves = []
+    for username, old in pending:
+        if not free_set:
+            break
+        pick = None
+        off = prefer_off(old)
+        if off is not None and off >= FIRST_HOST:
+            want = int(new_net.network_address) + off
+            for ip in new_usable:                      # new_usable 是有序的
+                if ip in free_set and int(ipaddress.IPv4Address(ip)) >= want:
+                    pick = ip
+                    break
+        if not pick:                                   # 往后没有空位就回到最前面的空位
+            pick = min(free_set, key=lambda x: int(ipaddress.IPv4Address(x)))
+        free_set.discard(pick)
+        if pick != old:
+            moves.append({"username": username, "old": old, "new": pick})
+    return {"moves": moves, "kept": kept, "blocked": blocked}
+
+
+def apply_ip_migration(moves, actor="web"):
+    """把 plan_ip_migration 的结果写库，并重建 ccd / 规则。返回真正改动的条数。
+
+    vpn_ip 有 UNIQUE 约束，先统一挪到临时值再落新值，避免「A→B、B→A」这类
+    互换在逐条 UPDATE 时撞唯一键。
+    """
+    moves = [m for m in (moves or []) if m.get("new") and m["new"] != m.get("old")]
+    if not moves:
+        return 0
+    names = [m["username"] for m in moves]
+    con = db()
+    try:
+        con.execute("BEGIN")
+        for i, n in enumerate(names):
+            con.execute("UPDATE users SET vpn_ip=? WHERE username=?", ("__migrate__%d" % i, n))
+        for m in moves:
+            con.execute("UPDATE users SET vpn_ip=?, updated_at=? WHERE username=?",
+                        (m["new"], now(), m["username"]))
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+    rebuild_ccd()
+    for m in moves:
+        log_audit(actor, "user.ip.migrate", "%s: %s -> %s（网段变更随迁）"
+                  % (m["username"], m["old"] or "-", m["new"]))
+    return len(moves)
+
+
+def repair_user_ips(actor="boot"):
+    """启动自愈：账号固定 IP 与当前网段对不上时，按「保持尾号」自动重排。
+
+    覆盖的是历史遗留和手工改配置的情况（比如网段已经从 10.8.0.0/24 改成
+    10.8.1.0/24，但账号还停在 10.8.0.x，客户端拨上来拿不到地址）。
+    容量不够时一律不动，返回 blocked 交给界面提示扩容，绝不因为修不了就让服务起不来。
+    """
+    c = cfg()
+    plan = plan_ip_migration(c, old_cfg=c)
+    if plan["blocked"]:
+        return {"moved": 0, "blocked": plan["blocked"], "moves": []}
+    return {"moved": apply_ip_migration(plan["moves"], actor=actor),
+            "blocked": [], "moves": plan["moves"]}
+
+
 def add_user(username, vpn_ip=None, password=None, note="", real_name="", dept="",
              expires_at="", actor="web"):
     c = cfg()
@@ -1166,11 +1328,13 @@ def parse_users_file(content, filename=""):
         if o["vpn_ip"] in seen.values():
             errs.append("固定 IP 重复: %s" % o["vpn_ip"])
         seen[o["username"]] = o["vpn_ip"]
-    usable = set(usable_host_ips(cfg()))
+    _ic = cfg()
+    usable = set(usable_host_ips(_ic))
     for o in out:
         if o["vpn_ip"] not in usable:
-            errs.append("%s 的固定 IP %s 不可用（不在 VPN 网段内，或落在动态池 / .1 / 广播地址上）"
-                        % (o["username"], o["vpn_ip"]))
+            errs.append("%s 的固定 IP %s 不可用（不在当前 VPN 网段 %s 内，或落在动态池 / .1 / 广播地址上）；"
+                        "若这份表来自旧网段，请把「VPN固定IP」整列改成 %s 里的地址再导入"
+                        % (o["username"], o["vpn_ip"], _ic["vpn_cidr"], _ic["vpn_cidr"]))
     return out, errs
 
 
@@ -1187,8 +1351,9 @@ def preview_import(content, filename="", actor="web"):
     usable = set(usable_host_ips(c))
     for r in rows:
         if r["vpn_ip"] not in usable:
-            raise ValueError("整批拒绝：%s 不可用（不在 VPN 网段内，或落在动态池 / 保留地址上）"
-                             % r["vpn_ip"])
+            raise ValueError("整批拒绝：%s 不可用（不在当前 VPN 网段 %s 内，或落在动态池 / 保留地址上）；"
+                             "若这份表来自旧网段，请先把「VPN固定IP」整列改成当前网段的地址"
+                             % (r["vpn_ip"], c["vpn_cidr"]))
     old = {u["username"]: u for u in list_users()}
     new = {r["username"]: r for r in rows}
     changes = []
@@ -2110,7 +2275,7 @@ def config_fingerprint(c):
               for n in push_targets(c, include_vpn=False)]
     blob = json.dumps({
         "addr": c["public_addr"], "port": int(c.get("public_port") or c["port"]), "proto": c["proto"],
-        "vpn_cidr": c["vpn_cidr"], "routes": routes,
+        "routes": routes,
         "ciphers": c["data_ciphers"], "tls_min": c["tls_min"], "mtu": c["tun_mtu"],
         "compress": c.get("compress", "off"),
         "ca": hashlib.sha256(pki["ca"].encode()).hexdigest(),
@@ -2320,6 +2485,11 @@ def _restore_legacy_snapshot(path):
             if k in DEFAULT_CFG:
                 set_meta(k, v)
         set_meta("config_fingerprint", m.get("fingerprint", ""))
+    # 老快照可能来自「网段改过、账号没跟着迁」的机器：对齐一次再交给上层重启
+    try:
+        repair_user_ips(actor="snapshot.restore")
+    except Exception as e:
+        print("[restore] 固定 IP 对齐跳过: %s" % e)
     return True
 
 

@@ -868,6 +868,72 @@ def main():
           for x in c.get("/api/full-backup/list").get_json()["items"]))
     core.delete_user("备份用户")
 
+    # ---------- 改 VPN 网段：账号固定 IP 自动随迁 ----------
+    section("改 VPN 网段后固定 IP 自动迁移")
+    core.set_meta("vpn_cidr", "10.8.0.0/24")
+    core.repair_user_ips(actor="selftest")       # 确保起点都在 10.8.0.0/24
+    base = core.cfg()
+    names = sorted(u["username"] for u in core.list_users())
+    tails = {u["username"]: u["vpn_ip"].rsplit(".", 1)[-1] for u in core.list_users()}
+    check("迁移前账号都在 10.8.0.0/24",
+          all(u["vpn_ip"].startswith("10.8.0.") for u in core.list_users()),
+          [u["vpn_ip"] for u in core.list_users()])
+    pv = core.plan_ip_migration(dict(base, vpn_cidr="10.8.1.0/24"), old_cfg=base)
+    check("迁移规划覆盖全部账号", len(pv["moves"]) == len(names), pv)
+    check("迁移保留地址尾号",
+          all(m["new"] == "10.8.1." + tails[m["username"]] for m in pv["moves"]), pv["moves"])
+    _fp0 = core.get_meta("config_fingerprint")
+    sr = P("/api/settings", dict(base, vpn_cidr="10.8.1.0/24")).get_json()
+    check("保存新网段时自动迁移账号 IP", sr.get("ok") and sr.get("moved") == len(names), sr)
+    check("只改网段不需要重发 ovpn", core.get_meta("config_fingerprint") == _fp0,
+          (_fp0, core.get_meta("config_fingerprint")))
+    check("按接口返回判定无需重新分发", sr.get("need_redistribute") is False, sr)
+    check("账号地址已落在新网段",
+          all(u["vpn_ip"].startswith("10.8.1.") for u in core.list_users()),
+          [u["vpn_ip"] for u in core.list_users()])
+    check("迁移后尾号一一对应",
+          {u["username"]: u["vpn_ip"].rsplit(".", 1)[-1] for u in core.list_users()} == tails)
+    check("ccd 已按新地址重建",
+          all(os.path.exists(os.path.join(core.CCD, u["username"]))
+              for u in core.list_users() if u["enabled"]))
+    _sc = open(os.path.join(core.DATA, "server.conf")).read()
+    check("server.conf 网段同步为 10.8.1.1", "ifconfig 10.8.1.1 255.255.255.0" in _sc)
+
+    # 动态池跟着网段平移：只改网段不该被「池子越界」卡住
+    _pc = dict(core.cfg(), pool_enabled=True, pool_start="10.8.1.100", pool_end="10.8.1.200")
+    _ps = core.shift_pool_with_cfg(dict(_pc, vpn_cidr="10.8.3.0/24"), _pc)
+    check("改网段时池子按相对位置平移",
+          _ps["pool_start"] == "10.8.3.100" and _ps["pool_end"] == "10.8.3.200", _ps)
+
+    # 新网段放不下时整批拒绝，不能改一半
+    small = dict(core.cfg(), vpn_cidr="10.8.1.0/29")     # /29 只有 5 个固定 IP
+    while len(core.list_users()) < 6:
+        core.add_user("cap%d" % len(core.list_users()), password="CapPass123!")
+    before = {u["username"]: u["vpn_ip"] for u in core.list_users()}
+    bad = P("/api/settings", small)
+    check("容量不够时拒绝改网段",
+          bad.status_code >= 400 and not bad.get_json()["ok"], bad.get_json())
+    check("拒绝时账号地址一个都没动",
+          {u["username"]: u["vpn_ip"] for u in core.list_users()} == before)
+    check("拒绝时网段也没变", core.cfg()["vpn_cidr"] == "10.8.1.0/24")
+    for u in [x["username"] for x in core.list_users() if x["username"].startswith("cap")]:
+        core.delete_user(u)
+
+    # 启动自愈：账号停在旧网段（历史遗留）也要能自己对齐
+    core.set_meta("vpn_cidr", "10.8.2.0/24")
+    rp = core.repair_user_ips(actor="selftest")
+    check("启动自愈把旧网段账号拉回当前网段",
+          rp["moved"] == len(names) and
+          all(u["vpn_ip"].startswith("10.8.2.") for u in core.list_users()), rp)
+    check("自愈同样保留尾号",
+          {u["username"]: u["vpn_ip"].rsplit(".", 1)[-1] for u in core.list_users()} == tails)
+    check("自愈写了审计", any(r.get("action") == "user.ip.migrate"
+                             for r in core.get_logs("audit", 200)))
+    P("/api/settings", dict(core.cfg(), vpn_cidr="10.8.0.0/24"))
+    check("切回原网段地址也回来",
+          all(u["vpn_ip"].startswith("10.8.0.") for u in core.list_users()),
+          [u["vpn_ip"] for u in core.list_users()])
+
     print("\n" + "=" * 62)
     print(" 通过 %d 项 / 失败 %d 项" % (len(PASS), len(FAIL)))
     if FAIL:

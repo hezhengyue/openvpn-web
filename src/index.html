@@ -272,7 +272,7 @@ pre::-webkit-scrollbar-thumb{background:oklch(.45 .02 250);background-clip:conte
 <script>
 /* 页面版本：每次升级手动同步 core.WEB_VERSION（selftest 会校验两者一致）。
    浏览器若缓存了旧 HTML（标签页常开不重载、或中间层缓存），靠这个跟服务端版本比对来自愈。 */
-const PAGE_VERSION='1.3.17';
+const PAGE_VERSION='1.3.18';
 const S={csrf:'',logged:false,cfg:null,page:'overview',task:null};
 const $=s=>document.querySelector(s);
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -702,6 +702,7 @@ async function pgUsers(){const j=await get('/api/users');U.list=j.users;
  导入 / 导出<b>只针对全部账号</b>，不用也不提供「选中某个人」：导出是当前整张台账（含明文密码），导入是整张表覆盖同步（表里没有的账号会被删除，预览时可逐项核对）。<b>密码列必填，留空整批拒绝。</b><br>
  有效期写到日（YYYY-MM-DD），当天仍可用，<b>次日自动停用并断开在线会话</b>；留空表示长期有效。<br>
  固定 IP 由服务端下发，客户端改不了；改 IP 会自动重建 ACL 并断开该账号当前连接。<br>
+ 改了「服务端设置」里的 <b>VPN 网段</b>时，所有账号的固定 IP 会自动跟着迁到新网段（保持原尾号，如 10.8.0.2 → 10.8.1.2），不用手工一个个改。<br>
  要断开某人当前连接并阻止重连，直接把状态改成<b>停用</b>（在线用户页也有【停用账号】按钮）。<br>
  员工自助改密：<span class="mono" id="selfurl"></span></div></div>`;
  renderUsers();
@@ -1016,10 +1017,15 @@ async function pgSettings(){const j=await get('/api/settings'),p=(await get('/ap
  poolToggle();poolInfo();autoFillPublicAddr()}
 function daysBadge(d){if(d===null||d===undefined)return '—';if(d<0)return badge('已过期','err');if(d<30)return badge(d+' 天','err');if(d<90)return badge(d+' 天','warn');return badge(d+' 天','ok')}
 async function settingsSave(){
- confirmAct('保存服务端设置并重启','应用新配置会<b>重启 OpenVPN，所有在线连接断开并自动重连</b>。若改了端口/协议/CA/加密套件，还需重新导出并全员替换 company.ovpn。',
+ confirmAct('保存服务端设置并重启','应用新配置会<b>重启 OpenVPN，所有在线连接断开并自动重连</b>。若改了端口/协议/CA/加密套件，还需重新导出并全员替换 company.ovpn。<br><br>改了 <b>VPN 网段</b>时，所有账号的固定 IP 会自动跟着迁到新网段（保持原来的地址尾号），账号和证书都不受影响。',
  async()=>{const j=await post('/api/settings',readCfg());
   const w=(j.warnings&&j.warnings.length)?'<div class="hint warn"><b>路由检查有 '+j.warnings.length+' 条提醒：</b><br>'+j.warnings.map(esc).join('<br>')+'</div>':'';
-  $('#setres').innerHTML='<div class="hint '+(j.need_redistribute?'err':'ok')+'">'+esc(j.msg)+'<br><b>'+(j.need_redistribute?'配置指纹已变化：必须重新导出并全员替换 company.ovpn':'配置指纹未变：无需重新分发')+'</b></div>'+w;
+  const mv=(j.moves&&j.moves.length)?'<div class="hint ok"><b>网段变化，以下 '+j.moves.length+' 个账号的固定 IP 已自动迁移：</b><br>'
+   +j.moves.map(m=>esc(m.username)+'：<span class="mono">'+esc(m.old||'—')+' → '+esc(m.new)+'</span>').join('<br>')+'</div>':'';
+  $('#setres').innerHTML='<div class="hint '+(j.need_redistribute?'err':'ok')+'">'+esc(j.msg)+'<br><b>'+(j.need_redistribute?'配置指纹已变化：必须重新导出并全员替换 company.ovpn':'配置指纹未变：无需重新分发')+'</b></div>'+mv+w;
+  // 动态池可能被跟着新网段平移过，把落地值写回输入框，避免下次保存又提交旧值
+  if(j.pool_start&&$('#c_pool_start'))$('#c_pool_start').value=j.pool_start;
+  if(j.pool_end&&$('#c_pool_end'))$('#c_pool_end').value=j.pool_end;
   toast('已保存并重启','ok');loadState()},'保存并重启');
 }
 async function settingsPreview(){const j=await get('/api/settings/preview');
@@ -1027,8 +1033,8 @@ async function settingsPreview(){const j=await get('/api/settings/preview');
  const r=j.routes&&j.routes.length?'<div class="hint">实际下发给客户端的路由：<b>'+j.routes.map(esc).join('、')+'</b></div>':'';
  modal('server.conf 预览',r+w+'<pre style="max-height:55vh">'+esc(j.text)+'</pre>',()=>{},'关闭')}
 async function rebuild(){const j=await post('/api/settings/rebuild');toast(j.msg,'ok')}
-function restoreDefault(){confirmAct('恢复默认参数','会清空对外地址等参数，需重新填写后再应用。操作前会自动备份。',
- async()=>{await post('/api/settings/restore-default',{});toast('已恢复默认','ok');pgSettings()},'恢复默认')}
+function restoreDefault(){confirmAct('恢复默认参数','会清空对外地址等参数，需重新填写后再应用。操作前会自动备份。若当前 VPN 网段不是默认值，账号固定 IP 会自动迁回默认网段。',
+ async()=>{const j=await post('/api/settings/restore-default',{});toast(j.msg||'已恢复默认','ok');pgSettings()},'恢复默认')}
 async function reinitCA(){confirmAct('重新初始化 CA / tls-crypt',
  '<b>高危</b>：全员现有 company.ovpn 立即失效，必须重新导出并分发给所有人。仅用于密钥疑似泄露。',
  async()=>{const j=await post('/api/settings/reinit-ca',{});$('#setres').innerHTML=taskBox();
