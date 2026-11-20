@@ -1583,6 +1583,12 @@ def favicon():
 
 
 def main():
+    # systemd 下 stdout 是管道，Python 默认整块缓冲：启动横幅要攒够 8KB 才写进 journal，
+    # 排查「到底跑的是 waitress 还是开发服务器」时就成了瞎子。改成按行刷。
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
     core.init_db()
     # 命令行救场：白名单配错把自己关在门外时，SSH 上去一条命令就能放行
     argv = sys.argv[1:]
