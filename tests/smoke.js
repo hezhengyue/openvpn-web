@@ -240,6 +240,15 @@ async function waitUp() {
       // 台账页只做台账：操作列不该再有「踢」（踢下线统一放在在线用户页）
       const ubtns = [...w.document.querySelectorAll('#ubox button')].map(b => b.textContent.trim());
       if (ubtns.some(t => t === '踢')) errors.push('账号管理页操作列仍有「踢」按钮');
+      // 添加账号：留空密码首点确定只生成并停在弹窗，复制后再点一次才保存，保存后不弹密码页
+      w.userAdd(); await wait(100);
+      w.document.querySelector('#u_name').value = '新建测试';
+      w.document.querySelector('#mok').click(); await wait(200);
+      if (w.document.querySelector('#mask').style.display !== 'flex') errors.push('添加账号首点确定就关闭了弹窗，来不及复制密码');
+      const genPw = w.document.querySelector('#u_pw').value;
+      if (!genPw || genPw.length < 8) errors.push('留空初始密码未生成可见明文');
+      w.document.querySelector('#mok').click(); await wait(1200);
+      if (w.document.querySelector('#mask').style.display === 'flex') errors.push('账号创建后仍弹出一次性密码页（已要求去掉）');
       // 编辑弹窗必须能改账号名（原来只能改姓名/部门/IP，工号写错没法纠正）
       w.userEdit('alice'); await wait(100);
       const uname = w.document.querySelector('#u_name');
@@ -249,14 +258,12 @@ async function waitUp() {
       w.userPwd('alice'); await wait(100);
       const inp = w.document.querySelector('#u_pw');
       if (!inp || inp.type === 'password') errors.push('改密弹窗的密码框不可见');
-      // 重置成功后必须真的再弹一次密码（曾因外层 closeModal 把新弹窗一起关掉而不显示）
+      // 保存后不能再弹一次性密码页：密码只在上面的输入框里可见，先复制再保存
       inp.value = 'ResetPw12345!';
       w.document.querySelector('#mok').click();
       await wait(1500);
       const mask = w.document.querySelector('#mask');
-      if (mask.style.display !== 'flex') errors.push('改密保存后密码弹窗没弹出来');
-      else if (!mask.textContent.includes('ResetPw12345!')) errors.push('改密保存后弹窗里没有显示密码');
-      w.closeModal();
+      if (mask.style.display === 'flex') errors.push('改密保存后仍弹出一次性密码页（已要求去掉）');
     } catch (e) { errors.push('账号页交互抛错: ' + e.message); }
 
     // 这一轮：最大客户端去掉、动态地址池改成手动设置、管理账户免密、审计带 IP

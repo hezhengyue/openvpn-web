@@ -412,15 +412,6 @@ function copyText(t){const done=()=>toast('已复制到剪贴板','ok');
  if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t).then(done,()=>fb())}else fb();
  function fb(){const ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.opacity='0';
   document.body.appendChild(ta);ta.select();try{document.execCommand('copy');done()}catch(e){toast('复制失败，请手动选中','err')}ta.remove()}}
-/* 生成/重置后的密码必须能看见：弹窗大字显示 + 一键复制 */
-function showSecret(title,name,pw){
- modal(title,`<div class="hint">密码只在这里显示一次，关闭后请自行保存（台账里只存哈希，查不回来）。</div>
-  <div class="sec"><div class="k">账号</div><div class="mono" style="font-size:14px">${esc(name)}</div>
-  <div class="k" style="margin-top:10px">密码</div>
-  <div class="mono" style="font-size:18px;color:var(--primary);letter-spacing:.5px">${esc(pw)}</div></div>
-  <div class="bar" style="margin-top:10px"><button class="btn" onclick="copyText(window.__pw||'')">复制密码</button></div>`,
- ()=>{},'知道了',false,true);window.__pw=pw}
-
 /* 批量导入后：本次生成的所有初始密码必须能看见、能一次复制走 */
 function showBatchSecret(list,kept){
  const txt=list.map(x=>x.username+'\t'+x.password).join('\n');
@@ -687,13 +678,22 @@ function userAdd(){modal('添加认证账号',`<label class="f"><span>账号</sp
  <label class="f"><span>部门</span><input id="u_dept" placeholder="如 运维部"></label>
  <label class="f"><span>固定 IP</span><input id="u_ip" placeholder="留空自动分配下一个可用">
    <button type="button" class="btn sm" onclick="fillNextIp('u_ip')">自动分配</button></label>
- <label class="f"><span>初始密码</span><input id="u_pw" placeholder="留空自动生成，生成后弹窗显示">
-   <button type="button" class="btn sm" onclick="document.getElementById('u_pw').value=genPw()">生成</button></label>
- <label class="f"><span>备注</span><input id="u_note"></label>`,async()=>{
- const j=await post('/api/users',{username:$('#u_name').value.trim(),vpn_ip:$('#u_ip').value.trim(),
-   password:$('#u_pw').value,note:$('#u_note').value.trim(),
+ <label class="f"><span>初始密码</span><input id="u_pw" placeholder="留空则点确定生成，复制后再点一次确定">
+   <button type="button" class="btn sm" onclick="document.getElementById('u_pw').value=genPw()">生成</button>
+   <button type="button" class="btn sm" onclick="copyText(document.getElementById('u_pw').value)">复制</button></label>
+ <label class="f"><span>备注</span><input id="u_note"></label>
+ <div class="hint">密码只在这个输入框里明文出现一次，保存后不再弹窗。生成后请先复制，再点确定保存。</div>`,async()=>{
+ let pw=$('#u_pw').value;
+ if(!pw){ // 第一次点确定：生成并停在弹窗里，让人先复制走
+  pw=genPw();$('#u_pw').value=pw;
+  $('#mok').textContent='已复制，确认创建';
+  toast('已生成初始密码，请先复制，再点一次确定','warn');
+  throw new Error('先复制生成的密码');
+ }
+ await post('/api/users',{username:$('#u_name').value.trim(),vpn_ip:$('#u_ip').value.trim(),
+   password:pw,note:$('#u_note').value.trim(),
    real_name:$('#u_real').value.trim(),dept:$('#u_dept').value.trim()});
- toast('账号已创建','ok');await pgUsers();showSecret('账号已创建 · '+j.username,j.username,j.password);
+ toast('账号已创建 · 密码请先从输入框复制','ok');await pgUsers();
  });}
 async function fillNextIp(id){try{const j=await get('/api/users/next-ip');$('#'+id).value=j.vpn_ip;toast('已填入 '+j.vpn_ip,'ok')}catch(e){}}
 function userEdit(n){const u=U.list.find(x=>x.username===n)||{};
@@ -714,11 +714,11 @@ function userEdit(n){const u=U.list.find(x=>x.username===n)||{};
 function userPwd(n){modal('重置密码 · '+n,
  `<label class="f"><span>新密码</span><input id="u_pw" autocomplete="new-password" placeholder="至少 8 位"></label>
   <div class="bar"><button type="button" class="btn" onclick="document.getElementById('u_pw').value=genPw()">生成随机密码</button>
-  <button type="button" class="btn" onclick="var e=document.getElementById('u_pw');e.type=e.type==='password'?'text':'password'">显示 / 隐藏</button></div>
-  <div class="hint">点【生成随机密码】会直接填进上面的输入框并显示出来，先复制再保存；保存成功后还会再弹一次，不用担心看不到。</div>`,
- async()=>{const pw=$('#u_pw').value;if(!pw){toast('请填写新密码','err');return}
-  await post('/api/users/'+encodeURIComponent(n),{password:pw});toast('密码已重置','ok');
-  showSecret('密码已重置 · '+n,n,pw)})}
+  <button type="button" class="btn" onclick="var e=document.getElementById('u_pw');e.type=e.type==='password'?'text':'password'">显示 / 隐藏</button>
+  <button type="button" class="btn" onclick="copyText(document.getElementById('u_pw').value)">复制密码</button></div>
+  <div class="hint">点【生成随机密码】会直接填进上面的输入框并显示出来，先复制再保存；保存后不会再弹窗，请自觉存好。</div>`,
+ async()=>{const pw=$('#u_pw').value;if(!pw){toast('请填写新密码','err');throw new Error('请填写新密码')}
+  await post('/api/users/'+encodeURIComponent(n),{password:pw});toast('密码已重置 · 请确认已复制','ok')})}
 async function userToggle(n,v){await post('/api/users/'+encodeURIComponent(n),{enabled:v});toast('状态已更新','ok');pgUsers()}
 async function userDel(n){confirmAct('删除账号 · '+n,'该账号及其授权会一并删除（台账已自动备份，可回滚）。不可撤销。',
  async()=>{await del('/api/users/'+encodeURIComponent(n));toast('已删除','ok');pgUsers()},'删除账号')}

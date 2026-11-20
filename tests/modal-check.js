@@ -1,9 +1,8 @@
-// 真浏览器验证：改密弹窗里点【生成随机密码】→ 保存 → 密码必须再弹一次且看得见
+// 真浏览器验证：改密弹窗里点【生成随机密码】→ 密码明文在输入框 → 保存 → 不再弹二次密码页
 // 用法：
 //   node modal-check.js                      # 本地 MOCK（账号 alice）
 //   SHOT_BASE=http://ip:8800 SHOT_PW=xxx MODAL_USER=会话 node modal-check.js
-// 背景：modal() 原来是 await onOk(); closeModal()，onOk 里 showSecret 刚打开的新弹窗
-// 会被这句 closeModal 立刻关掉，用户看不到密码。这条用例专门盯这个回归。
+// 背景：早期保存后会再弹一个大字密码窗，用户要求去掉；生成阶段仍必须在输入框里看得见、复制得到。
 const {spawn, execSync} = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -118,18 +117,18 @@ function cdp(method, params, sessionId) {
     }
     await shot('1-生成后');
 
-    // 点确定保存 → 等 → 必须弹出密码
+    // 点确定保存 → 等 → 不应再弹密码页
     await evalJs(`document.querySelector('#mok').click();1`);
     await sleep(2000);
     const st = await evalJs(`(function(){
       const m=document.querySelector('#mask');
-      return {disp:m.style.display, txt:m.textContent, sec:(m.querySelector('.sec')||{}).textContent||''};
+      return {disp:m.style.display, txt:m.textContent};
     })()`);
-    if (st.disp !== 'flex') fails.push('保存后密码弹窗没弹出来（mask.display=' + st.disp + '）');
-    else if (!st.txt.includes(pw)) fails.push('弹出的密码与生成的不一致');
+    if (st.disp === 'flex') fails.push('保存后仍弹出一次性密码弹窗（已要求去掉）');
+    else if (st.txt.includes(pw)) fails.push('保存后页面仍残留刚生成的密码');
     await shot('2-保存后');
 
-    console.log(fails.length ? '失败：\n - ' + fails.join('\n - ') : '通过：生成 → 保存 → 密码弹窗可见，密码为 ' + pw);
+    console.log(fails.length ? '失败：\n - ' + fails.join('\n - ') : '通过：生成 → 保存 → 无二次弹窗，密码为 ' + pw);
     if (fails.length) process.exitCode = 1;
   } catch (e) {
     console.error('执行失败:', e.message);
