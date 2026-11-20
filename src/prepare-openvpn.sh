@@ -139,7 +139,11 @@ else
         say "      本机缺编译工具:$MISS，无法就地编译"
     else
         say "      包内没有预置二进制，开始就地编译 $(basename "$SRC_TGZ")"
-        say "      源码与依赖都在包内，不联网；大约 5–15 分钟，期间请勿中断…"
+        if [ "$HAVE_STATIC" = 1 ]; then
+            say "      只编 openvpn 本体（依赖用包内预编译静态库），一般十几秒…"
+        else
+            say "      要连 OpenSSL 一起编，大约 5–15 分钟，期间请勿中断…"
+        fi
         mkdir -p "$DEST/bin"
         if [ "$HAVE_STATIC" = 1 ]; then
             # 有预编译静态库就只编 openvpn 本体，能省掉 OpenSSL 那几分钟
