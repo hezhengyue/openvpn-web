@@ -46,7 +46,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "1.3.2"
+WEB_VERSION = "1.3.3"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -181,7 +181,7 @@ def init_db():
     for k, v in (("initialized", 0), ("wizard_step", 0), ("admin_hash", ""),
                  ("admin_salt", ""), ("config_fingerprint", ""), ("openvpn_version", ""),
                  ("last_update", ""), ("csrf", ""), ("schema_v2", 0),
-                 ("admin_name", ""), ("allow_init_v2", 0)):
+                 ("admin_name", ""), ("admin_user", "admin"), ("allow_init_v2", 0)):
         con.execute("INSERT OR IGNORE INTO meta(k,v) VALUES(?,?)", (k, json.dumps(v, ensure_ascii=False)))
     con.commit()
     # 迁移只搬数据，不建表（表已由 SCHEMA 建好）；万一某台机器上老库结构特殊，
@@ -2493,6 +2493,43 @@ def route_guide():
 
 
 # --------------------------------------------------------------------------- 管理密码 / 会话
+
+ADMIN_USER_RE = re.compile(r"^[A-Za-z0-9_\-]{3,32}$")
+
+
+def admin_user():
+    """独立的管理后台登录账户名；老库没有该字段时默认 admin。"""
+    return (get_meta("admin_user") or "").strip() or "admin"
+
+
+def set_admin_user(name):
+    name = (name or "").strip()
+    if not ADMIN_USER_RE.match(name):
+        raise ValueError("管理账户名需 3~32 位，只用字母、数字、下划线、短横线")
+    set_meta("admin_user", name)
+    log_audit("admin", "admin_user.change", "管理账户名改为 %s" % name)
+    return name
+
+
+def admin_login(user, pw):
+    """账户 + 密码双要素。用户名用常量时间比较，避免时序侧漏账户名。"""
+    import hmac
+    want = admin_user()
+    got = (user or "").strip()
+    name_ok = hmac.compare_digest(got, want) if len(got) == len(want) else False
+    hash_ok = admin_verify(pw)
+    return name_ok and hash_ok
+
+
+def admin_reset_credentials():
+    """一键重新生成独立管理账户 + 密码，返回明文（只在此刻显示一次）。"""
+    name = "admin-" + secrets.token_hex(3)          # 如 admin-4f2ac9
+    pw = rand_password(18)
+    set_meta("admin_user", name)
+    set_meta("admin_hash", hash_password(pw))
+    log_audit("admin", "admin.reset", "管理账户与密码已重新生成")
+    return {"username": name, "password": pw}
+
 
 def admin_set_password(pw):
     if len(pw) < 8:

@@ -128,10 +128,13 @@ def main():
     j = c.get("/api/session").get_json()
     check("会话接口返回 csrf", bool(j["csrf"]))
     check("未登录访问 state 被拒", c.get("/api/state").status_code == 401)
-    lr = c.post("/api/login", json={"password": "wrong"})
+    lr = c.post("/api/login", json={"username": "admin", "password": "wrong"})
     check("错误密码被拒", lr.status_code == 401)
-    lr = c.post("/api/login", json={"password": "TestPass123!"})
-    check("正确密码登录", lr.get_json().get("ok") is True)
+    lr = c.post("/api/login", json={"username": "notadmin", "password": "TestPass123!"})
+    check("错误账户被拒", lr.status_code == 401)
+    lr = c.post("/api/login", json={"username": "admin", "password": "TestPass123!"})
+    check("正确账户+密码登录", lr.get_json().get("ok") is True)
+    check("登录返回账户名", lr.get_json().get("admin_user") == "admin", lr.get_json())
     H = {"X-CSRF-Token": lr.get_json()["csrf"]}
     def P(path, body=None):
         return c.post(path, json=body or {}, headers=H)
@@ -519,6 +522,29 @@ def main():
           and "user_groups" in c.get("/api/acl").get_json())
     check("重启服务 API", P("/api/service/restart").get_json()["ok"])
     check("改管理密码", P("/api/password", {"old": "TestPass123!", "new": "NewPass456!"}).get_json()["ok"])
+    check("改账户名需验当前密码", P("/api/admin-user",
+          {"username": "boss", "password": "wrong"}).status_code == 400)
+    check("改账户名成功", P("/api/admin-user",
+          {"username": "boss", "password": "NewPass456!"}).get_json()["ok"])
+    check("旧账户名已失效", c.post("/api/login",
+          json={"username": "admin", "password": "NewPass456!"}).status_code == 401)
+    check("新账户名可登录", c.post("/api/login",
+          json={"username": "boss", "password": "NewPass456!"}).get_json()["ok"])
+    # 登录会重建会话并换 CSRF，刷新测试用的 token 再继续
+    H["X-CSRF-Token"] = c.get("/api/session").get_json()["csrf"]
+    check("非法账户名被拒", P("/api/admin-user",
+          {"username": "a b", "password": "NewPass456!"}).status_code == 400)
+    check("重置凭据需验当前密码", P("/api/admin-reset", {"password": "wrong"}).status_code == 400)
+    _reset = P("/api/admin-reset", {"password": "NewPass456!"}).get_json()
+    check("重置返回新账户名", _reset.get("username", "").startswith("admin-"), _reset)
+    check("重置返回新密码", len(_reset.get("password", "")) >= 12, _reset)
+    check("旧账户名+旧密码失效", c.post("/api/login",
+          json={"username": "boss", "password": "NewPass456!"}).status_code == 401)
+    check("新凭据可登录", c.post("/api/login",
+          json={"username": _reset["username"], "password": _reset["password"]}).get_json()["ok"])
+    core.set_meta("admin_user", "admin")
+    core.set_meta("admin_hash", core.hash_password("NewPass456!"))
+    H["X-CSRF-Token"] = c.get("/api/session").get_json()["csrf"]
     check("按钮式保存服务端设置", P("/api/settings", params).get_json()["ok"])
     check("按钮式恢复默认参数", P("/api/settings/restore-default", {}).get_json()["ok"])
     check("恢复默认不会把白名单放大回所有私网",

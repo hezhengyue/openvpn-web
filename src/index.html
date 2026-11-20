@@ -220,9 +220,10 @@ pre::-webkit-scrollbar-thumb{background:oklch(.45 .02 250);background-clip:conte
 <div id="login"><div class="lbox">
   <div class="lm"><svg viewBox="0 0 24 24"><rect x="4.8" y="10.4" width="14.4" height="9.6" rx="2.6"/><path d="M8.2 10.4V8a3.8 3.8 0 0 1 7.6 0v2.4"/><circle cx="12" cy="15.2" r="1.15" fill="currentColor" stroke="none"/></svg></div>
   <h1>OpenVPN 管理后台</h1><p>账号接入 · 访问控制 · 审计一体化</p>
-  <label class="f"><span>管理密码</span><input type="password" id="lp" style="width:100%" onkeydown="if(event.key==='Enter')doLogin()"></label>
+  <label class="f"><span>管理账户</span><input id="lu" style="width:100%" placeholder="默认 admin" autocomplete="username" onkeydown="if(event.key==='Enter')$('#lp').focus()"></label>
+  <label class="f"><span>管理密码</span><input type="password" id="lp" style="width:100%" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()"></label>
   <button class="btn pri" style="width:100%;height:36px" onclick="doLogin()">登录</button>
-  <p style="margin:16px 0 0">初始密码见 <span class="mono">data/admin_password.txt</span></p>
+  <p style="margin:16px 0 0">初始凭据见 <span class="mono">data/admin_password.txt</span>（账户名默认 admin）</p>
 </div></div>
 
 <div id="app">
@@ -284,7 +285,7 @@ function downloadText(name,text){
 function showLogin(){$('#login').style.display='flex';$('#app').style.display='none'}
 function showApp(){$('#login').style.display='none';$('#app').style.display='block'}
 async function doLogin(){
-  try{const j=await api('/api/login',{method:'POST',body:{password:$('#lp').value}});
+  try{const j=await api('/api/login',{method:'POST',body:{username:$('#lu').value.trim()||'admin',password:$('#lp').value}});
     S.csrf=j.csrf;S.logged=true;showApp();await loadState();
     go(S.initialized?(location.hash.slice(2)||'overview'):'wizard');
   }catch(e){}
@@ -594,8 +595,8 @@ async function pgOnline(){const j=await get('/api/online');ON.list=j.users||[];
   <button class="btn" onclick="pgOnline()">刷新</button>
   <span class="muted" id="ocnt"></span></div>
  <div id="obox"></div>
- <div class="hint">「踢下线」只是断开当前这一条连接：<b>客户端会自动重连</b>（OpenVPN GUI / Connect 默认就是断线重连），
-  几秒后它会自己回来。要让它连不上，把账号改成<b>停用</b>。</div></div>`;
+ <div class="hint">这里不提供「踢下线」：踢掉后客户端会自动重连，等于没处理。要阻止某人接入，点【停用账号】——
+  会立即断开当前连接、移除固定 IP 配置，客户端再怎么重连都进不来。需要恢复时到「认证账号」页重新启用。</div></div>`;
  renderOnline()}
 function renderOnline(){
  const box=document.getElementById('obox');if(!box)return;
@@ -606,28 +607,20 @@ function renderOnline(){
   '<b>'+esc(u.username)+'</b>',
   u.vpn_ip==='未登记'?badge('未登记告警','err'):'<span class="mono">'+esc(u.vpn_ip)+'</span>',
   esc(u.real_addr),esc(u.bytes_recv),esc(u.bytes_sent),esc(u.since),
-  '<button class="btn sm danger" onclick="kick(\''+esc(u.username)+'\')">踢下线</button>']),
+  '<button class="btn sm danger" onclick="stopUser(\''+esc(u.username)+'\')">停用账号</button>']),
   kw?'没有匹配的会话':'当前没有在线会话','online',10,'renderOnline');
  const c=document.getElementById('ocnt');
  if(c)c.textContent='在线 '+ON.list.length+' 个'+(kw?'，匹配 '+list.length+' 个':'');
 }
-async function kick(n){
- confirmAct('踢下线 · '+n,
-  '该账号当前连接会立即断开。<b>但客户端通常会自动重连</b>，几秒后可能又出现在列表里——这是客户端行为，不是没踢掉。'
-  +'要彻底不让它连上来，请把账号改成「停用」。',
+async function stopUser(n){
+ confirmAct('停用账号 · '+n,
+  '将<b>停用该账号</b>：立即断开当前连接、移除它的固定 IP 配置。客户端自动重连也会因账号停用而认证失败，进不来。'
+  +'之后可在「认证账号」页重新启用。',
   async()=>{
-   await post('/api/users/kick',{username:n});
-   toast('已断开，正在确认会不会自动重连…','ok');
+   await post('/api/users/'+encodeURIComponent(n),{enabled:0});
+   toast('已停用 '+n+'，连接已断开','ok');
    ON.kw='';await pgOnline();
-   // 3 秒后再看一次：回来了就明说，别让人以为是没生效
-   setTimeout(async()=>{
-    try{const j=await get('/api/online');ON.list=j.users||[];renderOnline();
-     const back=ON.list.some(u=>u.username===n);
-     toast(back?(n+' 已自动重连（客户端自己重拨的）。要彻底阻止请「停用」该账号')
-               :(n+' 已下线，未再连入'),back?'warn':'ok');
-    }catch(e){}
-   },3000);
-  },'踢下线');
+  },'停用账号');
 }
 
 /* ---------------- 账号管理 ---------------- */
@@ -641,7 +634,7 @@ async function pgUsers(){const j=await get('/api/users');U.list=j.users;
  <span class="muted">共 ${U.list.length} 个账号</span></div>
  <div id="ubox"></div>
  <div class="hint">固定 IP 由服务端下发，客户端改不了；改 IP 会自动重建 ACL 并断开该账号当前连接。<br>
- 要断开某人当前连接，去「在线用户」页操作；这里只管台账。<br>
+ 要断开某人当前连接并阻止重连，直接把状态改成<b>停用</b>（在线用户页也有【停用账号】按钮）。<br>
  员工自助改密：<span class="mono" id="selfurl"></span></div></div>`;
  renderUsers();
  setTimeout(function(){const e=document.getElementById('selfurl');if(e)e.textContent=location.origin+'/self'},0)}
@@ -1093,14 +1086,23 @@ async function pgSecurity(){
  tagInit('web_allow',a.allow||[]);
  $('#page').innerHTML=`
  <div class="row">
+  <div class="card"><h3>管理账户 <small>登录后台用账户 + 密码</small></h3>
+   <label class="f"><span>当前账户名</span><input id="au" value="${esc(a.admin_user||'admin')}" placeholder="如 admin"></label>
+   <div class="muted" style="font-size:12px;margin:6px 0 10px">3~32 位，字母 / 数字 / 下划线 / 短横线。改账户名需验证当前密码。</div>
+   <label class="f"><span>当前密码（改账户名时验证）</span><input type="password" id="aup"></label>
+   <button class="btn pri" onclick="saveAdminUser()">保存账户名</button></div>
   <div class="card"><h3>修改管理密码</h3>
    <label class="f"><span>原密码</span><input type="password" id="op"></label>
    <label class="f"><span>新密码（≥8位）</span><input type="password" id="np"></label>
-   <button class="btn pri" onclick="chPwd()">修改</button></div>
+   <button class="btn pri" onclick="chPwd()">修改密码</button></div>
+  <div class="card"><h3>重新生成账户与密码 <small>忘了凭据时用</small></h3>
+   <label class="f"><span>当前密码（验证身份）</span><input type="password" id="rp"></label>
+   <button class="btn danger" onclick="resetAdmin()">一键重置</button>
+   <div class="hint">生成全新的账户名和密码，旧的立刻作废。重置后必须用新凭据重新登录。</div></div>
   <div class="card"><h3>操作者名称 <small>审计日志「操作者」列显示它</small></h3>
    <label class="f"><span>名称</span><input id="adn" value="${esc(a.admin_name||'')}" placeholder="如 运维-小王"></label>
    <button class="btn pri" onclick="saveAdminName()">保存</button>
-   <div class="hint">登录只有一个密码、没有用户名，所以操作日志里的操作者取这个名字。</div></div>
+   <div class="hint">这是审计日志里显示的称呼，和登录账户名是两回事——可以写真实姓名。</div></div>
  </div>
  <div class="card"><h3>管理端访问白名单 <small>控制谁能打开这个后台</small></h3>
   <div class="bar"><span class="muted">你当前的来源 IP：<b class="mono">${esc(a.current_ip)}</b></span>
@@ -1124,6 +1126,19 @@ async function pgSecurity(){
  </div>`}
 async function saveAdminName(){const j=await post('/api/admin-name',{name:$('#adn').value});
  toast(j.msg,'ok');loadState()}
+async function saveAdminUser(){const j=await post('/api/admin-user',{username:$('#au').value.trim(),password:$('#aup').value});
+ toast(j.msg,'ok');$('#aup').value='';loadState();pgSecurity()}
+async function resetAdmin(){
+ const pw=$('#rp').value.trim();if(!pw){toast('请先填当前密码','err');return}
+ confirmAct('重置管理账户与密码','将生成全新的账户名和密码，<b>旧凭据立即作废</b>。重置后需要用新凭据重新登录。',
+ async()=>{const j=await post('/api/admin-reset',{password:pw});
+  modal('新管理凭据 · 请保存',`<div class="hint">这是唯一一次显示，关掉就看不到了。</div>
+   <label class="f"><span>账户名</span><input id="ncu" readonly value="${esc(j.username)}"></label>
+   <label class="f"><span>密码</span><input id="ncp" readonly value="${esc(j.password)}"></label>
+   <button class="btn" onclick="downloadText('openvpn-admin.txt','管理账户: '+document.getElementById('ncu').value+'\\n管理密码: '+document.getElementById('ncp').value)">下载凭据</button>`,
+  ()=>{},'知道了',false,true);
+  $('#rp').value='';
+ },'确认重置')}
 async function saveAllow(){
  const j=await post('/api/security/allow',{allow:TAGS.web_allow||[]});
  toast(j.msg,'ok');SEC.allow=j.allow;pgSecurity()}

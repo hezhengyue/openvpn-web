@@ -88,6 +88,7 @@ async function waitUp() {
       }});
     const w = dom.window;
     const wait = ms => new Promise(r => setTimeout(r, ms));
+    w.document.querySelector('#lu').value = 'admin';
     w.document.querySelector('#lp').value = 'SmokePass123!';
     await w.doLogin();
     await wait(500);
@@ -280,6 +281,8 @@ async function waitUp() {
       else if (w.document.querySelectorAll('#tgchip_web_allow .chip').length < 1)
         errors.push('白名单初始条目没渲染出来');
       if (!w.document.querySelector('#adn')) errors.push('缺少操作者名称输入框');
+      if (!w.document.querySelector('#au')) errors.push('安全页缺少独立管理账户名输入框');
+      if (!/重新生成账户与密码/.test(t)) errors.push('安全页缺少一键重置管理凭据入口');
     } catch (e) { errors.push('安全页交互抛错: ' + e.message); }
 
     try {
@@ -294,13 +297,16 @@ async function waitUp() {
       if (!/新增账号|修改账号|系统/.test(body)) errors.push('审计日志没有中文化的动作/操作者');
     } catch (e) { errors.push('日志页交互抛错: ' + e.message); }
 
-    // 在线页：搜索框 + 踢下线说明（客户端会自动重连，必须写清楚）
+    // 在线页：搜索框 + 停用账号（不再有踢下线，踢了客户端会自动重连）
     try {
       w.go('online'); await wait(500);
       const okw = w.document.querySelector('#okw');
       if (!okw) errors.push('在线用户页缺少搜索框');
       const t = w.document.querySelector('#page').textContent;
-      if (!/自动重连/.test(t)) errors.push('在线页没说明「踢下线后客户端会自动重连」');
+      if (!/停用账号/.test(t)) errors.push('在线页缺少「停用账号」按钮');
+      if (!/自动重连/.test(t)) errors.push('在线页没说明踢下线的自动重连问题');
+      const btns = [...w.document.querySelectorAll('#obox button')].map(b => b.textContent.trim());
+      if (btns.some(x => /踢下线/.test(x))) errors.push('在线页仍有「踢下线」按钮');
     } catch (e) { errors.push('在线页交互抛错: ' + e.message); }
 
     // 自助改密页：不该再有固定 IP 输入框

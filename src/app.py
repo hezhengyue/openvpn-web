@@ -171,9 +171,9 @@ def api_login():
     if len(fails) >= 5:
         return jsonify(ok=False, msg="失败次数过多，10 分钟后再试"), 429
     d = request.get_json(silent=True) or {}
-    if not core.admin_verify(d.get("password", "")):
+    if not core.admin_login(d.get("username", ""), d.get("password", "")):
         fails.append(time.time())
-        return jsonify(ok=False, msg="密码错误"), 401
+        return jsonify(ok=False, msg="账户或密码错误"), 401
     LOGIN_FAILS.pop(ip, None)
     session.clear()
     session.permanent = True
@@ -182,7 +182,7 @@ def api_login():
     session["csrf"] = uuid.uuid4().hex
     core.log_audit(session["user"], "login", "登录成功")
     return ok({"csrf": session["csrf"], "initialized": bool(core.get_meta("initialized")),
-               "admin_name": session["user"]})
+               "admin_name": session["user"], "admin_user": core.admin_user()})
 
 
 @app.post("/api/logout")
@@ -201,6 +201,27 @@ def api_password():
     return ok(msg="管理密码已修改")
 
 
+@app.post("/api/admin-user")
+def api_admin_user():
+    """改管理账户名（独立于操作者显示名），需验当前密码防止会话被劫持后改锁"""
+    d = request.get_json(silent=True) or {}
+    if not core.admin_verify(d.get("password", "")):
+        raise ValueError("当前密码错误")
+    name = core.set_admin_user(d.get("username", ""))
+    return ok({"username": name, "msg": "管理账户名已改为 " + name})
+
+
+@app.post("/api/admin-reset")
+def api_admin_reset():
+    """一键重置管理账户 + 密码：需验当前密码，返回明文只此一次"""
+    d = request.get_json(silent=True) or {}
+    if not core.admin_verify(d.get("password", "")):
+        raise ValueError("当前密码错误")
+    r = core.admin_reset_credentials()
+    return ok({"username": r["username"], "password": r["password"],
+               "msg": "管理账户与密码已重置，请用新凭据重新登录"})
+
+
 @app.post("/api/admin-name")
 def api_admin_name():
     """改操作者名称：审计日志里的「操作者」列就显示这个名字"""
@@ -215,6 +236,7 @@ def api_admin_name():
 def api_allow_get():
     return ok({"allow": core.allow_list(), "detected": core.local_subnets(),
                "current_ip": client_ip(), "admin_name": core.admin_name(),
+               "admin_user": core.admin_user(),
                "vpn_cidr": core.cfg().get("vpn_cidr", "")})
 
 
@@ -687,17 +709,6 @@ def users_delete(name):
     core.backup_users()
     core.delete_user(name)
     after_change(kick=True, username=name)
-    return ok()
-
-
-@app.post("/api/users/kick")
-def users_kick():
-    name = (request.get_json(silent=True) or {}).get("username", "")
-    if not core.valid_username(name):
-        raise ValueError("用户名非法")
-    tid = uuid.uuid4().hex
-    sudo_worker(tid, "kick-user", {"username": name})
-    core.log_audit("admin", "user.kick", name)
     return ok()
 
 
@@ -1331,6 +1342,12 @@ def main():
         sys.exit(0)
     if argv and argv[0] == "--allow-reset":
         print("新白名单: %s" % ", ".join(core.set_allow_list(core.local_subnets())))
+        sys.exit(0)
+    if argv and argv[0] == "--reset-admin":
+        r = core.admin_reset_credentials()
+        print("管理账户: %s" % r["username"])
+        print("管理密码: %s" % r["password"])
+        print("请重启服务后使用新凭据登录: systemctl restart openvpn-web")
         sys.exit(0)
     if argv and argv[0] == "--restore-full":
         if len(argv) < 2:
