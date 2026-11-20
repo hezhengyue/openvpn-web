@@ -26,9 +26,17 @@ import sqlite3
 import ipaddress
 import subprocess
 import base64
+import threading
 from datetime import datetime, timedelta
 
 ROOT = os.environ.get("OVPN_WEB_ROOT", "/opt/openvpn-web")
+# 系统级写操作的进程内互斥：Web 现在是多线程（waitress），两个管理员同时点保存 /
+# 两个账号同时改地址，都会并发走「写配置 + 重建 ccd + 重放下发规则」。
+# 这些动作单独看都是幂等的，交叉执行却不安全：iptables 那条流水线是「先 FLUSH 再逐条 ADD」，
+# 两条交叉跑会出现「A 刚 FLUSH 完，B 的 ADD 已经结束」——ACL 链空着，等于全员放行，
+# 直到 5 分钟后的定时重放才恢复。锁住就只剩单线程时的行为。
+SYS_LOCK = threading.RLock()      # 可重入：write_all_config 内部还会调 rebuild_ccd
+
 DATA = os.path.join(ROOT, "data")
 DB_PATH = os.path.join(DATA, "openvpn-web.db")
 STATE = os.path.join(DATA, "state")
@@ -47,7 +55,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "1.3.21"
+WEB_VERSION = "1.3.22"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -770,16 +778,29 @@ def validate_cfg(c):
 # 当前请求的审计上下文：actor=管理员账户名，ip=来源 IP，由 app.py 在每个请求开头写入。
 # log_audit 缺省时从这里取值，这样 core 内部（add_user / update_user …）记的日志
 # 也能自动带上「谁、从哪个 IP 操作的」，不用把参数一路透传。
-AUDIT_CTX = {"actor": "", "ip": ""}
+#
+# 必须是 thread-local，不能是全局 dict：Web 用线程池处理请求，全局 dict 会被下一个
+# 请求覆盖，A 的操作记成 B 干的（审计就不可信了）。后台任务线程由 start_task 自己
+# 设一次发起人。
+_AUDIT = threading.local()
+
+
+def audit_ctx_set(actor="", ip=""):
+    _AUDIT.actor = actor or ""
+    _AUDIT.ip = ip or ""
+
+
+def audit_ctx_get():
+    return getattr(_AUDIT, "actor", ""), getattr(_AUDIT, "ip", "")
 
 
 def log_audit(actor, action, detail, ip=None):
-    ctx = AUDIT_CTX
+    _a, _i = audit_ctx_get()
     # 没登录时的兜底 actor（"admin"/"web"）换成当前管理员账户名
-    if actor in (None, "", "admin", "web") and ctx.get("actor"):
-        actor = ctx["actor"]
+    if actor in (None, "", "admin", "web") and _a:
+        actor = _a
     if ip is None:
-        ip = ctx.get("ip") or ""
+        ip = _i or ""
     con = db()
     con.execute("INSERT INTO audit(ts,actor,action,detail,ip) VALUES(?,?,?,?,?)",
                 (now(), actor, action, detail, ip))
@@ -1009,6 +1030,13 @@ def pool_user_conflicts(c):
 
 def add_user(username, vpn_ip=None, password=None, note="", real_name="", dept="",
              expires_at="", actor="web"):
+    # 取号 + 插入必须原子：两个请求同时进来会挑到同一个空闲地址，一个必然撞 UNIQUE
+    with SYS_LOCK:
+        return _add_user(username, vpn_ip, password, note, real_name, dept, expires_at, actor)
+
+
+def _add_user(username, vpn_ip=None, password=None, note="", real_name="", dept="",
+              expires_at="", actor="web"):
     c = cfg()
     if not valid_username(username):
         raise ValueError("账号名只支持中文、字母、数字、点、下划线、连字符，1~32 位，不能有空格")
@@ -1398,6 +1426,12 @@ def preview_import(content, filename="", actor="web"):
 
 
 def apply_import(token, actor="web", reset_empty=False, action="import.apply"):
+    # 整表覆盖：必须独占，否则和「同时在改某个账号」交叉会写出半新半旧的台账
+    with SYS_LOCK:
+        return _apply_import(token, actor, reset_empty, action)
+
+
+def _apply_import(token, actor="web", reset_empty=False, action="import.apply"):
     """正式提交全量同步。二次确认由前端弹窗按钮完成；
     这里靠 5 分钟预览令牌防重放，并在写入前自动备份台账。
 
@@ -2295,6 +2329,11 @@ def refresh_fingerprint():
 
 def rebuild_ccd():
     """全量重建：清空再写，杜绝改 IP 后旧权限被后来者继承"""
+    with SYS_LOCK:
+        return _rebuild_ccd()
+
+
+def _rebuild_ccd():
     ensure_dirs()
     for f in os.listdir(CCD):
         p = os.path.join(CCD, f)
@@ -2320,7 +2359,15 @@ def render_rules(c):
         "# 由 OpenVPN Web 一体化管理系统全量重建，勿手工编辑",
         "# 网络模式: %s   ACL 模式: %s" % (nat_mode, mode),
         "set -e",
-        "IPT=iptables",
+        "# 串行化：定时重放（openvpn-web-replay.timer）和页面上的「全量重建」可能同时触发。",
+        "# 两条 iptables 流水线交叉时会出现「A 刚 FLUSH 完、B 的 ADD 已经结束」——ACL 链空着",
+        "# 等于全员放行，而且要等 5 分钟后的定时重放才恢复。文件锁把并发压回串行。",
+        "IPT='iptables -w 5'",          # -w：等 xtables 锁，别报 Resource temporarily unavailable
+        'LOCK="%s"' % os.path.join(STATE, "rules.lock"),
+        "if command -v flock >/dev/null 2>&1; then",
+        '  exec 9>"$LOCK"',
+        '  flock -w 120 9 || { echo "另一条规则重建还在跑，跳过本轮"; exit 0; }',
+        "fi",
         "NET='%s'" % net,
         "",
         "# 0) IPv4 转发是路由模式与客户端互访的前提（持久化由 worker 写 sysctl.d）",
@@ -2400,6 +2447,11 @@ def render_rules(c):
 
 def write_all_config():
     """把库里的状态落到磁盘（配置/ovpn/规则脚本）。由 Web 写入，worker 负责执行。"""
+    with SYS_LOCK:
+        return _write_all_config()
+
+
+def _write_all_config():
     ensure_dirs()
     c = cfg()
     with open(os.path.join(DATA, "server.conf"), "w") as f:
@@ -2857,15 +2909,15 @@ def selfcheck():
             except Exception:
                 return ""
 
-        acl_txt = ipt("acl", ["iptables", "-S", "OVPN_ACL"])
+        acl_txt = ipt("acl", ["iptables", "-w", "5", "-S", "OVPN_ACL"])
         n_acl = len([l for l in acl_txt.splitlines() if l.startswith("-A OVPN_ACL")])
         add("OVPN_ACL 链", n_acl > 0,
             "已加载 %d 条" % n_acl if n_acl else
             "未加载（点【重建规则】；若刚装好还没下过规则也正常）")
-        nats = ipt("nat_chain", ["iptables", "-t", "nat", "-S", "OVPNWEB_NAT"])
+        nats = ipt("nat_chain", ["iptables", "-w", "5", "-t", "nat", "-S", "OVPNWEB_NAT"])
         has_nat = "MASQUERADE" in nats or "SNAT" in nats
         if nat == "no-nat":
-            post = ipt("nat", ["iptables", "-t", "nat", "-S", "POSTROUTING"])
+            post = ipt("nat", ["iptables", "-w", "5", "-t", "nat", "-S", "POSTROUTING"])
             stray = [l for l in post.splitlines()
                      if c["vpn_cidr"] in l and ("MASQUERADE" in l or "SNAT" in l)]
             add("无 NAT 残留", not has_nat and not stray,

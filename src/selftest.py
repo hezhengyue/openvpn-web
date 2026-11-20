@@ -1073,6 +1073,77 @@ def main():
         con.close()
         check("并发写入条目不丢", n == 160, n)
 
+    section("多线程下的一致性")
+    rules_txt = open(os.path.join(core.STATE, "rules.sh")).read()
+    check("规则脚本用 flock 串行化（定时重放 vs 手工重建）", "flock -w" in rules_txt)
+    check("规则脚本的 iptables 带 -w（等 xtables 锁而不是报错）",
+          "IPT='iptables -w 5'" in rules_txt, rules_txt.splitlines()[:12])
+
+    # 长任务占着写锁时，其它写接口要在门口被挡下，而不是排队或并发执行
+    web.WRITE_LOCK.acquire()
+    try:
+        r = P("/api/users", {"username": "锁内测试", "password": "Aa12345678"})
+    finally:
+        web.WRITE_LOCK.release()
+    check("长任务运行时拒绝并发写操作（409）", r.status_code == 409, r.get_json())
+    check("被拒的请求没有真的建出账号",
+          not any(u["username"] == "锁内测试" for u in core.list_users()))
+
+    # 并发建号：取号 + 插入必须原子，否则两个线程会挑到同一个空闲地址
+    errs = []
+
+    def _mk(i):
+        try:
+            core.add_user("并发%d" % i, password="Aa12345678", actor="selftest")
+        except Exception as e:
+            errs.append(repr(e))
+
+    import threading as _th
+    ts = [_th.Thread(target=_mk, args=(i,)) for i in range(8)]
+    [t.start() for t in ts]
+    [t.join(30) for t in ts]
+    _ips = [u["vpn_ip"] for u in core.list_users() if u["username"].startswith("并发")]
+    check("并发建号不撞 UNIQUE（8 个全成功）", not errs, errs[:2])
+    check("并发建号拿到的地址互不相同", len(_ips) == 8 and len(set(_ips)) == 8, _ips)
+    for _u in [u["username"] for u in core.list_users() if u["username"].startswith("并发")]:
+        core.delete_user(_u)
+
+    # 审计归属：全局 dict 在并发下会把 A 的操作记成 B 干的
+    def _audit_as(name):
+        core.audit_ctx_set(name, "10.9.9.9")
+        for _k in range(15):
+            core.log_audit("admin", "selftest.actor", "归属")
+
+    _ta = _th.Thread(target=_audit_as, args=("alice",))
+    _tb = _th.Thread(target=_audit_as, args=("bob",))
+    _ta.start(); _tb.start(); _ta.join(30); _tb.join(30)
+    con = core.db()
+    _rows = dict(con.execute("SELECT actor, COUNT(*) FROM audit WHERE action='selftest.actor' "
+                             "GROUP BY actor").fetchall())
+    con.close()
+    check("并发下审计归属不串人（alice/bob 各 15 条）",
+          _rows.get("alice") == 15 and _rows.get("bob") == 15, _rows)
+    core.audit_ctx_set("", "")
+    core.log_audit("admin", "selftest.actor", "无上下文时回落到 admin")
+    con = core.db()
+    _last = con.execute("SELECT actor FROM audit WHERE action='selftest.actor' "
+                        "ORDER BY id DESC LIMIT 1").fetchone()[0]
+    con.close()
+    check("没有上下文时审计仍能落一个操作者", _last == "admin", _last)
+
+    if POSIX:
+        import worker as wk
+        f1 = wk.take_sys_lock(2)
+        try:
+            try:
+                wk.take_sys_lock(1)
+                busy_blocked = False
+            except RuntimeError:
+                busy_blocked = True
+        finally:
+            f1.close()
+        check("worker 的跨进程锁真的互斥（第二个拿不到）", busy_blocked)
+
     print("\n" + "=" * 62)
     print(" 通过 %d 项 / 失败 %d 项" % (len(PASS), len(FAIL)))
     if FAIL:

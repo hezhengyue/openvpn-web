@@ -366,6 +366,33 @@ DISPATCH = {
 }
 
 
+def take_sys_lock(timeout=180):
+    """跨进程串行化：同一时刻只允许一个特权动作在改系统。
+
+    Web 是单进程多线程，进程内的锁管不到「worker 被反复拉起」这件事——
+    两个请求同时 apply-rules，就是两条 iptables 流水线并行，ACL 链会被清空后互相覆盖。
+    这里用 flock：抢不到就排队，久了直接失败并写进任务日志，绝不半途插队。
+    Windows（自检环境）没有 fcntl，直接放行。
+    """
+    try:
+        import fcntl
+    except ImportError:
+        return None
+    os.makedirs(STATE, exist_ok=True)
+    p = os.path.join(STATE, "worker.lock")
+    f = open(p, "a+")
+    end = time.time() + timeout
+    while True:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return f
+        except OSError:
+            if time.time() > end:
+                f.close()
+                raise RuntimeError("另一个特权动作仍在执行，等待 %ds 超时" % timeout)
+            time.sleep(0.2)
+
+
 def main():
     global LOGF
     if len(sys.argv) != 2 or not re.match(r"^[0-9a-f]{32}$", sys.argv[1]):
@@ -384,7 +411,12 @@ def main():
         log("动作不在白名单: %s" % act); sys.exit(2)
     log("开始执行: %s" % act)
     try:
-        DISPATCH[act](params)
+        lock = take_sys_lock()      # 拿到锁再动手；拿不到就不动系统
+        try:
+            DISPATCH[act](params)
+        finally:
+            if lock:
+                lock.close()
         fix_owner()
         log("完成: %s" % act)
         sys.exit(0)

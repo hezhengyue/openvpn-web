@@ -168,8 +168,15 @@ def create(tag="手动", keep=10, kind="manual"):
             f.write(_manifest_text(m))
 
         safe_tag = "".join(ch for ch in m["tag"] if ch.isalnum() or ch in "-_")[:16] or "manual"
-        name = "openvpn-web-full-%s-%s.tar.gz" % (
-            datetime.now().strftime("%Y%m%d-%H%M%S"), safe_tag)
+        stem = "openvpn-web-full-%s-%s" % (datetime.now().strftime("%Y%m%d-%H%M%S"), safe_tag)
+        name = stem + ".tar.gz"
+        # 同一秒内两次备份（两个管理员同时操作）不能互相覆盖：加 -2 / -3 后缀
+        _n = 1
+        while os.path.exists(os.path.join(FULL, name)):
+            _n += 1
+            name = "%s-%d.tar.gz" % (stem, _n)
+            if _n > 50:
+                raise RuntimeError("备份目录里同名包过多，请先清理 data/full-backups")
         path = os.path.join(FULL, name)
         with tarfile.open(path, "w:gz") as tf:
             tf.add(os.path.join(tmp, "manifest.json"), arcname="manifest.json")
@@ -229,6 +236,12 @@ def preview(path):
 
 def restore(path, audit=True, protect=True):
     """恢复一份备份包。protect=True 时动数据前先自动打一份保护备份。"""
+    # 恢复会成批覆盖证书、配置、ccd 和数据库：必须独占，不能和「另一个请求在改账号」并行
+    with core.SYS_LOCK:
+        return _restore(path, audit, protect)
+
+
+def _restore(path, audit=True, protect=True):
     info = preview(path)
     m = info["manifest"]
     snap = core.snapshot("备份恢复前") if protect else ""

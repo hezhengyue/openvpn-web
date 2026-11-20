@@ -190,7 +190,7 @@ def admin_must_change_session():
 def guard():
     ip = client_ip()
     # 审计上下文：让每条日志都带上「谁 + 从哪个 IP」
-    core.AUDIT_CTX.update({"actor": session.get("user") or "", "ip": ip})
+    core.audit_ctx_set(session.get("user") or "", ip)
     # 自助改密要覆盖两类人：白名单里的，和已经拨进本机 VPN 隧道的
     is_self = (request.path == "/self" or request.path == "/api/session"
                or request.path.startswith("/api/self"))
@@ -255,6 +255,22 @@ def on_error(e):
 
 
 # --------------------------------------------------------------------------- 会话
+
+@app.before_request
+def refuse_while_task_running():
+    """长任务在跑时，其它写操作直接拒绝，不让它们排队也不会并发改系统。
+
+    升级会替换二进制、恢复会成批覆盖证书与配置、安装会重写 server.conf——
+    这时候另一个请求再改一次状态，轻则白改，重则把任务写了一半的文件换掉。
+    只挡写请求：任务进度是 GET 轮询，登录页也只读，都不受影响。
+    """
+    if request.method in ("GET", "HEAD", "OPTIONS") or not WRITE_LOCK.locked():
+        return None
+    if request.path.startswith("/api/task/") or request.path in (
+            "/api/login", "/api/logout", "/api/session"):
+        return None
+    return jsonify(ok=False, msg="有任务正在执行（安装 / 升级 / 恢复），等它完成后再操作"), 409
+
 
 @app.get("/api/session")
 def api_session():
@@ -564,9 +580,12 @@ def sudo_worker(tid, action, params=None, timeout=300):
     else:
         cmd = ["sudo", "-n", core.PY, os.path.join(ROOT, "worker.py"), tid]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                           env=dict(os.environ, OVPN_WEB_ROOT=core.ROOT,
-                                    OVPN_WEB_MOCK="1" if MOCK else "0"))
+        # 两把锁的分工：SYS_LOCK 管「本进程内别同时起两个 worker」，
+        # worker.py 里的 flock 管「跨进程（含定时重放）别同时改系统」，两层都要有。
+        with core.SYS_LOCK:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                               env=dict(os.environ, OVPN_WEB_ROOT=core.ROOT,
+                                        OVPN_WEB_MOCK="1" if MOCK else "0"))
     except subprocess.TimeoutExpired:
         raise RuntimeError("特权动作超时: %s" % action)
     if r.returncode != 0:
@@ -591,6 +610,8 @@ def start_task(kind, steps, actor="admin", on_error=None):
                 # 前一个任务的 sudo_worker(CTX["tid"]) 就会把结果写进别人的任务日志。
                 # （多线程下这条是必须的；单线程时后台任务与 HTTP 本来也是并发的。）
                 CTX["tid"] = tid
+                # 后台线程没有请求上下文，审计里的操作者用任务发起人，别落成空
+                core.audit_ctx_set(actor, "")
                 total = len(steps)
                 for i, (label, fn) in enumerate(steps):
                     task_update(tid, msg=label, progress=int(i * 100 / total))
@@ -850,11 +871,14 @@ def users_delete(name):
 
 def after_change(kick=False, username=None):
     """账号变更统一动作：全量重建 ccd + 规则（改 IP 必重建 ACL），可选踢下线"""
-    core.write_all_config()
-    tid = uuid.uuid4().hex
-    sudo_worker(tid, "apply-rules")
-    if kick and username:
-        sudo_worker(tid, "kick-user", {"username": username})
+    # 整段拿锁：两个人同时改账号时，不能让「A 写完配置」和「B 下发规则」交叉，
+    # 否则 B 下发的是 A 的中间状态（ccd 已改、rules.sh 还没重写）。
+    with core.SYS_LOCK:
+        core.write_all_config()
+        tid = uuid.uuid4().hex
+        sudo_worker(tid, "apply-rules")
+        if kick and username:
+            sudo_worker(tid, "kick-user", {"username": username})
 
 
 @app.get("/api/users/export")
