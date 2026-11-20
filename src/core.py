@@ -46,7 +46,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "1.3.16"
+WEB_VERSION = "1.3.17"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -99,6 +99,29 @@ def ensure_dirs():
         os.makedirs(d, exist_ok=True)
 
 
+def secure_data_perms():
+    """把含明文凭据的文件收紧到 600（库里有明文密码，同机普通用户不能读走）。
+
+    DATA 目录本身不动（OpenVPN 用 root 读 ccd，改了目录权限只会给自己添麻烦），
+    只处理数据库三件套、会话密钥、初始凭据文件和备份目录。
+    """
+    if os.name == "nt":
+        return
+    targets = [DB_PATH, DB_PATH + "-wal", DB_PATH + "-shm",
+               os.path.join(DATA, "web.secret"),
+               os.path.join(DATA, "admin_password.txt")]
+    for p in targets:
+        try:
+            if os.path.exists(p):
+                os.chmod(p, 0o600)
+        except Exception:
+            pass
+    try:
+        os.chmod(BACKUPS, 0o700)     # 台账备份含明文密码
+    except Exception:
+        pass
+
+
 def now():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -107,6 +130,15 @@ def db():
     ensure_dirs()
     con = sqlite3.connect(DB_PATH, timeout=30)
     con.row_factory = sqlite3.Row
+    # WAL 文件里同样是明文台账，建库文件时可能按默认 umask 生成 644，这里顺手收紧
+    if os.name != "nt":
+        for p in (DB_PATH + "-wal", DB_PATH + "-shm"):
+            try:
+                st = os.stat(p)
+                if st.st_mode & 0o077:
+                    os.chmod(p, 0o600)
+            except Exception:
+                pass
     # journal_mode 只在 init_db 里设一次：每次连接都执行 PRAGMA journal_mode 会去抢写锁，
     # 和后台任务并发时在 Windows 上会抛 "attempt to write a readonly database"。
     con.execute("PRAGMA busy_timeout=10000")
@@ -198,6 +230,7 @@ def init_db():
     except Exception as e:
         print("[migrate] 管理端白名单沿用原值: %s" % e)
     con.close()
+    secure_data_perms()
 
 
 LEGACY_WEB_ALLOW = "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"

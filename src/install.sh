@@ -271,6 +271,13 @@ if [ ! -s "$DEST/data/admin_password.txt" ]; then
 fi
 chown "$USER:$USER" "$DEST/data/admin_password.txt"
 chmod 600 "$DEST/data/admin_password.txt"
+# 台账存的是明文密码，库和备份目录只给服务用户自己
+for f in "$DEST"/data/openvpn-web.db "$DEST"/data/openvpn-web.db-wal "$DEST"/data/openvpn-web.db-shm "$DEST"/data/web.secret; do
+    [ -e "$f" ] && chown "$USER:$USER" "$f" && chmod 600 "$f"
+done
+[ -d "$DEST/data/backups" ] && chown -R "$USER:$USER" "$DEST/data/backups" && chmod 700 "$DEST/data/backups"
+# data 目录里有账号名（ccd/）和明文台账，别让同机其他用户随便列
+chmod 750 "$DEST/data" 2>/dev/null || true
 
 if command -v restorecon >/dev/null 2>&1; then
     restorecon -R "$DEST" >/dev/null 2>&1 || true
