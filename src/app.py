@@ -658,6 +658,11 @@ def wizard_params():
     errs = core.validate_cfg(c)
     if errs:
         raise ValueError("；".join(errs))
+    _conf = core.pool_user_conflicts(c)
+    if _conf:
+        raise ValueError("动态地址池 %s 与 %d 个账号的固定 IP 重叠（%s），请把池子挪到空档"
+                         % (core.pool_text(c), len(_conf),
+                            "、".join("%s %s" % (x["username"], x["vpn_ip"]) for x in _conf[:8])))
     for k, v in c.items():
         core.set_meta(k, v)
     core.set_meta("wizard_step", 3)
@@ -1031,6 +1036,14 @@ def settings_save():
     errs = core.validate_cfg(c)
     if errs:
         raise ValueError("；".join(errs))
+    # 池子不能被开在已有账号的固定 IP 上：同一个地址 ccd 固定分给某人，
+    # ifconfig-pool 还会动态发给别人，两个人会抢一个 IP。
+    _conf = core.pool_user_conflicts(c)
+    if _conf:
+        raise ValueError("动态地址池 %s 与 %d 个账号的固定 IP 重叠（%s）：同一个地址会被池子再发给别人，"
+                         "请把地址池挪到空档，或先把这些账号的地址改到池子外"
+                         % (core.pool_text(c), len(_conf),
+                            "、".join("%s %s" % (x["username"], x["vpn_ip"]) for x in _conf[:8])))
     old_fp = core.get_meta("config_fingerprint")
     for k, v in c.items():
         core.set_meta(k, v)

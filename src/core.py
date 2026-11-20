@@ -888,6 +888,7 @@ def stale_ip_users(c=None):
     改网段是管理员的手工动作，账号地址也由管理员自己改（一人一个地址，
     只有管理员知道该怎么排）。这里只负责把「还没跟着改」的列出来交给界面提醒，
     免得改了网段却没人发现这批账号拨不上来。
+    「可用地址」的口径就是 usable_host_ips：网段外、.1/.0/广播、以及落在动态池里的都算。
     """
     c = c or cfg()
     try:
@@ -896,6 +897,27 @@ def stale_ip_users(c=None):
         return []
     return [{"username": u["username"], "vpn_ip": u["vpn_ip"], "enabled": bool(u["enabled"])}
             for u in list_users() if str(u["vpn_ip"] or "").strip() not in usable]
+
+
+def pool_user_conflicts(c):
+    """动态地址池与账号固定 IP 撞车的地址。
+
+    同一个地址既写进 ccd（固定分给某人）又落在 ifconfig-pool 里（还会动态发给别人），
+    两个人会抢同一个 IP。改池子范围时最容易踩到，保存前必须拦下来。
+    """
+    span = pool_span(c)
+    if not span:
+        return []
+    net = vpn_network(c)
+    out = []
+    for u in list_users():
+        try:
+            off = int(ipaddress.IPv4Address(str(u["vpn_ip"] or "").strip())) - int(net.network_address)
+        except Exception:
+            continue
+        if span[0] <= off <= span[1]:
+            out.append({"username": u["username"], "vpn_ip": u["vpn_ip"]})
+    return out
 
 
 def add_user(username, vpn_ip=None, password=None, note="", real_name="", dept="",

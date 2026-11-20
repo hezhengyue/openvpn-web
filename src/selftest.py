@@ -910,6 +910,20 @@ def main():
     core.set_meta("pool_enabled", False)
     core.set_meta("pool_start", "10.8.1.100")
     core.set_meta("pool_end", "10.8.1.200")
+    # 池子不能开在已有账号的固定 IP 上：否则 ccd 固定分给某人、池子还会发给别人
+    _tails = [int(u["vpn_ip"].rsplit(".", 1)[-1]) for u in core.list_users()]
+    core.set_meta("pool_enabled", True)
+    core.set_meta("pool_start", "10.8.1.2")
+    core.set_meta("pool_end", "10.8.1.%d" % min(max(_tails), 250))
+    _c2 = core.cfg()
+    check("能识别池子与账号固定 IP 重叠", len(core.pool_user_conflicts(_c2)) >= 1,
+          core.pool_user_conflicts(_c2))
+    _pr = P("/api/settings", _c2)
+    check("保存时拒绝与账号地址重叠的池子",
+          _pr.status_code >= 400 and "重叠" in (_pr.get_json().get("msg") or ""), _pr.get_json())
+    core.set_meta("pool_enabled", False)
+    core.set_meta("pool_start", "10.8.1.100")
+    core.set_meta("pool_end", "10.8.1.200")
     core.write_all_config()
 
     print("\n" + "=" * 62)

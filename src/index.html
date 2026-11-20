@@ -459,7 +459,7 @@ async function pgOverview(){
   const j=await get('/api/state');const s=j.stats,v=j.version;
   const st=j.stale_ips||[];
   $('#page').innerHTML=`
-  ${st.length?'<div class="hint err"><b>有 '+st.length+' 个账号的固定 IP 不在当前 VPN 网段 '+esc(j.cfg.vpn_cidr)+' 内</b>：'
+  ${st.length?'<div class="hint err"><b>有 '+st.length+' 个账号的固定 IP 不在当前网段 '+esc(j.cfg.vpn_cidr)+' 的可用地址里</b>（网段外，或落进了动态池）：'
     +st.slice(0,10).map(u=>esc(u.username)+' <span class="mono">'+esc(u.vpn_ip)+'</span>').join('、')
     +(st.length>10?' 等':'')+'，这些账号现在拨不上来。'
     +'<button class="btn sm" style="margin-left:8px" onclick="go(\'users\')">去认证账号改地址</button></div>':''}
@@ -697,7 +697,7 @@ let U={list:[],kw:'',state:'all',stale:[],cidr:''};
 /* 固定 IP 已经完全不在当前 VPN 网段里的账号：只提示，不自动改（地址怎么排由人来定） */
 function staleHint(st){
  const a=st||[];if(!a.length)return '';
- return '<div class="hint err"><b>有 '+a.length+' 个账号的固定 IP 不在当前 VPN 网段 '+esc(U.cidr||'')+' 内</b>，这些账号现在拨不上来：'
+ return '<div class="hint err"><b>有 '+a.length+' 个账号的固定 IP 不在当前网段 '+esc(U.cidr||'')+' 的可用地址里</b>（网段外，或落进了动态池 / 保留地址），这些账号现在拨不上来：'
   +a.slice(0,12).map(u=>esc(u.username)+' <span class="mono">'+esc(u.vpn_ip)+'</span>').join('、')
   +(a.length>12?' 等 '+a.length+' 个':'')+'。<br>请逐个【编辑】把地址改到本网段（建议保持原来的末位，如 10.8.0.2 → 10.8.1.2），改完会自动重建 ACL 并踢掉旧连接。</div>';
 }

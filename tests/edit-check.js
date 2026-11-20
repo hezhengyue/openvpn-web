@@ -92,7 +92,7 @@ function cdp(method, params, sessionId) {
       fs.writeFileSync(path.join(OUT, name + '.png'), Buffer.from(r.data, 'base64'));
     };
 
-    await evalJs(`(async()=>{document.querySelector('#lp').value=${JSON.stringify(PW)};await doLogin();return 1})()`);
+    await evalJs(`(async()=>{document.querySelector('#lu').value='admin';document.querySelector('#lp').value=${JSON.stringify(PW)};await doLogin();return 1})()`);
     await sleep(1500);
     await evalJs(`go('users')`);
     await sleep(800);
