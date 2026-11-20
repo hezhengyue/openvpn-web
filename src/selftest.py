@@ -1281,6 +1281,11 @@ def main():
     _prepsrc = open(_prep, encoding="utf-8").read() if os.path.isfile(_prep) else ""
     check("缺二进制时就地编译（源码与依赖都在包内，不联网）",
           "VENDOR_ONLY=1" in _prepsrc and "OPENVPN_SRC" in _prepsrc)
+    check("install.sh 认 --with-build-tools（可以顺手把编译工具装上）",
+          "--with-build-tools" in _inst and "--tools-only" in _inst)
+    check("prepare-openvpn.sh 缺工具时先试着自动补装（yum/dnf/apt 都认）",
+          "install_tools" in _prepsrc and "apt-get" in _prepsrc
+          and "pkgconfig" in _prepsrc and "OVPN_NO_AUTO_TOOL_INSTALL" in _prepsrc)
     _bo_p = os.path.join(CODE, "..", "build", "build-offline.sh")
     if os.path.isfile(_bo_p):
         _bo = open(_bo_p, encoding="utf-8").read()

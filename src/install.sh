@@ -5,6 +5,7 @@
 #   ./install.sh /srv/ovpn                # 自定义安装目录
 #   ./install.sh -- --public-addr 1.2.3.4 --port 1194 --lan 10.10.0.0/16
 #   ./install.sh -- --user alice:Passw0rd # 顺手建一个账号
+#   ./install.sh --with-build-tools       # 顺带装 gcc/make/perl/pkgconfig（以后能在本机编译 openvpn）
 #   ./install.sh --purge                  # 卸载：停服务、拆 iptables 链、删目录/账号/规则（data 先备份到 /root）
 #
 # 它把「Web + OpenVPN 服务端 + CA + 证书 + ACL/NAT + systemd」一次装完，
@@ -16,11 +17,13 @@ set -euo pipefail
 DEST="/opt/openvpn-web"
 SETUP_ARGS=()
 PURGE=0
+WITH_TOOLS=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --) shift; SETUP_ARGS=("$@"); break ;;
-        -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
         --purge) PURGE=1; shift ;;
+        --with-build-tools) WITH_TOOLS=1; shift ;;
         *) DEST="$1"; shift ;;
     esac
 done
@@ -316,6 +319,11 @@ systemctl enable openvpn-web >/dev/null 2>&1 || true
 # 装完必须 openvpn + web 都在跑。缺二进制不能「装到一半退出、让用户去网页向导上传」——
 # 那时候 Web 还没起，人只能干瞪眼。所以这里自己解决：包内 → 就地编译。
 step "[7/9] 准备 OpenVPN 二进制（包内 → 就地编译）"
+if [ "$WITH_TOOLS" = 1 ] && [ -x "$DEST/prepare-openvpn.sh" ]; then
+    say "      顺带补齐编译工具（--with-build-tools）"
+    bash "$DEST/prepare-openvpn.sh" --tools-only "$DEST" || \
+        say "      编译工具没装成（可能离线）；不影响已有二进制，只是以后不能在本机编"
+fi
 BIN_OK=0
 if [ -x "$DEST/prepare-openvpn.sh" ]; then
     if bash "$DEST/prepare-openvpn.sh" "$DEST"; then BIN_OK=1; fi
@@ -437,6 +445,10 @@ EOF
 
 if [ "$NEWPW" = 1 ]; then
     say "提示: 默认密码 admin 只在首次登录有效，登录后系统会强制你设置新密码。"
+fi
+if [ "$WITH_TOOLS" != 1 ] && ! command -v gcc >/dev/null 2>&1; then
+    say "提示: 本机没有 gcc，暂时不能用「升级」页上传源码编译。需要的话执行："
+    say "      $0 --with-build-tools        （或 yum install -y gcc make perl pkgconfig）"
 fi
 if [ "$SRC" != "$DEST" ] && [ -d "$SRC" ]; then
     say "提示: 安装源目录 $SRC 已不再需要，可删掉腾空间（rm -rf $SRC）"
