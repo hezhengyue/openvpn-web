@@ -116,7 +116,7 @@ openvpn-web/
 - 长任务（安装、更新、重启）走独立后台线程 + `task_id` 轮询 + 实时日志；HTTP 请求本身不执行几十秒的系统动作。任务在跑时，其它写接口直接 409 拒绝
 - **三层锁各管一段**：进程内 `core.SYS_LOCK`（同一进程别同时写配置、别同时起两个 worker）→ `worker.py` 的 `flock`（跨进程别同时改系统，定时重放也算）→ 生成的 `rules.sh` 自己也 `flock`（重放与手工重建串行）。iptables 一律带 `-w 5` 等 xtables 锁
 - Web 低权限，`sudoers` 只放行一个精确命令：`python3 worker.py <task_id>`，命令行不传自由参数，动作与参数从 `data/tasks/<id>.json` 读并做白名单
-- **装外部代码要人工放行**：替换 openvpn 二进制、本机编译源码、更新 Web 自身这三个动作，worker 额外要求一个**一次性安装码**——只能在本机 `sudo /opt/openvpn-web/install-code.sh` 生成（8 位，默认 15 分钟，一码一次，填错 5 次作废），令牌 600 `root:root` 存在 `/etc/openvpn-web/install.token`，Web 进程既造不出也读不到。装完系统会把首装码（24 小时）印在「安装完成」里；日常改配置、建号、启停服务都不需要它
+- **装外部代码要人工放行**：替换 openvpn 二进制、本机编译源码、更新 Web 自身这三个动作，worker 额外要求一个**一次性安装码**——只能在本机 `sudo /opt/openvpn-web/install-code.sh` 生成（8 位，默认 15 分钟，一码一次，填错 5 次作废），令牌 600 `root:root` 存在 `/etc/openvpn-web/install.token`，Web 进程既造不出也读不到。装完系统会把首装码（2 小时）印在「安装完成」里；日常改配置、建号、启停服务都不需要它
 - `data/` 归 `ovpnweb` 可写；**`bin/` 归 `root:root 755`**（只能执行、不能改），`app.py`/`core.py`/`worker.py`/`index.html`/`install-code.sh` 归 root 且低权用户只读
 - 安装时 mask 掉发行版自带的 `openvpn@.service`，避免包管理器拉起第二个实例抢 1194
 
@@ -544,6 +544,7 @@ Web 程序自身不提供「上传更新包」入口（日常更新就是覆盖�
 | 时间串不起来 | 所有机器的 NTP |
 | Web 打不开 | 先看是不是**白名单拦的**：页面会直接告诉你「来源 IP x.x.x.x 不在管理端白名单内」。SSH 上去 `python3 app.py --allow <你的网段>`，或 `--allow-reset` 恢复成「127.0.0.1 + 本机网卡网段」；再看 `journalctl -u openvpn-web -n 50`、`systemctl status openvpn-web` |
 | 特权动作失败 | `journalctl` + 任务日志 `data/tasks/<id>.log`；确认 sudoers 里的解释器路径与 `core.PY` 一致 |
+| 上传二进制/源码提示「需要安装码」 | 这是设计如此：这三个动作会把外部代码装成 root 服务，必须有人在机器上按一下。`sudo /opt/openvpn-web/install-code.sh` 拿一个（8 位、15 分钟、只能用一次、填错 5 次作废） |
 
 ---
 
@@ -568,7 +569,7 @@ Web 程序自身不提供「上传更新包」入口（日常更新就是覆盖�
 
 ## 12. 版本信息（截至 2026-11-20）
 
-- Web **1.3.23**：给「上传即 root」加一道**人闸**。原来三个动作会把外部代码装进系统——替换 openvpn 二进制、本机编译源码、更新 Web 自身——装上去下一次启动就是 root 身份，而 Web 侧的 `check_binary` 只认 `--version` 输出，编个版本号就能过，等于**能登录面板的人口令一泄露就等于 root**。现在这三类动作执行前，worker 要验一个**一次性安装码**：只能在本机 `sudo /opt/openvpn-web/install-code.sh` 生成（8 位、默认 15 分钟、一码一次、填错 5 次作废、令牌 600 root:root 存在 `/etc/openvpn-web/`），Web 进程既生成不了也读不到。装完系统会把首装用的安装码（24 小时）直接印在「安装完成」里，向导第 2 步照填即可。配套：`bin/` 整体改为 `root:root 755`，Web 用户不再能写「下次会以 root 执行」的程序，向导上传二进制也改走 worker（顺带修掉直接 `copy2` 覆盖运行中二进制的 `ETXTBSY`、且旧二进制没快照的问题）
+- Web **1.3.23**：给「上传即 root」加一道**人闸**。原来三个动作会把外部代码装进系统——替换 openvpn 二进制、本机编译源码、更新 Web 自身——装上去下一次启动就是 root 身份，而 Web 侧的 `check_binary` 只认 `--version` 输出，编个版本号就能过，等于**能登录面板的人口令一泄露就等于 root**。现在这三类动作执行前，worker 要验一个**一次性安装码**：只能在本机 `sudo /opt/openvpn-web/install-code.sh` 生成（8 位、默认 15 分钟、一码一次、填错 5 次作废、令牌 600 root:root 存在 `/etc/openvpn-web/`），Web 进程既生成不了也读不到。装完系统会把首装用的安装码（2 小时）直接印在「安装完成」里，向导第 2 步照填即可。配套：`bin/` 整体改为 `root:root 755`，Web 用户不再能写「下次会以 root 执行」的程序，向导上传二进制也改走 worker（顺带修掉直接 `copy2` 覆盖运行中二进制的 `ETXTBSY`、且旧二进制没快照的问题）
 - Web **1.3.22**：多线程下的**一致性收口**。换 waitress 后请求真并发了，原来靠「同时只有一个请求」挡住的几处立刻暴露：①`iptables` 流水线是「先 FLUSH 再逐条 ADD」，两条交叉会出现「A 刚清空、B 已加完」——ACL 链空着等于全员放行，得等 5 分钟定时重放才恢复；②审计上下文是全局 dict，下一个请求会把它覆盖，A 的操作记成 B 干的；③两个请求同时建号会抢同一个空闲地址，一个必然撞 UNIQUE；④同一秒内两次备份包同名互相覆盖；⑤升级/恢复在进行时，另一个请求还能继续改配置。对策：`core.SYS_LOCK` 把「写配置 + 重建 ccd + 下发规则」串成一段，`worker.py` 加 `flock` 跨进程互斥，生成的 `rules.sh` 自己也 `flock` 并把 iptables 全部改成 `-w 5`；审计上下文改成 thread-local；建号 / 台账导入 / 全量重建 / 备份恢复都在锁内；备份包同名自动加 `-2/-3`；长任务运行期间写接口返回 409 并提示「等它完成」
 - Web **1.3.21**：HTTP 服务器换成 **waitress**（单进程 8 线程，纯 Python、离线 wheel 随包安装）——以前是 Werkzeug 开发服务器且 `threaded=False`，一个慢请求（探测公网 IP、读大日志、导出 Excel）会把所有人的页面一起卡住；现在并发请求各占一个线程，SQLite 仍是单写入者，靠 WAL + `busy_timeout` 排队。为此补了三处并发安全：登录失败计数表加锁、公网 IP 探测「只让一个人真去打外网，其余等结果」、长任务 tid 改为拿到写锁后再绑定（否则后来启动的任务会把正在跑的任务 id 顶掉，结果写进别人的任务日志）。`OVPN_WEB_THREADS` 调线程数，`OVPN_WEB_SERVER=werkzeug` 一键退回；版本页显示当前实际服务器
 - Web **1.3.20**：长期运行不膨胀——服务器日志改「从文件末尾倒读」（`openvpn.log` 是 `log-append` 无轮转，以前每次开日志页都整文件读入，跑久了会卡）；`openvpn.log` 超过 20MB 启动时转存一份 `.1`；`data/tasks` 里每个任务一对文件，自动清 7 天前的（每小时最多扫一次）；台账自动备份只留最近 200 份（文件与记录一起清，且同一秒内多次变更不再互相覆盖文件名；台账备份与备份点列表各自取最近 100 条，互不挤占）；公网 IP 探测结果缓存 10 分钟（含「探不到」），手动识别按钮强制重探，超时 2.5s→1.5s，没外网时打开向导/设置页不再干等；OpenVPN 版本号按二进制 mtime 缓存，首页加载不再每次 fork 一次二进制

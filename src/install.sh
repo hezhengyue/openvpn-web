@@ -365,12 +365,12 @@ PYEOF
 
 VERSION="$("$DEST/bin/openvpn" --version 2>/dev/null | head -1 | awk '{print $2}')"
 
-# 首装时向导第 2 步就要上传二进制，当场预授权一个 24 小时的安装码印在下面，
+# 首装时向导第 2 步就要上传二进制，当场预授权一个 2 小时的安装码印在下面，
 # 省得装完还要另开一个终端。之后每次替换二进制 / 编译源码 / 更新 Web，
 # 都要重新执行 install-code.sh 拿新码（一次性，填错 5 次作废）。
 FIRSTCODE=""
 if [ -x "$DEST/install-code.sh" ]; then
-    FIRSTCODE="$(OVPN_CODE_QUIET=1 "$DEST/install-code.sh" 86400 2>/dev/null || true)"
+    FIRSTCODE="$(OVPN_CODE_QUIET=1 "$DEST/install-code.sh" 7200 2>/dev/null || true)"
 fi
 CLIENT_IP="$("$PY" - "$DEST" <<'PYEOF' 2>/dev/null || true
 import os, sys, json, sqlite3
@@ -394,7 +394,7 @@ cat <<EOF
  管理账户:   admin
  管理密码:   $( [ "$NEWPW" = 1 ] && echo "admin（首次登录强制修改）" || echo "（沿用已有 data/admin_password.txt）" )
  OpenVPN:    ${VERSION:-未知版本}  监听 ${CLIENT_IP:-$IP}:1194
- 安装码:     ${FIRSTCODE:-（生成失败，请执行 $DEST/install-code.sh）}   ← 向导第 2 步上传二进制时填，24 小时内有效
+ 安装码:     ${FIRSTCODE:-（生成失败，请执行 $DEST/install-code.sh）}  ← 向导上传二进制时填，2 小时内有效
  本机编译:   ${BUILD_ENV}
  客户端配置: $DEST/data/company.ovpn   （全员共用，含 CA 与 tls-crypt）
  服务端配置: $DEST/data/server.conf
