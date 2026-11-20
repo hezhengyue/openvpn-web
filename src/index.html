@@ -272,7 +272,7 @@ pre::-webkit-scrollbar-thumb{background:oklch(.45 .02 250);background-clip:conte
 <script>
 /* 页面版本：每次升级手动同步 core.WEB_VERSION（selftest 会校验两者一致）。
    浏览器若缓存了旧 HTML（标签页常开不重载、或中间层缓存），靠这个跟服务端版本比对来自愈。 */
-const PAGE_VERSION='1.3.26';
+const PAGE_VERSION='1.3.27';
 const S={csrf:'',logged:false,cfg:null,page:'overview',task:null};
 const $=s=>document.querySelector(s);
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -514,7 +514,7 @@ async function pgWizard(){
   <div class="card"><h3>第 2 步 · 放置 openvpn 静态二进制 <small>≥ 2.6.23，glibc 2.17 ABI</small></h3>
     <div class="hint">包内已自带 <span class="mono">bin/openvpn</span>；缺失时可在此上传，校验项与自动编译一致。
      <br>替换二进制等于把一个外部程序装成 root 服务，所以要填<b>一次性安装码</b>：在服务器上执行
-     <span class="mono">sudo /opt/openvpn-web/install-code.sh</span> 拿码（安装完成时也会直接打印一个，24 小时有效）；一码一次，填错 5 次作废。</div>
+     <span class="mono">sudo /opt/openvpn-web/install-code.sh</span> 拿码（默认 15 分钟有效；安装完成时打印的是 2 小时的）；一码一次，填错 5 次作废。</div>
     <div class="bar"><input id="wcode" placeholder="安装码（8 位）" maxlength="12" style="width:150px;letter-spacing:1px"><input type="file" id="wbin"><button class="btn pri" onclick="wUpload()">上传并校验</button><span id="wver" class="muted">${esc(W.ver)}</span></div></div>
   <div class="card"><h3>第 3 步 · 参数</h3>${cfgForm()}
    <label class="f" style="margin-top:8px"><span>网络模式</span><select id="w_nat">

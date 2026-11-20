@@ -1224,6 +1224,24 @@ def main():
     check("三个「装外部代码」的动作都在闸门名单里，一个都不能漏",
           set(wk.GATED) == {"replace-binary", "build-openvpn", "update-web"}, wk.GATED)
 
+    # 回归：MOCK 环境变量曾经能经 sudoers 的 env_keep 传到 worker，
+    # 让 GATED 动作在没有安装码的情况下照样执行 —— 这是能直接提权的洞。
+    _wsrc = open(os.path.join(CODE, "worker.py"), encoding="utf-8").read()
+    _isrc = open(os.path.join(CODE, "install.sh"), encoding="utf-8").read()
+    _asrc0 = open(os.path.join(CODE, "app.py"), encoding="utf-8").read()
+    check("worker 闸门不再因 MOCK 环境变量而放行（防提权）",
+          "if act in GATED and not SELFTEST:" in _wsrc
+          and "GATED and not MOCK" not in _wsrc)
+    _keep_lines = [ln for ln in _isrc.splitlines() if "env_keep" in ln and not ln.lstrip().startswith("#")]
+    check("sudoers 显式 env_reset 且 env_keep 只留 ROOT（不保留任何自检开关）",
+          "Defaults:$USER env_reset" in _isrc
+          and any('env_keep += "OVPN_WEB_ROOT"' in ln for ln in _keep_lines)
+          and not any(("OVPN_WEB_MOCK" in ln or "OVPN_WEB_SELFTEST" in ln)
+                      for ln in _keep_lines))
+    check("app.py 把 MOCK/SELFTEST 都随 MOCK 标志设置（生产路径经 sudo 由 env_reset 清空）",
+          'OVPN_WEB_MOCK="1" if MOCK else "0"' in _asrc0
+          and 'OVPN_WEB_SELFTEST="1" if MOCK else "0"' in _asrc0)
+
     if POSIX:
         _r = subprocess.run(["bash", os.path.join(CODE, "install-code.sh"), "600"],
                             capture_output=True, text=True,

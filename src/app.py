@@ -583,9 +583,14 @@ def sudo_worker(tid, action, params=None, timeout=300):
         # 两把锁的分工：SYS_LOCK 管「本进程内别同时起两个 worker」，
         # worker.py 里的 flock 管「跨进程（含定时重放）别同时改系统」，两层都要有。
         with core.SYS_LOCK:
+            # OVPN_WEB_MOCK 只控制「是否碰真实 iptables/systemd」，MOCK 自检要置 1；
+            # 它已不再参与安装码闸门（那看 OVPN_WEB_SELFTEST），且 sudoers 的
+            # env_reset 不保留这些变量，所以生产路径经 sudo 时它们都是空的。
+            _wenv = dict(os.environ, OVPN_WEB_ROOT=core.ROOT,
+                         OVPN_WEB_MOCK="1" if MOCK else "0",
+                         OVPN_WEB_SELFTEST="1" if MOCK else "0")
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                               env=dict(os.environ, OVPN_WEB_ROOT=core.ROOT,
-                                        OVPN_WEB_MOCK="1" if MOCK else "0"))
+                               env=_wenv)
     except subprocess.TimeoutExpired:
         raise RuntimeError("特权动作超时: %s" % action)
     if r.returncode != 0:

@@ -31,6 +31,11 @@ TASKS = os.path.join(DATA, "tasks")
 STATE = os.path.join(DATA, "state")
 BIN = os.path.join(ROOT, "bin")
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
+# 自检专用开关：只有直接跑 worker.py 的自检进程会设它；sudoers 的 env_reset
+# 会清掉所有不在 env_keep 里的变量，所以经 sudo 提权时它一定是空的。
+# 绝不能用 OVPN_WEB_MOCK 来豁免闸门 —— sudoers 以前保留过它，等于把钥匙
+# 交给了 Web 进程（任何能调 API 的人都能凭它无码装 ELF 成 root 服务）。
+SELFTEST = os.environ.get("OVPN_WEB_SELFTEST") == "1"
 LOGF = None
 
 ACTIONS = {
@@ -49,6 +54,8 @@ ACTIONS = {
 ETC = os.environ.get("OVPN_WEB_ETC", "/etc/openvpn-web")
 GATED = ("replace-binary", "build-openvpn", "update-web")
 GATE_FAIL_LIMIT = 5
+# 注意：绝不能用 MOCK / 任何环境变量豁免 GATED。sudoers 的 env_keep 会
+# 把调用方的变量带进来，那等于把闸门钥匙交给 Web 进程。
 
 
 def token_path():
@@ -577,7 +584,9 @@ def main():
         scrub_install_code(job, spec)
     log("开始执行: %s" % act)
     try:
-        if act in GATED and not MOCK:
+        # 只有自检专用开关能豁免；经 sudo 提权时它会被 env_reset 清掉，
+        # 因此生产路径上 GATED 动作永远要验安装码。
+        if act in GATED and not SELFTEST:
             require_install_code(code)   # 闸门过不了就不抢锁、不动系统
         lock = take_sys_lock()      # 拿到锁再动手；拿不到就不动系统
         try:
