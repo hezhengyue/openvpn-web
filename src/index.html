@@ -221,15 +221,15 @@ pre::-webkit-scrollbar-thumb{background:oklch(.45 .02 250);background-clip:conte
 <div id="login"><div class="lbox">
   <div class="lm"><svg viewBox="0 0 24 24"><rect x="4.8" y="10.4" width="14.4" height="9.6" rx="2.6"/><path d="M8.2 10.4V8a3.8 3.8 0 0 1 7.6 0v2.4"/><circle cx="12" cy="15.2" r="1.15" fill="currentColor" stroke="none"/></svg></div>
   <h1>OpenVPN 管理后台</h1><p>账号接入 · 访问控制 · 审计一体化</p>
-  <label class="f"><span>管理账户</span><input id="lu" style="width:100%" value="admin" placeholder="默认 admin" autocomplete="username" onkeydown="if(event.key==='Enter')$('#lp').focus()"></label>
-  <label class="f"><span>管理密码</span><input type="password" id="lp" style="width:100%" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()"></label>
+  <label class="f"><span>管理账户</span><input id="lu" style="width:100%" placeholder="请输入管理账户" autocomplete="username" onkeydown="if(event.key==='Enter')$('#lp').focus()"></label>
+  <label class="f"><span>管理密码</span><input type="password" id="lp" style="width:100%" placeholder="请输入管理密码" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()"></label>
   <button class="btn pri" style="width:100%;height:36px" onclick="doLogin()">登录</button>
-  <p style="margin:16px 0 0">新装默认账户 <span class="mono">admin</span>、密码 <span class="mono">admin</span>，首次登录会强制修改。忘了密码就在服务器上执行 <span class="mono">bash /opt/openvpn-web/reset-admin.sh</span> 重置。</p>
+  <p style="margin:16px 0 0">忘记管理凭据时，在服务器上用 root 执行 <span class="mono">bash /opt/openvpn-web/reset-admin.sh</span> 重新生成。</p>
 </div></div>
 
 <div id="force"><div class="lbox">
   <div class="lm"><svg viewBox="0 0 24 24"><rect x="4.8" y="10.4" width="14.4" height="9.6" rx="2.6"/><path d="M8.2 10.4V8a3.8 3.8 0 0 1 7.6 0v2.4"/><circle cx="12" cy="15.2" r="1.15" fill="currentColor" stroke="none"/></svg></div>
-  <h1>首次登录 · 修改管理密码</h1><p>当前使用的是默认密码 <span class="mono">admin</span>。出于安全考虑，必须先设置一个新密码才能进入后台。</p>
+  <h1>首次登录 · 修改管理密码</h1><p>当前管理口令是安装时的临时默认口令。出于安全考虑，必须先设置一个新密码才能进入后台。</p>
   <label class="f"><span>新密码（至少 8 位）</span><input type="password" id="fp1" style="width:100%" autocomplete="new-password" oninput="forcePwMeter()" onkeydown="if(event.key==='Enter')$('#fp2').focus()"></label>
   <label class="f"><span>重复新密码</span><input type="password" id="fp2" style="width:100%" autocomplete="new-password" oninput="forcePwMeter()" onkeydown="if(event.key==='Enter')doForce()"></label>
   <div class="muted" id="fpm" style="font-size:12px;margin:-4px 0 12px;min-height:18px"></div>
@@ -274,13 +274,19 @@ const S={csrf:'',logged:false,cfg:null,page:'overview',task:null};
 const $=s=>document.querySelector(s);
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function toast(m,t){const d=document.createElement('div');d.className='tst '+(t||'');d.textContent=m;$('#toast').appendChild(d);setTimeout(()=>d.remove(),3600)}
-async function api(path,opt={}){
+async function api(path,opt={},retried=false){
   const h={'X-CSRF-Token':S.csrf};
   let body=opt.body;
   if(body && !(body instanceof FormData)){h['Content-Type']='application/json';body=JSON.stringify(body)}
   const r=await fetch(path,{method:opt.method||'GET',headers:h,body,credentials:'same-origin'});
   let j;try{j=await r.json()}catch(e){j={ok:false,msg:'HTTP '+r.status}}
   if(r.status===401||j.need_login){S.logged=false;showLogin();throw new Error('请先登录')}
+  // CSRF token 过期（多标签页 / 重新登录后旧页面还在用旧 token）：自动拉一次会话换新 token 重试，
+  // 不把「请刷新页面」这种没办法执行的提示直接甩给用户。
+  if(r.status===403 && /CSRF/.test(j.msg||'') && !retried){
+    try{const sr=await fetch('/api/session',{credentials:'same-origin'});const sj=await sr.json();
+      if(sj.ok&&sj.csrf){S.csrf=sj.csrf;return await api(path,opt,true)}}catch(e){}
+  }
   // 后端拦住了「未改默认密码就想访问别的接口」：回到首登改密页，不显示误导性的报错。
   if(j.must_change){S.logged=true;showForce();throw new Error('首次登录请先修改管理密码')}
   if(!r.ok||!j.ok){toast(j.msg||('HTTP '+r.status),'err');throw new Error(j.msg||'HTTP '+r.status)}
@@ -299,7 +305,7 @@ function showLogin(){$('#login').style.display='flex';$('#force').style.display=
 function showForce(){$('#login').style.display='none';$('#force').style.display='flex';$('#app').style.display='none'}
 function showApp(){$('#login').style.display='none';$('#force').style.display='none';$('#app').style.display='block'}
 async function doLogin(){
-  try{const j=await api('/api/login',{method:'POST',body:{username:$('#lu').value.trim()||'admin',password:$('#lp').value}});
+  try{const j=await api('/api/login',{method:'POST',body:{username:$('#lu').value.trim(),password:$('#lp').value}});
     S.csrf=j.csrf;S.logged=true;$('#lp').value='';
     if(j.must_change){showForce();return}
     showApp();await loadState();
@@ -1126,7 +1132,7 @@ async function pgSecurity(){
    <label class="f"><span>重复新密码</span><input type="password" id="np2" oninput="pwMeter()"></label>
    <div class="muted" id="npm" style="font-size:12px;margin:-4px 0 10px"></div>
    <button class="btn pri" onclick="chPwd()">修改密码</button>
-   <div class="muted" style="font-size:12px;margin-top:8px">两次必须一致，避免手滑输错把自己锁在外面。新装默认密码 <span class="mono">admin</span> 已在首次登录时强制改掉；这里日常改密仍需填原密码。</div></div>
+   <div class="muted" style="font-size:12px;margin-top:8px">两次必须一致，避免手滑输错把自己锁在外面。安装时的临时默认口令已在首次登录时强制改掉；这里日常改密仍需填原密码。</div></div>
   <div class="card"><h3>重新生成账户与密码 <small>忘了凭据时用</small></h3>
    <button class="btn danger" onclick="resetAdmin()">一键重置</button>
    <div class="hint">忘了账户名或密码、进不来后台时用这个：不用验证当前密码，直接生成全新的账户名和密码，旧的立刻作废。

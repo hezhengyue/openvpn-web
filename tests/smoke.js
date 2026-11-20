@@ -65,7 +65,9 @@ async function waitUp() {
     vc.on('error', (...a) => errors.push('console.error: ' + a.join(' ')));
     const html = await (await fetch(base + '/')).text();
     if (!html.includes('id="force"')) errors.push('缺少首登强制改密界面 #force');
-    if (!/新装默认账户/.test(html) || !/首次登录会强制修改/.test(html)) errors.push('登录页未说明默认 admin/admin 与首登强改');
+    if (/value="admin"|默认\s*admin|新装默认账户/.test(html)) errors.push('登录页仍暴露默认账户或预填 admin');
+    if (/value\.trim\(\)\|\|'admin'/.test(html)) errors.push('登录逻辑仍把空账户兜底成 admin');
+    if (!/忘记管理凭据/.test(html)) errors.push('登录页缺少重置凭据入口说明');
     if (!/async function doForce\(/.test(html)) errors.push('缺少首登改密提交逻辑 doForce');
     const jar = {};
     const dom = new JSDOM(html, {url: base + '/', runScripts: 'dangerously', virtualConsole: vc,
@@ -91,7 +93,8 @@ async function waitUp() {
       }});
     const w = dom.window;
     const wait = ms => new Promise(r => setTimeout(r, ms));
-    if (w.document.querySelector('#lu').value !== 'admin') errors.push('登录页账户框未预填默认账户 admin');
+    if (w.document.querySelector('#lu').value) errors.push('登录页账户框被预填了内容（不应暴露默认账户）');
+    if (/admin/.test(w.document.querySelector('#lu').placeholder)) errors.push('账户框 placeholder 仍提示默认 admin');
     w.document.querySelector('#lu').value = 'admin';
     w.document.querySelector('#lp').value = 'SmokePass123!';
     await w.doLogin();
@@ -335,6 +338,15 @@ async function waitUp() {
       if (!/whoami/.test(sp)) errors.push('自助页缺少自动识别');
       if (!/连上 VPN/.test(sp)) errors.push('自助页没说明必须先连 VPN');
     } catch (e) { errors.push('自助页检查抛错: ' + e.message); }
+
+    // CSRF 自愈：故意塞一个过期 token，应自动刷新会话后重试成功，而不是弹「请刷新页面」
+    try {
+      const stale = 'stale-' + Date.now();
+      w.eval('S.csrf=' + JSON.stringify(stale));
+      await w.logout(); await wait(300);
+      if (!w.document.querySelector('#login').style.display.includes('flex')) errors.push('CSRF token 失效后没有自愈退出');
+      if (w.eval('S.csrf') === stale) errors.push('CSRF token 没有刷新');
+    } catch (e) { errors.push('CSRF 自愈测试抛错: ' + e.message); }
 
     console.log(errors.length ? '问题：\n - ' + errors.join('\n - ') : '前端冒烟全部通过');
     srv.kill();
