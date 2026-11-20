@@ -65,6 +65,9 @@ def _read_token():
             return json.load(f)
     except FileNotFoundError:
         return None
+    except PermissionError:
+        # worker 是 root，正常不会走到这里；真走到了，说清楚比报「损坏」有用
+        raise RuntimeError("读不到安装码文件 %s（权限应为 600 root:root）" % token_path())
     except Exception:
         return {}
 

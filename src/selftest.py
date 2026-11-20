@@ -1221,6 +1221,14 @@ def main():
           'chown -R root:root "$DEST/bin"' in open(os.path.join(CODE, "install.sh"),
                                                    encoding="utf-8").read())
 
+    # 闸门做在 worker 里，但用户得能在界面上把码填进来，否则这功能等于没有
+    _html = open(os.path.join(CODE, "index.html"), encoding="utf-8").read()
+    check("向导第 2 步与升级页都有安装码输入框",
+          'id="wcode"' in _html and 'id="upcode"' in _html)
+    _appsrc = open(os.path.join(CODE, "app.py"), encoding="utf-8").read()
+    check("三个上传接口都把安装码透传给 worker",
+          _appsrc.count('"install_code"') >= 3, _appsrc.count('"install_code"'))
+
     if POSIX:
         import worker as wk
         f1 = wk.take_sys_lock(2)
