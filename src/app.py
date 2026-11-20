@@ -618,10 +618,19 @@ def api_state():
     n_peers = con.execute("SELECT COUNT(*) FROM peer_grants").fetchone()[0]
     recent = [dict(r) for r in con.execute("SELECT * FROM auth_log ORDER BY id DESC LIMIT 8").fetchall()]
     con.close()
+    # 地址和当前网段对不上的账号（改过网段但还没手工改地址）：首页直接亮出来，
+    # 免得改完设置就走了，客户端拨不上来才发现。
+    try:
+        _usable = set(core.usable_host_ips(c))
+        stale = [{"username": u["username"], "vpn_ip": u["vpn_ip"], "enabled": u["enabled"]}
+                 for u in users if u["vpn_ip"] not in _usable]
+    except Exception:
+        stale = []
     return ok({
         "initialized": bool(core.get_meta("initialized")),
         "version": vi, "cfg": c, "admin_user": core.admin_user(), "src_ip": client_ip(),
         "web_version": core.WEB_VERSION,
+        "stale_ips": stale,
         "stats": {"users": len(users), "enabled": len([u for u in users if u["enabled"]]),
                   "online": len(online), "grants": n_grants, "peers": n_peers,
                   "acl_mode": c["acl_mode"], "nat_mode": c.get("nat_mode", "nat")},
@@ -746,7 +755,10 @@ def wizard_steps():
 
 @app.get("/api/users")
 def users_get():
-    return ok({"users": core.list_users()})
+    # stale：固定 IP 已经不在当前 VPN 网段里的账号（改过网段但还没手工改地址），
+    # 页面据此弹一条提醒，不做任何自动修改。
+    return ok({"users": core.list_users(), "stale": core.stale_ip_users(),
+               "vpn_cidr": core.cfg()["vpn_cidr"]})
 
 
 @app.get("/api/users/next-ip")
@@ -1011,31 +1023,17 @@ def settings_get():
 @app.post("/api/settings")
 def settings_save():
     d = request.get_json(silent=True) or {}
-    old_cfg = core.cfg()
-    c = dict(old_cfg)
+    c = core.cfg()
     for k in core.DEFAULT_CFG:
         # lan_nets 已并入 extra_routes，前端不再提交它
         if k in d and k not in ("allow_major_upgrade", "lan_nets"):
             c[k] = d[k]
-    # 只改网段、没动池子时，池子先跟着平移，否则会被「池子必须在网段内」直接卡住
-    c = core.shift_pool_with_cfg(c, old_cfg)
     errs = core.validate_cfg(c)
     if errs:
         raise ValueError("；".join(errs))
-
-    # 网段 / 动态池变了就先把账号的固定 IP 规划好：容量不够直接拒绝，
-    # 此时 meta 和账号都还没写，不会留下「网段改了、账号全废」的中间态。
-    plan = core.plan_ip_migration(c, old_cfg=old_cfg)
-    if plan["blocked"]:
-        raise ValueError("新网段放不下现有账号：可用 %d 个固定 IP，还有 %d 个账号分不到地址（%s）。"
-                         "请扩大 VPN 网段，或先停用/删除多余账号再改。"
-                         % (core.static_capacity(c), len(plan["blocked"]),
-                            "、".join(plan["blocked"][:10])))
-
     old_fp = core.get_meta("config_fingerprint")
     for k, v in c.items():
         core.set_meta(k, v)
-    moved = core.apply_ip_migration(plan["moves"], actor="settings.save")
     core.write_all_config()
     new_fp = core.get_meta("config_fingerprint")
     need = old_fp != new_fp
@@ -1043,16 +1041,16 @@ def settings_save():
     sudo_worker(tid, "apply-rules")
     sudo_worker(tid, "restart-vpn")
     core.log_audit("admin", "settings.save", "指纹 %s -> %s" % (old_fp, new_fp))
+    # 改了 VPN 网段不会动任何账号的固定 IP（账号地址由管理员手工改）：
+    # 这里只把「还停在旧网段、需要手工改」的账号点出来，别让人改完就不管了。
+    stale = core.stale_ip_users(c)
     msg = "配置已应用，OpenVPN 已重启（在线用户会断线自动重连）"
-    if moved:
-        msg += "；网段变化，已自动迁移 %d 个账号的固定 IP" % moved
+    if stale:
+        msg += ("；需手工把 %d 个账号的固定 IP 改到新网段（%s），同步按尾号对齐，未改的会拨不上来"
+                % (len(stale), c["vpn_cidr"]))
     return ok({"need_redistribute": need, "fingerprint": new_fp,
                "warnings": core.route_warnings(c),
-               "moved": moved, "moves": plan["moves"],
-               # 池子可能被跟着网段平移过，把落地值回给前端，别让输入框还显示旧网段
-               "vpn_cidr": c["vpn_cidr"],
-               "pool_start": c.get("pool_start") or "",
-               "pool_end": c.get("pool_end") or "",
+               "vpn_cidr": c["vpn_cidr"], "stale": stale,
                "msg": msg})
 
 
@@ -1145,15 +1143,6 @@ def settings_reinit_ca():
 
 @app.post("/api/settings/restore-default")
 def settings_restore_default():
-    old_cfg = core.cfg()
-    new_cfg = dict(core.DEFAULT_CFG)
-    new_cfg["web_allow_cidr"] = old_cfg.get("web_allow_cidr", "")   # 白名单不跟着回默认
-    plan = core.plan_ip_migration(new_cfg, old_cfg=old_cfg)
-    if plan["blocked"]:
-        raise ValueError("默认网段 %s 放不下现有账号（还差 %d 个地址，%s）。"
-                         "请先手工扩大网段或停用多余账号。"
-                         % (new_cfg["vpn_cidr"], len(plan["blocked"]),
-                            "、".join(plan["blocked"][:10])))
     core.snapshot("恢复默认前")
     for k, v in core.DEFAULT_CFG.items():
         # 白名单/操作者这类「安全边界」不跟着服务端参数一起回默认值：
@@ -1161,13 +1150,14 @@ def settings_restore_default():
         if k in ("web_allow_cidr",):
             continue
         core.set_meta(k, v)
-    moved = core.apply_ip_migration(plan["moves"], actor="settings.default")
     core.write_all_config()
     core.log_audit("admin", "settings.default", "恢复默认")
+    stale = core.stale_ip_users()
     msg = "已恢复默认参数，请重新填写对外地址后再应用"
-    if moved:
-        msg += "；已按默认网段自动迁移 %d 个账号的固定 IP" % moved
-    return ok({"msg": msg, "moved": moved})
+    if stale:
+        msg += "；当前网段 %s 下还有 %d 个账号的固定 IP 需要手工改过来" % (
+            core.cfg()["vpn_cidr"], len(stale))
+    return ok({"msg": msg, "stale": stale})
 
 
 # --------------------------------------------------------------------------- 版本与更新
@@ -1441,7 +1431,16 @@ def full_backup_restore():
     tid = uuid.uuid4().hex
     sudo_worker(tid, "apply-rules")
     sudo_worker(tid, "restart-vpn")
-    return ok({"msg": "备份已恢复，服务正在重启", "result": r})
+    # 包可能来自改了网段的机器：账号地址与当前网段对不上时只提示，让管理员手工改
+    stale = core.stale_ip_users()
+    msg = "备份已恢复，服务正在重启"
+    if stale:
+        msg += ("，但当前网段 %s 下有 %d 个账号的固定 IP 不在网段内"
+                "（%s…），请到「认证账号」手工改地址"
+                % (core.cfg()["vpn_cidr"], len(stale),
+                   "、".join(u["username"] for u in stale[:5])))
+    return ok({"msg": msg, "result": r, "stale": stale,
+               "vpn_cidr": core.cfg()["vpn_cidr"]})
 
 
 @app.post("/api/full-backup/delete")
@@ -1540,25 +1539,6 @@ def main():
         print("请重启服务: systemctl restart openvpn-web && systemctl restart openvpn")
         sys.exit(0)
     bootstrap_admin()
-    # 账号固定 IP 与当前网段对不上时先自愈：改过 VPN 网段的老机器升级上来，
-    # 账号还停在旧网段会让客户端拨上来拿不到地址。修不了只告警，不影响启动。
-    try:
-        rp = core.repair_user_ips(actor="boot")
-        if rp["moved"]:
-            print("[启动自愈] %d 个账号的固定 IP 已对齐当前网段 %s"
-                  % (rp["moved"], core.cfg()["vpn_cidr"]))
-            for m in rp["moves"]:
-                print("  %s: %s -> %s" % (m["username"], m["old"] or "-", m["new"]))
-            core.write_all_config()
-            try:
-                sudo_worker(uuid.uuid4().hex, "apply-rules")
-            except Exception as e:
-                print("[启动自愈] 规则重放交给定时器: %s" % e)
-        elif rp["blocked"]:
-            print("[启动自愈] 有 %d 个账号在当前网段里分不到地址，请扩大 VPN 网段或停用多余账号：%s"
-                  % (len(rp["blocked"]), "、".join(rp["blocked"][:10])))
-    except Exception as e:
-        print("[启动自愈] 跳过: %s" % e)
     # 服务启动时先查一遍编译环境并落库：缺 gcc 不该等用户点开「升级」页才发现。
     # 这里只是记录能力，不会改动任何 OpenVPN 配置或二进制，服务照常起。
     try:

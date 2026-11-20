@@ -272,7 +272,7 @@ pre::-webkit-scrollbar-thumb{background:oklch(.45 .02 250);background-clip:conte
 <script>
 /* 页面版本：每次升级手动同步 core.WEB_VERSION（selftest 会校验两者一致）。
    浏览器若缓存了旧 HTML（标签页常开不重载、或中间层缓存），靠这个跟服务端版本比对来自愈。 */
-const PAGE_VERSION='1.3.18';
+const PAGE_VERSION='1.3.19';
 const S={csrf:'',logged:false,cfg:null,page:'overview',task:null};
 const $=s=>document.querySelector(s);
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -457,7 +457,12 @@ function pollTask(tid,done){
 /* ---------------- 概览 ---------------- */
 async function pgOverview(){
   const j=await get('/api/state');const s=j.stats,v=j.version;
+  const st=j.stale_ips||[];
   $('#page').innerHTML=`
+  ${st.length?'<div class="hint err"><b>有 '+st.length+' 个账号的固定 IP 不在当前 VPN 网段 '+esc(j.cfg.vpn_cidr)+' 内</b>：'
+    +st.slice(0,10).map(u=>esc(u.username)+' <span class="mono">'+esc(u.vpn_ip)+'</span>').join('、')
+    +(st.length>10?' 等':'')+'，这些账号现在拨不上来。'
+    +'<button class="btn sm" style="margin-left:8px" onclick="go(\'users\')">去认证账号改地址</button></div>':''}
   <div class="grid">
     <div class="stat"><div class="n">${s.users}</div><div class="t">认证账号（启用 ${s.enabled}）</div></div>
     <div class="stat"><div class="n">${s.online}</div><div class="t">当前在线</div></div>
@@ -688,9 +693,17 @@ async function stopUser(n){
 }
 
 /* ---------------- 账号管理 ---------------- */
-let U={list:[],kw:'',state:'all'};
-async function pgUsers(){const j=await get('/api/users');U.list=j.users;
+let U={list:[],kw:'',state:'all',stale:[],cidr:''};
+/* 固定 IP 已经完全不在当前 VPN 网段里的账号：只提示，不自动改（地址怎么排由人来定） */
+function staleHint(st){
+ const a=st||[];if(!a.length)return '';
+ return '<div class="hint err"><b>有 '+a.length+' 个账号的固定 IP 不在当前 VPN 网段 '+esc(U.cidr||'')+' 内</b>，这些账号现在拨不上来：'
+  +a.slice(0,12).map(u=>esc(u.username)+' <span class="mono">'+esc(u.vpn_ip)+'</span>').join('、')
+  +(a.length>12?' 等 '+a.length+' 个':'')+'。<br>请逐个【编辑】把地址改到本网段（建议保持原来的末位，如 10.8.0.2 → 10.8.1.2），改完会自动重建 ACL 并踢掉旧连接。</div>';
+}
+async function pgUsers(){const j=await get('/api/users');U.list=j.users;U.stale=j.stale||[];U.cidr=j.vpn_cidr||'';
  $('#page').innerHTML=`<div class="card"><h3>认证账号 <small>一人一账号一固定 IP；账号可中文；密码可查看 / 编辑 / 导出明文</small></h3>
+ ${staleHint(U.stale)}
  <div class="bar"><input type="text" id="ukw" placeholder="搜索账号 / 姓名 / 部门 / IP" value="${esc(U.kw)}" style="width:230px" oninput="U.kw=this.value;PG.users=0;renderUsers()">
  <select onchange="U.state=this.value;PG.users=0;renderUsers()"><option value="all">全部状态</option><option value="on" ${U.state==='on'?'selected':''}>启用</option><option value="off" ${U.state==='off'?'selected':''}>停用</option></select>
  <button class="btn pri" onclick="userAdd()">添加账号</button>
@@ -702,7 +715,7 @@ async function pgUsers(){const j=await get('/api/users');U.list=j.users;
  导入 / 导出<b>只针对全部账号</b>，不用也不提供「选中某个人」：导出是当前整张台账（含明文密码），导入是整张表覆盖同步（表里没有的账号会被删除，预览时可逐项核对）。<b>密码列必填，留空整批拒绝。</b><br>
  有效期写到日（YYYY-MM-DD），当天仍可用，<b>次日自动停用并断开在线会话</b>；留空表示长期有效。<br>
  固定 IP 由服务端下发，客户端改不了；改 IP 会自动重建 ACL 并断开该账号当前连接。<br>
- 改了「服务端设置」里的 <b>VPN 网段</b>时，所有账号的固定 IP 会自动跟着迁到新网段（保持原尾号，如 10.8.0.2 → 10.8.1.2），不用手工一个个改。<br>
+ 改了「服务端设置」里的 <b>VPN 网段</b>后，账号地址<b>不会自动跟着变</b>，要在这里逐个改到新网段（建议保持原末位，如 10.8.0.2 → 10.8.1.2），没改的账号拨不上来。<br>
  要断开某人当前连接并阻止重连，直接把状态改成<b>停用</b>（在线用户页也有【停用账号】按钮）。<br>
  员工自助改密：<span class="mono" id="selfurl"></span></div></div>`;
  renderUsers();
@@ -1017,15 +1030,13 @@ async function pgSettings(){const j=await get('/api/settings'),p=(await get('/ap
  poolToggle();poolInfo();autoFillPublicAddr()}
 function daysBadge(d){if(d===null||d===undefined)return '—';if(d<0)return badge('已过期','err');if(d<30)return badge(d+' 天','err');if(d<90)return badge(d+' 天','warn');return badge(d+' 天','ok')}
 async function settingsSave(){
- confirmAct('保存服务端设置并重启','应用新配置会<b>重启 OpenVPN，所有在线连接断开并自动重连</b>。若改了端口/协议/CA/加密套件，还需重新导出并全员替换 company.ovpn。<br><br>改了 <b>VPN 网段</b>时，所有账号的固定 IP 会自动跟着迁到新网段（保持原来的地址尾号），账号和证书都不受影响。',
+ confirmAct('保存服务端设置并重启','应用新配置会<b>重启 OpenVPN，所有在线连接断开并自动重连</b>。若改了端口/协议/CA/加密套件，还需重新导出并全员替换 company.ovpn。<br><br>改了 <b>VPN 网段</b>时，账号的固定 IP <b>不会自动跟着改</b>：保存后请到「认证账号」逐个把地址改到新网段，否则这些账号拨不上来。',
  async()=>{const j=await post('/api/settings',readCfg());
   const w=(j.warnings&&j.warnings.length)?'<div class="hint warn"><b>路由检查有 '+j.warnings.length+' 条提醒：</b><br>'+j.warnings.map(esc).join('<br>')+'</div>':'';
-  const mv=(j.moves&&j.moves.length)?'<div class="hint ok"><b>网段变化，以下 '+j.moves.length+' 个账号的固定 IP 已自动迁移：</b><br>'
-   +j.moves.map(m=>esc(m.username)+'：<span class="mono">'+esc(m.old||'—')+' → '+esc(m.new)+'</span>').join('<br>')+'</div>':'';
-  $('#setres').innerHTML='<div class="hint '+(j.need_redistribute?'err':'ok')+'">'+esc(j.msg)+'<br><b>'+(j.need_redistribute?'配置指纹已变化：必须重新导出并全员替换 company.ovpn':'配置指纹未变：无需重新分发')+'</b></div>'+mv+w;
-  // 动态池可能被跟着新网段平移过，把落地值写回输入框，避免下次保存又提交旧值
-  if(j.pool_start&&$('#c_pool_start'))$('#c_pool_start').value=j.pool_start;
-  if(j.pool_end&&$('#c_pool_end'))$('#c_pool_end').value=j.pool_end;
+  const sl=(j.stale&&j.stale.length)?'<div class="hint err"><b>这 '+j.stale.length+' 个账号的固定 IP 还在旧网段，需要手工改到 '+esc(j.vpn_cidr||'')+'：</b><br>'
+   +j.stale.map(u=>esc(u.username)+'：<span class="mono">'+esc(u.vpn_ip)+'</span>').join('、')
+   +'<br>去「认证账号」逐个编辑地址（建议保持末位），改完点保存即可。</div>':'';
+  $('#setres').innerHTML='<div class="hint '+(j.need_redistribute?'err':'ok')+'">'+esc(j.msg)+'<br><b>'+(j.need_redistribute?'配置指纹已变化：必须重新导出并全员替换 company.ovpn':'配置指纹未变：无需重新分发')+'</b></div>'+sl+w;
   toast('已保存并重启','ok');loadState()},'保存并重启');
 }
 async function settingsPreview(){const j=await get('/api/settings/preview');
@@ -1033,8 +1044,8 @@ async function settingsPreview(){const j=await get('/api/settings/preview');
  const r=j.routes&&j.routes.length?'<div class="hint">实际下发给客户端的路由：<b>'+j.routes.map(esc).join('、')+'</b></div>':'';
  modal('server.conf 预览',r+w+'<pre style="max-height:55vh">'+esc(j.text)+'</pre>',()=>{},'关闭')}
 async function rebuild(){const j=await post('/api/settings/rebuild');toast(j.msg,'ok')}
-function restoreDefault(){confirmAct('恢复默认参数','会清空对外地址等参数，需重新填写后再应用。操作前会自动备份。若当前 VPN 网段不是默认值，账号固定 IP 会自动迁回默认网段。',
- async()=>{const j=await post('/api/settings/restore-default',{});toast(j.msg||'已恢复默认','ok');pgSettings()},'恢复默认')}
+function restoreDefault(){confirmAct('恢复默认参数','会清空对外地址等参数，需重新填写后再应用。操作前会自动备份。VPN 网段也会回到默认值，账号固定 IP 不会自动改。',
+ async()=>{const j=await post('/api/settings/restore-default',{});toast(j.msg||'已恢复默认',(j.stale&&j.stale.length)?'warn':'ok');pgSettings()},'恢复默认')}
 async function reinitCA(){confirmAct('重新初始化 CA / tls-crypt',
  '<b>高危</b>：全员现有 company.ovpn 立即失效，必须重新导出并分发给所有人。仅用于密钥疑似泄露。',
  async()=>{const j=await post('/api/settings/reinit-ca',{});$('#setres').innerHTML=taskBox();
@@ -1104,10 +1115,20 @@ async function fullNow(dl){const j=await post('/api/full-backup/create',{tag:'�
  setTimeout(()=>pgUpdate(),800)}
 async function fullDel(n){confirmAct('删除备份','只删服务器上的这份包；你已经下载到本地的文件不受影响。',
  async()=>{await post('/api/full-backup/delete',{name:n});toast('已删除','ok');pgUpdate()},'删除')}
+/* 恢复完成后：若包里的账号地址和本机网段对不上，弹出来让管理员去手工改，别直接刷走页面 */
+function afterRestore(j){
+ const st=j.stale||[];
+ toast(j.msg,st.length?'warn':'ok');
+ if(!st.length){setTimeout(()=>location.reload(),1800);return}
+ modal('恢复完成，但有账号地址需要手工改',
+  '<div class="hint err">本机 VPN 网段是 <b class="mono">'+esc(j.vpn_cidr||'')+'</b>，下面 '+st.length+' 个账号的固定 IP 不在这个网段里，现在拨不上来：</div>'
+  +'<pre style="max-height:40vh;overflow:auto;font-size:12px">'+esc(st.map(u=>u.username+'  '+u.vpn_ip).join('\n'))+'</pre>'
+  +'<div class="hint">到「认证账号」逐个【编辑】把地址改到本网段（建议保持原来的末位，如 10.8.0.2 → 10.8.1.2），改完会自动重建 ACL。</div>',
+  ()=>go('users'),'去认证账号改地址');
+  }
 function fullRestoreName(n){confirmAct('恢复备份','将用 <b>'+esc(n)+'</b> 覆盖当前 OpenVPN 证书、配置、ccd、二进制与 Web 台账、白名单，并重建规则、重启服务。'
  +'<br>当前状态会先自动打一份保护备份。在线用户会被断开，需要重新拨入。',
- async()=>{const j=await post('/api/full-backup/restore',{name:n});
-  toast(j.msg,'ok');setTimeout(()=>location.reload(),1800)},'确认恢复')}
+ async()=>{const j=await post('/api/full-backup/restore',{name:n});afterRestore(j)},'确认恢复')}
 /* 台账备份恢复：先看变更清单，确认后才真正写库（写前自动备份当前台账） */
 async function ubRestore(path){
  try{const j=await post('/api/user-backups/restore',{path:path,step:'preview'});
@@ -1135,7 +1156,7 @@ async function fullRestore(){if(!FB.token){toast('请先上传并检查备份包
  confirmAct('恢复备份','将用 <b>'+esc(FB.name)+'</b> 覆盖当前 OpenVPN 证书、配置、ccd、二进制与 Web 台账、白名单，并重建规则、重启服务。'
   +'<br>当前状态会先自动打一份保护备份。在线用户会被断开，需要重新拨入。',
   async()=>{const j=await post('/api/full-backup/restore',{token:FB.token});
-   toast(j.msg,'ok');setTimeout(()=>location.reload(),1800)},'确认恢复')}
+   afterRestore(j)},'确认恢复')}
 
 /* ---------------- 日志 ---------------- */
 /* 审计动作的中文名：库里存的是稳定 key（不随文案变），只在展示层翻译 */

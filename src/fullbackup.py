@@ -304,14 +304,6 @@ def restore(path, audit=True, protect=True):
 
         # 按目标机的 ROOT 重新生成 server.conf / company.ovpn，路径自动适配
         core.write_all_config()
-        # 包可能来自「网段改过、账号没跟着迁」的老机器：恢复后先对齐一次固定 IP，
-        # 否则客户端拨上来拿不到地址。容量不够就原样保留，由界面提示扩容。
-        try:
-            rp = core.repair_user_ips(actor="backup.restore")
-            if rp["moved"]:
-                core.write_all_config()
-        except Exception as e:
-            print("[restore] 固定 IP 对齐跳过: %s" % e)
         if audit:
             core.log_audit("admin", "backup.full_restore", info["name"])
         return {"name": info["name"], "snapshot": snap,
