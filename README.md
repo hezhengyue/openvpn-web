@@ -566,7 +566,7 @@ Web 程序自身不提供「上传更新包」入口（日常更新就是覆盖�
 **限制（如实说明）**：
 
 1. 沙盒内以 MOCK 模式验证业务逻辑，**`iptables` / `systemd` / 真实 OpenVPN 进程未实际执行**，这部分由目标机上的 `install.sh` + 安装向导完成，向导自带环境自检与失败回滚
-2. 静态 openvpn 二进制与离线 Python 运行时**未在本环境实际编译/下载**（需要联网构建机），由 `build/build-offline.sh` / `build/Dockerfile.build` 复现；也可在 Web 向导里直接上传二进制
+2. 静态 openvpn 二进制与离线 Python 运行时**未在本环境实际编译/下载**（需要联网构建机），由 `build/build-offline.sh` / `build/Dockerfile.build` 复现；也可在目标机就地编译，或在「升级」页上传二进制（要安装码）
 3. 是功能与操作逻辑对齐爱快风格，**不是像素级复刻**，未使用其任何界面素材
 4. 单机部署，不做高可用、集群、SSO/MFA、多管理员 RBAC、自动 HTTPS
 

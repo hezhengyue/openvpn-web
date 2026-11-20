@@ -381,9 +381,8 @@ PYEOF
 
 VERSION="$("$DEST/bin/openvpn" --version 2>/dev/null | head -1 | awk '{print $2}' || true)"
 
-# 首装时向导第 2 步就要上传二进制，当场预授权一个 2 小时的安装码印在下面，
-# 省得装完还要另开一个终端。之后每次替换二进制 / 编译源码 / 更新 Web，
-# 都要重新执行 install-code.sh 拿新码（一次性，填错 5 次作废）。
+# 装完二进制就位、服务直接可用；这个码是留给「升级」页的：换二进制 / 编源码 / 更新 Web
+# 都要人工放行。先印一个 2 小时的在这里，省得装完还要另开终端（一次性，填错 5 次作废）。
 FIRSTCODE=""
 if [ -x "$DEST/install-code.sh" ]; then
     FIRSTCODE="$(OVPN_CODE_QUIET=1 "$DEST/install-code.sh" 7200 2>/dev/null || true)"
