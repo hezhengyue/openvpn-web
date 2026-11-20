@@ -7,14 +7,14 @@
 #
 # 依赖「本地优先」：三样东西都先看本地，缺了才联网，联网下到的会回填 vendor/，下次不用再下。
 #   1. Python 运行时   仓库自带 runtime/        → vendor/python/*.tar.gz → python-build-standalone
-#   2. Flask/openpyxl  vendor/wheels/*.whl      → PyPI
+#   2. Flask/openpyxl/waitress  vendor/wheels/*.whl → PyPI
 #   3. 静态 OpenVPN    vendor/src/*.tar.gz      → 各上游镜像（见 build-static-openvpn.sh）
 #
 # 仓库布局（源码树是分层的，打出来的包是平铺的）：
 #   src/      运行时代码 → 包根（install.sh 依赖「app.py 与 install.sh 同级」）
 #   bin/      预编译静态二进制 → 包 bin/
 #   runtime/  离线 Python → 包 python/
-#   vendor/   构建期三方件 → 包 vendor/{static,src}
+#   vendor/   构建期三方件 → 包 vendor/{static,src,wheels}
 #
 # 为什么必须在老系统上构建：目标最低 CentOS 7（glibc 2.17 / OpenSSL 1.0.2），
 # 在 Ubuntu 26 上 pip 会拉 manylinux_2_28+ 的 wheel、解出的 openvpn 会链 libssl.so.3，
@@ -59,6 +59,12 @@ chmod 755 "$OUT"/bin/* 2>/dev/null || true
 if [ -d "$VENDOR/static" ]; then
     mkdir -p "$OUT/vendor/static"
     cp -f "$VENDOR"/static/*.tar.gz "$OUT/vendor/static/" 2>/dev/null || true
+fi
+# wheel 一起带上（不到 1MB）：装完后如果 waitress 缺了，install.sh 能就地补装，
+# 不用把包搬回构建机重打一遍
+if ls "$VENDOR"/wheels/*.whl >/dev/null 2>&1; then
+    mkdir -p "$OUT/vendor/wheels"
+    cp -f "$VENDOR"/wheels/*.whl "$OUT/vendor/wheels/" 2>/dev/null || true
 fi
 
 # 仓库里已经带了编好的静态二进制 → 直接用，不再编译（想重编: FORCE_BUILD_OPENVPN=1）

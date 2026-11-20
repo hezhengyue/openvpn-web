@@ -208,6 +208,20 @@ else
     exit 1
 fi
 
+# HTTP 服务器：默认用 waitress（单进程多线程）。缺了不会起不来，只是退回 Flask
+# 自带的开发服务器、单线程处理请求；这里就地从包内 wheel 补装，免得事后才发现。
+if ! "$PY" -c 'import waitress' >/dev/null 2>&1; then
+    for _w in "$DEST"/vendor/wheels/waitress-*.whl; do
+        [ -f "$_w" ] || continue
+        if "$PY" -m pip install --no-index --no-deps --disable-pip-version-check "$_w" >/dev/null 2>&1; then
+            say "      已从包内 wheel 安装 waitress（多线程 HTTP 服务器）"
+        fi
+        break
+    done
+    "$PY" -c 'import waitress' >/dev/null 2>&1 || \
+        say "      提示: 没有 waitress，将使用 Flask 自带开发服务器（单线程，慢请求会互相挡）"
+fi
+
 # ---------------------------------------------------------------- 3) 用户与权限
 step "[3/8] 创建运行账号与目录权限"
 if ! id "$USER" >/dev/null 2>&1; then
