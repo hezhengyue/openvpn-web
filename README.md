@@ -82,7 +82,8 @@ openvpn-web/
 │   ├── SHA256SUMS            逐包校验值
 │   └── fetch.sh              有网机器上跑一次补齐 vendor/
 ├── build/                    构建与打包（不进安装包）
-│   ├── build-offline.sh      生成完整离线目录 → dist/
+│   ├── build-offline.sh      生成完整离线目录 → dist/（Linux 构建机，会真的装一遍依赖）
+│   ├── build-offline.py      同上，但纯搬运，Windows 上也能跑（依赖留给安装时补）
 │   ├── build-static-openvpn.sh  静态编译 openvpn（也随包发行，供目标机自编译）
 │   ├── Dockerfile.build      glibc 2.17 可复现构建环境
 │   └── fixtar.py             修包内可执行位（Windows 打包必然丢 exec 位）
@@ -163,6 +164,24 @@ chroot /opt/c7 /bin/bash -lc 'VENDOR_ONLY=1 PREFIX_OUT=/out/prefix.tar.gz \
 **而且现在连构建都不是必须的**：仓库已带编好的 `bin/openvpn`（2.6.23 静态）和装好依赖的 `python/`，
 `./build/build-offline.sh` 检测到 `bin/openvpn` 会直接复用、跳过编译（想重编：`FORCE_BUILD_OPENVPN=1 ./build/build-offline.sh`），
 只做「拷文件 + 离线装 wheel + 打包」，几十秒出 `dist/openvpn-web-x86_64.tar.gz`。
+
+**Windows 开发机也能打包**（不用装 WSL、不用容器）：
+
+```bash
+python build/build-offline.py              # 产出 dist/openvpn-web-x86_64/ + .tar.gz
+python build/build-offline.py --tar-only   # 只要 tar.gz
+```
+
+两个脚本做的是同一件事（分层仓库 → 平铺包），差别只在「要不要执行 Linux 的 pip」：
+
+| 脚本 | 在哪跑 | 依赖 | 说明 |
+|---|---|---|---|
+| `build-offline.sh` | Linux 构建机 | 会调用包内 `python` 真装一遍 wheel | 产物 site-packages 是热的 |
+| `build-offline.py` | Windows / Linux 都行 | **不执行任何 Linux 程序**，只搬文件 | 运行时保持"干净"，安装时从包内 wheel 补（几秒，离线） |
+
+`.py` 版本专门处理三个 Windows 坑：软链被拍成 10 字节文本（tar 里改写成符号链接，本机实测 745 个）、
+没有可执行位（权限按路径规则写死：`install.sh` 755 / `install-code.sh` 700 / `bin/*` 755）、
+`os.symlink` 默认没权限（建不了就写回存根，tar 阶段再还原）。
 
 ```bash
 ./build/build-offline.sh              # 本地优先；缺什么才去下什么
@@ -557,7 +576,7 @@ Web 程序自身不提供「上传更新包」入口（日常更新就是覆盖�
 
 ## 11. 验证情况与限制
 
-- `python3 src/selftest.py`（或装机后在安装目录 `python3 selftest.py`）：**394 项全通过**（Windows 上少 7 条 POSIX 专属用例、再多 1 条只在仓库里成立的打包断言，388 项）——配置渲染、双网络模式（默认 NAT / 无 NAT 溯源）与切换不改指纹、自建 NAT 链、IPv4 转发前提、证书签发、账号校验（含中文账号 + 中文 ccd + 改名时授权/用户组跟着搬、**明文密码入库与改密同步**）、动态地址池开关与地址冲突、**安装码闸门（一码一次 / 过期作废 / 错 5 次作废 / 脚本生成的码能直接过）**、认证脚本（放行/拒绝/锁定/fail-closed/**有效期到期拒绝**）、Excel 全量同步（**导出带明文密码、密码列留空整批拒绝、有效期落库**）、**账号有效期到期自动停用并清 ccd**、ACL 默认拒绝与改 IP 不残留、客户端互访授权与过期过滤、跨大版本闸门、安装向导长任务、全部 API（含首页禁用缓存、网络模式切换、P2P 增删、下一个可用 IP、容量、白名单保存与「排除自己」拒绝、独立管理账户登录与免密重置、改密码双次确认、**默认 admin/admin 首登强改：未改密拦接口 / 改密免填旧密码 / 改完默认口令失效 / 凭据文件不留明文**、审计带 IP、按钮式保存/恢复默认/重签 CA）、资产条目编辑（改 IP/协议/端口、重复拒绝）、二进制更新、备份打点与回滚、备份生成/下载/上传/按包名恢复/删除与安全校验
+- `python3 src/selftest.py`（或装机后在安装目录 `python3 selftest.py`）：**398 项全通过**（Windows 上 392 项——少 7 条 POSIX 用例、少 1 条只在仓库里成立的打包断言；装机目录里 395 项，少的 3 条同样是打包断言）——配置渲染、双网络模式（默认 NAT / 无 NAT 溯源）与切换不改指纹、自建 NAT 链、IPv4 转发前提、证书签发、账号校验（含中文账号 + 中文 ccd + 改名时授权/用户组跟着搬、**明文密码入库与改密同步**）、动态地址池开关与地址冲突、**安装码闸门（一码一次 / 过期作废 / 错 5 次作废 / 脚本生成的码能直接过）**、认证脚本（放行/拒绝/锁定/fail-closed/**有效期到期拒绝**）、Excel 全量同步（**导出带明文密码、密码列留空整批拒绝、有效期落库**）、**账号有效期到期自动停用并清 ccd**、ACL 默认拒绝与改 IP 不残留、客户端互访授权与过期过滤、跨大版本闸门、安装向导长任务、全部 API（含首页禁用缓存、网络模式切换、P2P 增删、下一个可用 IP、容量、白名单保存与「排除自己」拒绝、独立管理账户登录与免密重置、改密码双次确认、**默认 admin/admin 首登强改：未改密拦接口 / 改密免填旧密码 / 改完默认口令失效 / 凭据文件不留明文**、审计带 IP、按钮式保存/恢复默认/重签 CA）、资产条目编辑（改 IP/协议/端口、重复拒绝）、二进制更新、备份打点与回滚、备份生成/下载/上传/按包名恢复/删除与安全校验
 - 前端在 jsdom 里逐页真跑（`tests/smoke.js`），另有 `tests/shots.js` 用无头 Edge 截图肉眼核对版式
 - **真实环境实测（2026-11-18，Anolis 8.10 / OpenVPN 2.6.23 / TCP）**：建中文账号 `张三` → 服务端生成 `ccd/张三` → 客户端用中文账号认证通过 → `PUSH_REPLY ... ifconfig 10.8.0.2` 拿到台账固定 IP；白名单按来源判定：隧道内 IP 访问 `/api/state` = 403、`/self` = 200，白名单内网段可进后台，公网 IP 全 403
 
@@ -576,7 +595,7 @@ Web 程序自身不提供「上传更新包」入口（日常更新就是覆盖�
 
 ## 12. 版本信息（截至 2026-11-20）
 
-- Web **1.3.25**：**编译工具不再是拦路虎**。上一版让「缺二进制就地编译」成立，但最小化系统常见地没装 gcc（这台测试机就是：make 有、gcc/perl/pkg-config 全无），真到要编的时候还是卡住。现在 `prepare-openvpn.sh` 在缺工具时会先按本机包管理器（yum / dnf / apt-get）自动补装，补不上才报错，并给出对应发行版的准确包名（CentOS 7 的 pkg-config 包叫 `pkgconfig`，容易踩）。`install.sh` 新增 `--with-build-tools`：装完顺手把工具链备好，以后在「升级」页上传源码就能直接编；不加这个参数则完全不碰包管理器（生产机不该为了用不到的能力多装 100MB）。离线机器上自动补装会失败，但只影响「本机编译」这一条路，不影响安装本身。
+- Web **1.3.26**：**Windows 上也能打包**。之前只能在 Linux 构建机跑 `build-offline.sh`——它要用包内的 Linux `python` 执行 `pip install`，Windows 上根本跑不了。新增 `build/build-offline.py`：只做「分层 → 平铺」的搬运，不执行任何包内程序，Windows 的 Git Bash 里一条 `python build/build-offline.py` 就出包。代价是运行时的 `site-packages` 是干净的，所以 `install.sh` 第 2 步改成「缺依赖就从 `vendor/wheels` 离线补」（先 `pip --no-index --find-links`，pip 不可用就直接把 wheel 当 zip 解开）。同时把三个 Windows 坑堵在打包环节：软链存根在 tar 里写成真符号链接（实测 745 个）、权限按路径规则写死（仓库里 `bin/openvpn` 记的是 644）、`os.symlink` 失败时回退存根。实测：Windows 打出 134.6MB 包，Linux 上解包 `python3 -V` 正常、依赖补装成功、包内自检 394 项全过。\n- Web **1.3.25**：**编译工具不再是拦路虎**。上一版让「缺二进制就地编译」成立，但最小化系统常见地没装 gcc（这台测试机就是：make 有、gcc/perl/pkg-config 全无），真到要编的时候还是卡住。现在 `prepare-openvpn.sh` 在缺工具时会先按本机包管理器（yum / dnf / apt-get）自动补装，补不上才报错，并给出对应发行版的准确包名（CentOS 7 的 pkg-config 包叫 `pkgconfig`，容易踩）。`install.sh` 新增 `--with-build-tools`：装完顺手把工具链备好，以后在「升级」页上传源码就能直接编；不加这个参数则完全不碰包管理器（生产机不该为了用不到的能力多装 100MB）。离线机器上自动补装会失败，但只影响「本机编译」这一条路，不影响安装本身。
 - Web **1.3.24**：**装一次，openvpn 和 web 都得在跑**。原来 `install.sh` 在缺 `bin/openvpn` 时直接 `exit 1`——Web 还没起来，人只能对着终端干瞪眼，文档里「`--skip-openvpn` 之后去向导第 2 步上传」这条路其实走不通。现在第 7 步先过 `prepare-openvpn.sh`：包内有二进制就用；没有就用 `vendor/src` 的源码**当场离线编译**（`VENDOR_ONLY=1`，有预编译静态库时只编 openvpn 本体）；实在没有编译环境就明确报错，并说清三条补救路径。二进制齐了才调 `setup.py`；它失败也照样把 Web 起起来（人能登录看日志），最后以 `exit 3` 结束——**不拿非 0 退出码糊弄自动化**。打包脚本同步把 `vendor/src`（18MB 源码）一起带进包，否则「就地编译」是句空话。
 - Web **1.3.23**：给「上传即 root」加一道**人闸**。原来三个动作会把外部代码装进系统——替换 openvpn 二进制、本机编译源码、更新 Web 自身——装上去下一次启动就是 root 身份，而 Web 侧的 `check_binary` 只认 `--version` 输出，编个版本号就能过，等于**能登录面板的人口令一泄露就等于 root**。现在这三类动作执行前，worker 要验一个**一次性安装码**：只能在本机 `sudo /opt/openvpn-web/install-code.sh` 生成（8 位、默认 15 分钟、一码一次、填错 5 次作废、令牌 600 root:root 存在 `/etc/openvpn-web/`），Web 进程既生成不了也读不到。装完系统会把首装用的安装码（2 小时）直接印在「安装完成」里，向导第 2 步照填即可。配套：`bin/` 整体改为 `root:root 755`，Web 用户不再能写「下次会以 root 执行」的程序，向导上传二进制也改走 worker（顺带修掉直接 `copy2` 覆盖运行中二进制的 `ETXTBSY`、且旧二进制没快照的问题）。**恢复备份不再覆盖 `bin/openvpn`**（否则「上传一个包再点恢复」就能绕开闸门，只有命令行 `app.py --restore-full` 还保留整包恢复）；升级失败的回滚改由 worker 的 `rollback-binary` 完成——只认 `replace-binary` 当时钉下的 sha256、30 分钟内有效，Web 往 `data/snapshots` 里塞别的 ELF 也顶不上来，所以这个动作不需要安装码也开不出新口子
 - Web **1.3.22**：多线程下的**一致性收口**。换 waitress 后请求真并发了，原来靠「同时只有一个请求」挡住的几处立刻暴露：①`iptables` 流水线是「先 FLUSH 再逐条 ADD」，两条交叉会出现「A 刚清空、B 已加完」——ACL 链空着等于全员放行，得等 5 分钟定时重放才恢复；②审计上下文是全局 dict，下一个请求会把它覆盖，A 的操作记成 B 干的；③两个请求同时建号会抢同一个空闲地址，一个必然撞 UNIQUE；④同一秒内两次备份包同名互相覆盖；⑤升级/恢复在进行时，另一个请求还能继续改配置。对策：`core.SYS_LOCK` 把「写配置 + 重建 ccd + 下发规则」串成一段，`worker.py` 加 `flock` 跨进程互斥，生成的 `rules.sh` 自己也 `flock` 并把 iptables 全部改成 `-w 5`；审计上下文改成 thread-local；建号 / 台账导入 / 全量重建 / 备份恢复都在锁内；备份包同名自动加 `-2/-3`；长任务运行期间写接口返回 409 并提示「等它完成」

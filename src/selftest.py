@@ -1294,6 +1294,21 @@ def main():
         _bo_ok = None      # 装机目录没有 build/，这条只在仓库里适用
     check("打包脚本把源码包一起带上（否则目标机想编也没料）", _bo_ok)
 
+    # Windows 上打包：不执行包内 Linux Python，只搬运 + 按规则写 tar
+    _py_p = os.path.join(CODE, "..", "build", "build-offline.py")
+    if os.path.isfile(_py_p):
+        _pysrc = open(_py_p, encoding="utf-8").read()
+        check("build-offline.py 存在（Windows 上也能打出可安装的包）", True)
+        check("软链按 tar 符号链接写入（Windows 上建不了真软链也不会坏）",
+              "tarfile.SYMTYPE" in _pysrc)
+        check("权限由脚本按路径规则写（不依赖源文件属性，Windows 上没有可执行位）",
+              "def mode_for" in _pysrc and "0o700" in _pysrc)
+    else:
+        check("build-offline.py 存在（Windows 上也能打出可安装的包）", None)
+    # 这条跟目录布局无关：装机目录同样要能离线补依赖
+    check("依赖不预装：安装时从包内 vendor/wheels 离线补",
+          "vendor/wheels" in _inst and "--find-links" in _inst)
+
     # 闸门做在 worker 里，但用户得能在界面上把码填进来，否则这功能等于没有
     _html = open(os.path.join(CODE, "index.html"), encoding="utf-8").read()
     check("向导第 2 步与升级页都有安装码输入框",

@@ -1,0 +1,294 @@
+#!/usr/bin/env python3
+# 跨平台离线打包：Windows / Linux 都能跑，不需要执行包内的 Linux Python。
+#
+#   python build/build-offline.py              # 生成 dist/openvpn-web-x86_64/ 和 .tar.gz
+#   python build/build-offline.py --tar-only    # 只出 tar.gz，不落目录
+#   python build/build-offline.py --out D:/tmp # 换输出目录
+#
+# 与 build-offline.sh 的分工：
+#   .sh  在 Linux 构建机上跑，会用包内 Python 真的 pip 装一遍依赖（产物更"热"）
+#   .py  在任意系统上跑，只做搬运：不改内容、不执行二进制，依赖留给目标机安装时补
+#
+# 为什么搬运也要专门写脚本：Windows 上
+#   1) runtime/bin/python3 这类软链被拍成了 10 字节的文本存根；
+#   2) 没有可执行位（git 里 bin/openvpn 记的是 100644）；
+#   3) os.symlink 默认没权限。
+# 所以 tar 里的符号链接与权限都必须由本脚本显式写，不能依赖源文件属性。
+import argparse
+import hashlib
+import os
+import re
+import shutil
+import sys
+import tarfile
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+NAME = "openvpn-web-x86_64"
+STUB_MAX = 120          # 软链存根最多这么大（libpython 那个是 20 字节）
+MTIME = int(time.time())
+
+ok = 0
+warn = []
+
+
+def say(msg):
+    print(msg, flush=True)
+
+
+def link_target(path):
+    """把「被拍平的软链存根」认出来：很小的纯文本，且同目录下真有这个名字的文件"""
+    try:
+        if os.path.islink(path) or os.path.getsize(path) > STUB_MAX:
+            return None
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return None
+    try:
+        txt = raw.decode("ascii").strip()
+    except UnicodeDecodeError:
+        return None
+    if not txt or "\n" in txt or "\r" in txt or "/" in txt or "\\" in txt:
+        return None
+    if txt.startswith("#") or txt.startswith("-"):
+        return None
+    if not os.path.exists(os.path.join(os.path.dirname(path), txt)):
+        return None
+    return txt
+
+
+def copy_file(src, dst):
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.copyfile(src, dst)
+
+
+def copy_tree(src_root, dst_root):
+    """搬运一棵树；软链存根优先建成真软链，建不了就写回存根（tar 阶段会补成软链）"""
+    n = 0
+    for dirpath, dirnames, filenames in os.walk(src_root):
+        rel = os.path.relpath(dirpath, src_root)
+        out_dir = dst_root if rel == "." else os.path.join(dst_root, rel)
+        os.makedirs(out_dir, exist_ok=True)
+        for fn in filenames:
+            s = os.path.join(dirpath, fn)
+            d = os.path.join(out_dir, fn)
+            tgt = os.readlink(s) if os.path.islink(s) else link_target(s)
+            if tgt:
+                try:
+                    if os.path.exists(d):
+                        os.remove(d)
+                    os.symlink(tgt, d)
+                except (OSError, NotImplementedError):
+                    with open(d, "wb") as f:      # Windows 无建链权限
+                        f.write(tgt.encode())
+            else:
+                copy_file(s, d)
+            n += 1
+    return n
+
+
+def mode_for(arc):
+    """tar 内的权限：仓库里没有可执行位，只能按路径规则给"""
+    a = arc.split("/", 1)[1] if "/" in arc else arc
+    base = a.rsplit("/", 1)[-1]
+    if base == "install-code.sh":
+        return 0o700                    # 能造安装码，只给 root
+    if base.endswith(".sh"):
+        return 0o755
+    if a.startswith("bin/") or a.startswith("python/bin/"):
+        return 0o755
+    if ".so" in base:
+        return 0o755
+    return 0o644
+
+
+def add_entry(tf, src, arc):
+    tgt = os.readlink(src) if os.path.islink(src) else link_target(src)
+    if tgt:
+        ti = tarfile.TarInfo(arc)
+        ti.type = tarfile.SYMTYPE
+        ti.linkname = tgt
+        ti.mode = 0o777
+        ti.mtime = MTIME
+        tf.addfile(ti)
+        return "link"
+    ti = tarfile.TarInfo(arc)
+    ti.size = os.path.getsize(src)
+    ti.mode = mode_for(arc)
+    ti.mtime = MTIME
+    with open(src, "rb") as f:
+        tf.addfile(ti, f)
+    return "file"
+
+
+def pack(out_dir, tar_path):
+    counts = {"file": 0, "link": 0, "dir": 0}
+    with tarfile.open(tar_path, "w:gz", compresslevel=6) as tf:
+        for dirpath, dirnames, filenames in os.walk(out_dir):
+            dirnames.sort()
+            rel = os.path.relpath(dirpath, os.path.dirname(out_dir))
+            ti = tarfile.TarInfo(rel.replace(os.sep, "/"))
+            ti.type = tarfile.DIRTYPE
+            ti.mode = 0o755
+            ti.mtime = MTIME
+            tf.addfile(ti)
+            counts["dir"] += 1
+            for fn in sorted(filenames):
+                s = os.path.join(dirpath, fn)
+                arc = os.path.relpath(s, os.path.dirname(out_dir)).replace(os.sep, "/")
+                counts[add_entry(tf, s, arc)] += 1
+    return counts
+
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for b in iter(lambda: f.read(1 << 20), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
+def binary_info(path):
+    """从 ELF 里读 OpenVPN 版本与最低 GLIBC 符号，不执行它（在 Windows 上跑不了）"""
+    ver, glibc = "", ""
+    try:
+        with open(path, "rb") as f:
+            data = f.read(6 << 20)
+    except OSError:
+        return ver, glibc
+    # 二进制里第一处 "OpenVPN 2.x" 可能是版权串，认带架构的那一条才准
+    m = re.search(rb"OpenVPN (\d+\.\d+\.\d+) (x86_64|i[3-6]86)", data)
+    if not m:
+        m = re.search(rb"OpenVPN (\d+\.\d+\.\d+)", data)
+    if m:
+        ver = "OpenVPN " + m.group(1).decode()
+    syms = set(re.findall(rb"GLIBC_(\d+\.\d+(?:\.\d+)?)", data))
+    if syms:
+        def key(s):
+            return tuple(int(x) for x in s.decode().split("."))
+        glibc = max(syms, key=key).decode()
+    return ver, glibc
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out", default=os.path.join(ROOT, "dist"))
+    ap.add_argument("--tar-only", action="store_true")
+    a = ap.parse_args()
+
+    src, bin_, runtime, vendor, build = (os.path.join(ROOT, x) for x in
+                                        ("src", "bin", "runtime", "vendor", "build"))
+    out_dir = os.path.join(a.out, NAME)
+    tar_path = os.path.join(a.out, NAME + ".tar.gz")
+
+    for p, why in ((src, "运行时代码"), (bin_, "预编译二进制"), (runtime, "离线 Python"),
+                   (vendor, "静态库/源码/wheel")):
+        if not os.path.isdir(p):
+            say("错误: 缺少 %s（%s）" % (p, why))
+            return 1
+
+    say("=" * 60)
+    say(" 打包 -> %s" % tar_path)
+    say(" 模式: %s" % ("只出 tar.gz" if a.tar_only else "目录 + tar.gz"))
+    say("=" * 60)
+
+    # 1) 程序文件平铺到根（install.sh 要求与 app.py 同级）
+    if os.path.isdir(out_dir):
+        shutil.rmtree(out_dir)
+    os.makedirs(os.path.join(out_dir, "bin"), exist_ok=True)
+    n = 0
+    for fn in sorted(os.listdir(src)):
+        p = os.path.join(src, fn)
+        if os.path.isfile(p) and fn.rsplit(".", 1)[-1] in ("py", "html", "sh"):
+            copy_file(p, os.path.join(out_dir, fn))
+            n += 1
+    say("[1/5] 程序文件 %d 个" % n)
+
+    # 2) 二进制
+    for fn in sorted(os.listdir(bin_)):
+        p = os.path.join(bin_, fn)
+        if os.path.isfile(p):
+            copy_file(p, os.path.join(out_dir, "bin", fn))
+    say("[2/5] 二进制: %s" % ", ".join(sorted(os.listdir(os.path.join(out_dir, "bin")))))
+
+    # 3) 离线运行时（runtime/ -> python/，代码里写死 $DEST/python/bin/python3）
+    n = copy_tree(runtime, os.path.join(out_dir, "python"))
+    say("[3/5] 离线运行时 %d 个文件" % n)
+
+    # 4) 静态库 / 源码 / wheel
+    for sub in ("static", "src", "wheels"):
+        p = os.path.join(vendor, sub)
+        if os.path.isdir(p):
+            copy_tree(p, os.path.join(out_dir, "vendor", sub))
+    say("[4/5] vendor: %s" % ", ".join(sorted(os.listdir(os.path.join(out_dir, "vendor")))))
+
+    # 5) 目标机编译脚本 + 说明
+    for fn in ("build-static-openvpn.sh",):
+        p = os.path.join(build, fn)
+        if os.path.isfile(p):
+            copy_file(p, os.path.join(out_dir, fn))
+    rd = os.path.join(ROOT, "README.md")
+    if os.path.isfile(rd):
+        copy_file(rd, os.path.join(out_dir, "README.md"))
+    say("[5/5] 编译脚本与说明就位")
+
+    # version.txt（不执行二进制，从文件内容里读）
+    core_py = os.path.join(out_dir, "core.py")
+    with open(core_py, encoding="utf-8") as f:
+        mt = re.search(r'WEB_VERSION\s*=\s*"([^"]+)"', f.read())
+    web_ver = mt.group(1) if mt else "未知"
+    ovpn_ver, glibc = binary_info(os.path.join(out_dir, "bin", "openvpn"))
+    lines = [
+        "OpenVPN Web 一体化管理系统",
+        "Web: %s" % web_ver,
+        "构建时间: %s" % time.strftime("%Y-%m-%d %H:%M:%S %z"),
+        "构建机: %s / Python %s" % (
+            "Windows" if sys.platform == "win32" else sys.platform,
+            sys.version.split()[0]),
+    ]
+    if ovpn_ver:
+        lines.append("openvpn: %s" % ovpn_ver)
+    if glibc:
+        lines.append("最低 glibc 符号: GLIBC_%s" % glibc)
+        lines.append("兼容下限: CentOS 7 / glibc 2.17（向上兼容到当前任意发行版）")
+    lines.append("依赖: 包内 vendor/wheels，目标机安装时离线补装（本包未预装 site-packages）")
+    with open(os.path.join(out_dir, "version.txt"), "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(lines) + "\n")
+
+    # 自检：python3 必须还是软链形态，否则目标机解出来是 10 字节文本
+    stub_links = 0
+    for dirpath, _, filenames in os.walk(os.path.join(out_dir, "python")):
+        for fn in filenames:
+            p = os.path.join(dirpath, fn)
+            if os.path.islink(p) or link_target(p):
+                stub_links += 1
+    say("      软链 %d 个（tar 内会写成符号链接）" % stub_links)
+
+    # 打包
+    if a.tar_only:
+        counts = pack(out_dir, tar_path)
+        shutil.rmtree(out_dir)
+    else:
+        counts = pack(out_dir, tar_path)
+
+    size = os.path.getsize(tar_path)
+    say("")
+    say("=" * 60)
+    say(" 完成: %s" % tar_path)
+    say(" 体积: %.1f MB   文件 %d / 目录 %d / 软链 %d"
+        % (size / 1048576.0, counts["file"], counts["dir"], counts["link"]))
+    say(" sha256: %s" % sha256(tar_path))
+    say("")
+    say(" 用法: 拷到任意 x86_64 Linux -> tar xzf %s.tar.gz -> cd %s && ./install.sh"
+        % (NAME, NAME))
+    say("       （目标机不需要联网/装包/编译；缺依赖会从包内 wheel 补）")
+    say("=" * 60)
+    if warn:
+        for w in warn:
+            say(" 注意: " + w)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
