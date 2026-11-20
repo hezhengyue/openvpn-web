@@ -161,7 +161,7 @@ case "$(uname -m)" in
 esac
 
 # ---------------------------------------------------------------- 1) 落地文件
-step "[1/8] 释放程序文件"
+step "[1/9] 释放程序文件"
 if [ "$SRC" != "$DEST" ]; then
     mkdir -p "$DEST"
     # 不用 rsync（最小化系统可能没有）；data/ 与 .git 不覆盖，保证重装不丢库
@@ -193,11 +193,11 @@ prepare_runtime() {
 }
 [ -d "$DEST/python" ] && prepare_runtime "$DEST/python"
 chmod +x "$DEST"/*.sh "$DEST"/*.py 2>/dev/null || true
-[ -f "$DEST/bin/openvpn" ] && chmod 755 "$DEST/bin/openvpn"
-[ -f "$DEST/bin/openssl" ] && chmod 755 "$DEST/bin/openssl"
+[ -f "$DEST/bin/openvpn" ] && chmod 755 "$DEST/bin/openvpn" || true
+[ -f "$DEST/bin/openssl" ] && chmod 755 "$DEST/bin/openssl" || true
 
 # ---------------------------------------------------------------- 2) 解释器
-step "[2/8] 选择 Python 运行时"
+step "[2/9] 选择 Python 运行时"
 if [ -x "$DEST/python/bin/python3" ] && "$DEST/python/bin/python3" -V >/dev/null 2>&1; then
     PY="$DEST/python/bin/python3"
     say "      使用包内离线运行时：$("$PY" -V 2>&1)"
@@ -225,7 +225,7 @@ if ! "$PY" -c 'import waitress' >/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------- 3) 用户与权限
-step "[3/8] 创建运行账号与目录权限"
+step "[3/9] 创建运行账号与目录权限"
 if ! id "$USER" >/dev/null 2>&1; then
     useradd -r -s /sbin/nologin -d "$DEST" "$USER" 2>/dev/null || \
     useradd -r -s /usr/sbin/nologin -d "$DEST" "$USER"
@@ -247,7 +247,7 @@ fi
 install -d -m 700 -o root -g root "$ETC" 2>/dev/null || { mkdir -p "$ETC" && chmod 700 "$ETC"; }
 
 # ---------------------------------------------------------------- 4) 提权白名单
-step "[4/8] 配置提权白名单（Web 只能执行 worker.py 一个命令）"
+step "[4/9] 配置提权白名单（Web 只能执行 worker.py 一个命令）"
 cat > "$SUDOERS" <<EOF
 Defaults:$USER env_keep += "OVPN_WEB_ROOT OVPN_WEB_MOCK"
 # 末尾必须是 " *"：sudoers 里不带通配符的规则要求参数完全一致，
@@ -261,7 +261,7 @@ if command -v visudo >/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------- 5) systemd
-step "[5/8] 写 systemd unit（兼容 CentOS 7 的 systemd 219）"
+step "[5/9] 写 systemd unit（兼容 CentOS 7 的 systemd 219）"
 cat > "$UNIT" <<EOF
 [Unit]
 Description=OpenVPN Web 一体化管理系统
@@ -287,7 +287,7 @@ WantedBy=multi-user.target
 EOF
 
 # ---------------------------------------------------------------- 6) 初始密码
-step "[6/8] 初始管理密码"
+step "[6/9] 初始管理密码"
 NEWPW=0
 if [ ! -s "$DEST/data/admin_password.txt" ]; then
     # 新装统一用默认账户 admin / 默认密码 admin；首次登录由 Web 强制改密，
@@ -300,9 +300,9 @@ chown "$USER:$USER" "$DEST/data/admin_password.txt"
 chmod 600 "$DEST/data/admin_password.txt"
 # 台账存的是明文密码，库和备份目录只给服务用户自己
 for f in "$DEST"/data/openvpn-web.db "$DEST"/data/openvpn-web.db-wal "$DEST"/data/openvpn-web.db-shm "$DEST"/data/web.secret; do
-    [ -e "$f" ] && chown "$USER:$USER" "$f" && chmod 600 "$f"
+    [ -e "$f" ] && { chown "$USER:$USER" "$f" && chmod 600 "$f"; } || true
 done
-[ -d "$DEST/data/backups" ] && chown -R "$USER:$USER" "$DEST/data/backups" && chmod 700 "$DEST/data/backups"
+[ -d "$DEST/data/backups" ] && { chown -R "$USER:$USER" "$DEST/data/backups" && chmod 700 "$DEST/data/backups"; } || true
 # data 目录里有账号名（ccd/）和明文台账，别让同机其他用户随便列
 chmod 750 "$DEST/data" 2>/dev/null || true
 
@@ -312,23 +312,39 @@ fi
 systemctl daemon-reload
 systemctl enable openvpn-web >/dev/null 2>&1 || true
 
-# ---------------------------------------------------------------- 7) 配置服务端
-step "[7/8] 配置 OpenVPN 服务端（CA / 配置 / ACL / NAT / 启动）"
-if [ ! -x "$DEST/bin/openvpn" ]; then
-    say "错误: 缺少静态二进制 $DEST/bin/openvpn"
-    say "      构建机上跑 ./build-offline.sh，或从「版本与更新」页上传编译好的静态二进制。"
-    exit 1
+# ---------------------------------------------------------------- 7) 二进制
+# 装完必须 openvpn + web 都在跑。缺二进制不能「装到一半退出、让用户去网页向导上传」——
+# 那时候 Web 还没起，人只能干瞪眼。所以这里自己解决：包内 → 就地编译。
+step "[7/9] 准备 OpenVPN 二进制（包内 → 就地编译）"
+BIN_OK=0
+if [ -x "$DEST/prepare-openvpn.sh" ]; then
+    if bash "$DEST/prepare-openvpn.sh" "$DEST"; then BIN_OK=1; fi
+elif [ -x "$DEST/bin/openvpn" ] && "$DEST/bin/openvpn" --version >/dev/null 2>&1; then
+    say "      已就位：$("$DEST/bin/openvpn" --version 2>/dev/null | head -1)"
+    BIN_OK=1
+else
+    say "      缺少 prepare-openvpn.sh，且 bin/openvpn 不可用"
 fi
-export OVPN_WEB_ROOT="$DEST" OVPN_WEB_PY="$PY" OVPN_WEB_PORT="$PORT" OVPN_WEB_OWNER="$USER"
-SETUP_OUT="$("$PY" "$DEST/setup.py" "${SETUP_ARGS[@]+"${SETUP_ARGS[@]}"}")"
-printf '%s\n' "$SETUP_OUT"
-SETUP_JSON="$(printf '%s\n' "$SETUP_OUT" | tail -1)"
-vpn_field() { printf '%s' "$SETUP_JSON" | "$PY" -c "import json,sys;d=json.load(sys.stdin);print(d.get('$1',''))" 2>/dev/null || true; }
-VPN_PORT="$(vpn_field port)"; VPN_PORT="${VPN_PORT:-1194}"
-VPN_ADDR="$(vpn_field public_addr)"
+
+# ---------------------------------------------------------------- 8) 配置服务端
+step "[8/9] 配置 OpenVPN 服务端（CA / 配置 / ACL / NAT / 启动）"
+VPN_OK=0
+if [ "$BIN_OK" = 1 ]; then
+    export OVPN_WEB_ROOT="$DEST" OVPN_WEB_PY="$PY" OVPN_WEB_PORT="$PORT" OVPN_WEB_OWNER="$USER"
+    if SETUP_OUT="$("$PY" "$DEST/setup.py" "${SETUP_ARGS[@]+"${SETUP_ARGS[@]}"}")"; then
+        printf '%s\n' "$SETUP_OUT"
+        VPN_OK=1
+    else
+        # 配置写了一半也要继续起 Web：人能登录看日志、重试，比停在这里强
+        printf '%s\n' "$SETUP_OUT" | tail -20
+        say "      错误: 服务端配置失败（上面是最后 20 行，完整日志在 $DEST/data/openvpn.log）"
+    fi
+else
+    say "      跳过：没有可用的 openvpn 二进制（Web 仍会启动，登录后可在「升级」里补）"
+fi
 
 # ---------------------------------------------------------------- 8) 起 Web
-step "[8/8] 启动 Web 服务"
+step "[9/9] 启动 Web 服务"
 systemctl restart openvpn-web
 ok=0
 for _ in $(seq 1 20); do
@@ -363,7 +379,7 @@ PYEOF
 )"
 [ -n "$IP" ] || IP="$(ip -4 addr show scope global 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)"
 
-VERSION="$("$DEST/bin/openvpn" --version 2>/dev/null | head -1 | awk '{print $2}')"
+VERSION="$("$DEST/bin/openvpn" --version 2>/dev/null | head -1 | awk '{print $2}' || true)"
 
 # 首装时向导第 2 步就要上传二进制，当场预授权一个 2 小时的安装码印在下面，
 # 省得装完还要另开一个终端。之后每次替换二进制 / 编译源码 / 更新 Web，
@@ -385,16 +401,29 @@ except Exception:
 PYEOF
 )"
 
+VPID="$("$PY" - "$DEST" <<'PYEOF' 2>/dev/null || true
+import os, sys
+sys.path.insert(0, sys.argv[1])
+import core
+print("yes" if core._vpn_alive() else "no")
+PYEOF
+)"
+if [ "$VPID" = "yes" ]; then
+    VPN_STATE="运行中（${VERSION:-未知版本}）"
+else
+    VPN_STATE="未运行（${VERSION:-无二进制}）← 见上面的错误"
+fi
+
 cat <<EOF
 
 ------------------------------------------------------------
- 安装完成
+ 安装完成$([ "$VPN_OK" = 1 ] && [ "$VPID" = "yes" ] || echo "（但有项目没起来，见下）")
 ------------------------------------------------------------
  管理后台:   http://${IP:-<服务器IP>}:$PORT
  管理账户:   admin
  管理密码:   $( [ "$NEWPW" = 1 ] && echo "admin（首次登录强制修改）" || echo "（沿用已有 data/admin_password.txt）" )
- OpenVPN:    ${VERSION:-未知版本}  监听 ${CLIENT_IP:-$IP}:1194
- 安装码:     ${FIRSTCODE:-（生成失败，请执行 $DEST/install-code.sh）}  ← 向导上传二进制时填，2 小时内有效
+ OpenVPN:    ${VPN_STATE}  监听 ${CLIENT_IP:-$IP}:1194
+ 安装码:     ${FIRSTCODE:-（生成失败，请执行 $DEST/install-code.sh）}  ← 「升级」页换二进制/源码时填，2 小时内有效
  本机编译:   ${BUILD_ENV}
  客户端配置: $DEST/data/company.ovpn   （全员共用，含 CA 与 tls-crypt）
  服务端配置: $DEST/data/server.conf
@@ -412,4 +441,12 @@ if [ "$NEWPW" = 1 ]; then
 fi
 if [ "$SRC" != "$DEST" ] && [ -d "$SRC" ]; then
     say "提示: 安装源目录 $SRC 已不再需要，可删掉腾空间（rm -rf $SRC）"
+fi
+
+# 装完必须两样都在跑。少一样就以非 0 退出——别让自动化以为装好了。
+if [ "$VPN_OK" != 1 ] || [ "$VPID" != "yes" ]; then
+    say ""
+    say "警告: 服务端没跑起来（OpenVPN: $VPN_STATE）。Web 已经起来了，可以登录看日志；"
+    say "      补齐 openvpn 二进制后重跑 $DEST/setup.py，或直接重跑本脚本。"
+    exit 3
 fi

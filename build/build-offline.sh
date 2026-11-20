@@ -2,7 +2,7 @@
 # 生成「复制过去就能用」的完整离线目录（在构建机执行一次）。
 #
 #   ./build/build-offline.sh                    # 运行时 + 静态 openvpn（推荐在 manylinux2014 容器里跑）
-#   ./build/build-offline.sh --skip-openvpn     # 只打运行时，openvpn 之后在 Web 向导里上传
+#   ./build/build-offline.sh --skip-openvpn     # 不预编二进制：目标机首次安装时就地编译（要 gcc/make/perl）
 #   VENDOR_ONLY=1 ./build/build-offline.sh      # 严格离线：不用网络，缺件直接失败
 #
 # 依赖「本地优先」：三样东西都先看本地，缺了才联网，联网下到的会回填 vendor/，下次不用再下。
@@ -59,6 +59,12 @@ chmod 755 "$OUT"/bin/* 2>/dev/null || true
 if [ -d "$VENDOR/static" ]; then
     mkdir -p "$OUT/vendor/static"
     cp -f "$VENDOR"/static/*.tar.gz "$OUT/vendor/static/" 2>/dev/null || true
+fi
+# 源码包（约 18MB）一起带上：万一包里没二进制，目标机的 install.sh 能就地编译，
+# 而不是装到一半停下、让人去还没起来的网页里上传。离线安装靠的就是这一份。
+if [ -d "$VENDOR/src" ]; then
+    mkdir -p "$OUT/vendor/src"
+    cp -f "$VENDOR"/src/*.tar.gz "$OUT/vendor/src/" 2>/dev/null || true
 fi
 # wheel 一起带上（不到 1MB）：装完后如果 waitress 缺了，install.sh 能就地补装，
 # 不用把包搬回构建机重打一遍
@@ -158,7 +164,7 @@ if [ "$SKIP_OVPN" -eq 0 ]; then
     echo "[3/3] 编译静态 OpenVPN（第三方库全静态，只依赖 glibc）…"
     VENDOR="$VENDOR" VENDOR_ONLY="$VENDOR_ONLY" bash "$BUILD/build-static-openvpn.sh" "$OUT/bin/openvpn"
 else
-    echo "[3/3] 跳过 openvpn 编译（可在 Web 安装向导第 2 步上传）"
+    echo "[3/3] 跳过 openvpn 编译：目标机装的时候会就地编译（需要 gcc/make/perl/pkg-config）"
 fi
 
 # 4) 打包
@@ -179,5 +185,10 @@ echo
 echo "============================================================"
 echo " 完成: $DIST/$NAME.tar.gz"
 echo " 用法: 拷到机房任意 x86_64 Linux → tar xzf → ./install.sh"
-echo "       （不跑 apt/yum、不跑 pip、不编译）"
+if [ -x "$OUT/bin/openvpn" ]; then
+    echo "       （不跑 apt/yum、不跑 pip、不编译；装完 openvpn + web 都在跑）"
+else
+    echo " 注意: 这个包没带 openvpn 二进制，install.sh 会在目标机上就地编译，"
+    echo "       目标机需要 gcc / make / perl / pkg-config；编不出来安装会明确失败。"
+fi
 echo "============================================================"

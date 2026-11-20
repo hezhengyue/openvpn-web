@@ -66,10 +66,11 @@ openvpn-web/
 │   ├── setup.py              一键配置器（签 CA / 写配置 / 下发规则 / 起 openvpn / 建账号）
 │   ├── auth-verify.py        OpenVPN 认证脚本（fail-closed、失败锁定）
 │   ├── index.html            单文件前端，原生 HTML/CSS/JS，不依赖 CDN
-│   ├── install.sh            一键安装：落文件 + 权限 + sudoers + systemd + 调 setup.py + 起 Web
+│   ├── install.sh            一键安装：落文件 + 权限 + sudoers + systemd + 备二进制 + 调 setup.py + 起 Web
+│   ├── prepare-openvpn.sh    确保 openvpn 二进制就位（包内 → 就地编译），装完不许半成品
 │   ├── install-code.sh       生成「装外部代码」用的一次性安装码（只能 root 执行，700）
 │   ├── reset-admin.sh        忘记管理凭据时用 root 一键重置账户名 + 密码并重启服务
-│   └── selftest.py           全链路自检（MOCK 模式，376 项）
+│   └── selftest.py           全链路自检（MOCK 模式，386 项）
 ├── bin/                      预编译静态二进制
 │   ├── openvpn               OpenVPN 2.6.23，第三方库全静态，只依赖 glibc（最低 GLIBC_2.17）
 │   └── openssl               静态 openssl 3.0.16 命令行（签证书用，最小化系统没有 openssl 也能装）
@@ -165,7 +166,7 @@ chroot /opt/c7 /bin/bash -lc 'VENDOR_ONLY=1 PREFIX_OUT=/out/prefix.tar.gz \
 
 ```bash
 ./build/build-offline.sh              # 本地优先；缺什么才去下什么
-./build/build-offline.sh --skip-openvpn   # 只打 Web 运行时，openvpn 之后在向导第 2 步上传
+./build/build-offline.sh --skip-openvpn   # 不预编二进制：目标机装的时候就地编译（要 gcc/make/perl）
 VENDOR_ONLY=1 ./build/build-offline.sh     # 严格离线：缺件直接失败，一个字节都不下载
 ./vendor/fetch.sh                     # 在有网机器上补齐 vendor/（幂等）+ 重算 SHA256SUMS
 ```
@@ -188,7 +189,9 @@ docker run --rm -v "$PWD/dist:/out" ovpn-build cp -r /build/dist/openvpn-web-x86
 
 **上游链接是会坏的**（2026-11-18 实测：OpenVPN 官方 `swupdate.openvpn.org` 连不上，只能走 GitHub tag 归档，而它不带 `configure`、要先 `autoreconf`）。`vendor/` 就是为这件事存在的——见 `vendor/README.md`。镜像打包后放共享盘，用 `VENDOR=/data/vendor ./build/build-offline.sh` 还能让多个项目共用一份。
 
-**只想先试 Web**：`./build/build-offline.sh --skip-openvpn`，之后在浏览器「安装向导」第 2 步直接上传静态二进制即可，不用碰命令行（那里要填一个安装码，安装完成时打印过；过期了就在机器上 `sudo /opt/openvpn-web/install-code.sh` 再要一个）。
+**`--skip-openvpn` 打出来的包**不带二进制，安装时会在目标机上就地编译（源码和依赖都在 `vendor/` 里，不联网）。
+目标机得先有 `gcc / make / pkg-config`（没有预编译静态库时还要 `perl`）；编不出来安装会明确失败，不会留下「Web 起来了但 VPN 没起」的半成品。
+常规交付不用加这个参数——仓库自带 `bin/openvpn`，装完就是完整的。
 
 > 说明：交付包里**已经含编好的静态 openvpn、静态 openssl 和装好依赖的离线 python**，
 > 所以「构建」只是可选项：想换版本、换 ABI 时才需要跑脚本。
@@ -198,7 +201,7 @@ docker run --rm -v "$PWD/dist:/out" ovpn-build cp -r /build/dist/openvpn-web-x86
 ## 5. 部署：一条命令装完（机房目标机，root 一次）
 
 包里该带的全带了：离线 python（glibc 2.17）、静态 openvpn、静态 openssl、CA 生成所需的一切。
-目标机**不联网、不装包、不编译**。
+目标机**不联网、不装包、不编译**，跑完 `openvpn` 和 `web` 两个都在跑。
 
 ```bash
 tar xzf openvpn-web-x86_64.tar.gz -C /opt/
@@ -215,7 +218,7 @@ cd /opt/openvpn-web-x86_64 && ./install.sh
 ./install.sh -- --nat-mode no-nat              # 无 NAT 溯源模式（需网关回程路由）
 ```
 
-`install.sh` 做 8 件事（全程幂等，重跑不会签第二套 CA）：
+`install.sh` 做 9 件事（全程幂等，重跑不会签第二套 CA）：
 
 | 步骤 | 内容 |
 |---|---|
@@ -225,8 +228,9 @@ cd /opt/openvpn-web-x86_64 && ./install.sh
 | 4 | sudoers 白名单（只放行 `python3 worker.py *`）+ 建 `/etc/openvpn-web`（700 root） |
 | 5 | systemd unit（保守语法，兼容 CentOS 7 的 systemd 219） |
 | 6 | 初始管理账户 / 密码（默认 `admin` / `admin`，600 权限）；**首次登录强制改密** |
-| 7 | 调 `setup.py`：签 CA + 服务端证书 + tls-crypt → `server.conf` / `ccd` / `company.ovpn` / ACL 脚本 → 开 IPv4 转发 → 下发 NAT+ACL → mask 发行版 unit → 装规则重放 timer → 启动 OpenVPN →（可选）建账号 → 开 firewalld/ufw 端口 |
-| 8 | 启动 Web 并自检 `GET /api/session` |
+| 7 | **备好 openvpn 二进制**（`prepare-openvpn.sh`）：包内有就用；没有就用包内源码当场编（`VENDOR_ONLY=1`，不联网）；都失败就明确报错，绝不「装到一半走人」 |
+| 8 | 调 `setup.py`：签 CA + 服务端证书 + tls-crypt → `server.conf` / `ccd` / `company.ovpn` / ACL 脚本 → 开 IPv4 转发 → 下发 NAT+ACL → mask 发行版 unit → 装规则重放 timer → 启动 OpenVPN →（可选）建账号 → 开 firewalld/ufw 端口 |
+| 9 | 启动 Web 并自检 `GET /api/session`；OpenVPN 没起来则以 `exit 3` 结束（Web 仍然在跑，方便登录排障） |
 
 浏览器打开 `http://<服务器IP>:8800`，用**账户 + 密码**登录：新装默认账户 `admin`、默认密码 `admin`（也写在 `data/admin_password.txt`，600）。**登录页不预填账户、不显示任何默认口令提示**，避免被人一眼看到就登进去；凭据从安装完成后的终端输出或凭据文件里取。
 **第一次登录会进入独立的强制改密页**，不设新密码无法访问后台任何功能；改完自动进入系统。老机器沿用原有密码，不会被强行重置。客户端配置是 `data/company.ovpn`（全员共用，含 CA 与 tls-crypt）。
@@ -551,7 +555,7 @@ Web 程序自身不提供「上传更新包」入口（日常更新就是覆盖�
 
 ## 11. 验证情况与限制
 
-- `python3 src/selftest.py`（或装机后在安装目录 `python3 selftest.py`）：**387 项全通过**（Windows 上少 7 条 POSIX 专属用例，380 项）——配置渲染、双网络模式（默认 NAT / 无 NAT 溯源）与切换不改指纹、自建 NAT 链、IPv4 转发前提、证书签发、账号校验（含中文账号 + 中文 ccd + 改名时授权/用户组跟着搬、**明文密码入库与改密同步**）、动态地址池开关与地址冲突、**安装码闸门（一码一次 / 过期作废 / 错 5 次作废 / 脚本生成的码能直接过）**、认证脚本（放行/拒绝/锁定/fail-closed/**有效期到期拒绝**）、Excel 全量同步（**导出带明文密码、密码列留空整批拒绝、有效期落库**）、**账号有效期到期自动停用并清 ccd**、ACL 默认拒绝与改 IP 不残留、客户端互访授权与过期过滤、跨大版本闸门、安装向导长任务、全部 API（含首页禁用缓存、网络模式切换、P2P 增删、下一个可用 IP、容量、白名单保存与「排除自己」拒绝、独立管理账户登录与免密重置、改密码双次确认、**默认 admin/admin 首登强改：未改密拦接口 / 改密免填旧密码 / 改完默认口令失效 / 凭据文件不留明文**、审计带 IP、按钮式保存/恢复默认/重签 CA）、资产条目编辑（改 IP/协议/端口、重复拒绝）、二进制更新、备份打点与回滚、备份生成/下载/上传/按包名恢复/删除与安全校验
+- `python3 src/selftest.py`（或装机后在安装目录 `python3 selftest.py`）：**393 项全通过**（Windows 上少 7 条 POSIX 专属用例，386 项）——配置渲染、双网络模式（默认 NAT / 无 NAT 溯源）与切换不改指纹、自建 NAT 链、IPv4 转发前提、证书签发、账号校验（含中文账号 + 中文 ccd + 改名时授权/用户组跟着搬、**明文密码入库与改密同步**）、动态地址池开关与地址冲突、**安装码闸门（一码一次 / 过期作废 / 错 5 次作废 / 脚本生成的码能直接过）**、认证脚本（放行/拒绝/锁定/fail-closed/**有效期到期拒绝**）、Excel 全量同步（**导出带明文密码、密码列留空整批拒绝、有效期落库**）、**账号有效期到期自动停用并清 ccd**、ACL 默认拒绝与改 IP 不残留、客户端互访授权与过期过滤、跨大版本闸门、安装向导长任务、全部 API（含首页禁用缓存、网络模式切换、P2P 增删、下一个可用 IP、容量、白名单保存与「排除自己」拒绝、独立管理账户登录与免密重置、改密码双次确认、**默认 admin/admin 首登强改：未改密拦接口 / 改密免填旧密码 / 改完默认口令失效 / 凭据文件不留明文**、审计带 IP、按钮式保存/恢复默认/重签 CA）、资产条目编辑（改 IP/协议/端口、重复拒绝）、二进制更新、备份打点与回滚、备份生成/下载/上传/按包名恢复/删除与安全校验
 - 前端在 jsdom 里逐页真跑（`tests/smoke.js`），另有 `tests/shots.js` 用无头 Edge 截图肉眼核对版式
 - **真实环境实测（2026-11-18，Anolis 8.10 / OpenVPN 2.6.23 / TCP）**：建中文账号 `张三` → 服务端生成 `ccd/张三` → 客户端用中文账号认证通过 → `PUSH_REPLY ... ifconfig 10.8.0.2` 拿到台账固定 IP；白名单按来源判定：隧道内 IP 访问 `/api/state` = 403、`/self` = 200，白名单内网段可进后台，公网 IP 全 403
 
@@ -570,6 +574,7 @@ Web 程序自身不提供「上传更新包」入口（日常更新就是覆盖�
 
 ## 12. 版本信息（截至 2026-11-20）
 
+- Web **1.3.24**：**装一次，openvpn 和 web 都得在跑**。原来 `install.sh` 在缺 `bin/openvpn` 时直接 `exit 1`——Web 还没起来，人只能对着终端干瞪眼，文档里「`--skip-openvpn` 之后去向导第 2 步上传」这条路其实走不通。现在第 7 步先过 `prepare-openvpn.sh`：包内有二进制就用；没有就用 `vendor/src` 的源码**当场离线编译**（`VENDOR_ONLY=1`，有预编译静态库时只编 openvpn 本体）；实在没有编译环境就明确报错，并说清三条补救路径。二进制齐了才调 `setup.py`；它失败也照样把 Web 起起来（人能登录看日志），最后以 `exit 3` 结束——**不拿非 0 退出码糊弄自动化**。打包脚本同步把 `vendor/src`（18MB 源码）一起带进包，否则「就地编译」是句空话。
 - Web **1.3.23**：给「上传即 root」加一道**人闸**。原来三个动作会把外部代码装进系统——替换 openvpn 二进制、本机编译源码、更新 Web 自身——装上去下一次启动就是 root 身份，而 Web 侧的 `check_binary` 只认 `--version` 输出，编个版本号就能过，等于**能登录面板的人口令一泄露就等于 root**。现在这三类动作执行前，worker 要验一个**一次性安装码**：只能在本机 `sudo /opt/openvpn-web/install-code.sh` 生成（8 位、默认 15 分钟、一码一次、填错 5 次作废、令牌 600 root:root 存在 `/etc/openvpn-web/`），Web 进程既生成不了也读不到。装完系统会把首装用的安装码（2 小时）直接印在「安装完成」里，向导第 2 步照填即可。配套：`bin/` 整体改为 `root:root 755`，Web 用户不再能写「下次会以 root 执行」的程序，向导上传二进制也改走 worker（顺带修掉直接 `copy2` 覆盖运行中二进制的 `ETXTBSY`、且旧二进制没快照的问题）。**恢复备份不再覆盖 `bin/openvpn`**（否则「上传一个包再点恢复」就能绕开闸门，只有命令行 `app.py --restore-full` 还保留整包恢复）；升级失败的回滚改由 worker 的 `rollback-binary` 完成——只认 `replace-binary` 当时钉下的 sha256、30 分钟内有效，Web 往 `data/snapshots` 里塞别的 ELF 也顶不上来，所以这个动作不需要安装码也开不出新口子
 - Web **1.3.22**：多线程下的**一致性收口**。换 waitress 后请求真并发了，原来靠「同时只有一个请求」挡住的几处立刻暴露：①`iptables` 流水线是「先 FLUSH 再逐条 ADD」，两条交叉会出现「A 刚清空、B 已加完」——ACL 链空着等于全员放行，得等 5 分钟定时重放才恢复；②审计上下文是全局 dict，下一个请求会把它覆盖，A 的操作记成 B 干的；③两个请求同时建号会抢同一个空闲地址，一个必然撞 UNIQUE；④同一秒内两次备份包同名互相覆盖；⑤升级/恢复在进行时，另一个请求还能继续改配置。对策：`core.SYS_LOCK` 把「写配置 + 重建 ccd + 下发规则」串成一段，`worker.py` 加 `flock` 跨进程互斥，生成的 `rules.sh` 自己也 `flock` 并把 iptables 全部改成 `-w 5`；审计上下文改成 thread-local；建号 / 台账导入 / 全量重建 / 备份恢复都在锁内；备份包同名自动加 `-2/-3`；长任务运行期间写接口返回 409 并提示「等它完成」
 - Web **1.3.21**：HTTP 服务器换成 **waitress**（单进程 8 线程，纯 Python、离线 wheel 随包安装）——以前是 Werkzeug 开发服务器且 `threaded=False`，一个慢请求（探测公网 IP、读大日志、导出 Excel）会把所有人的页面一起卡住；现在并发请求各占一个线程，SQLite 仍是单写入者，靠 WAL + `busy_timeout` 排队。为此补了三处并发安全：登录失败计数表加锁、公网 IP 探测「只让一个人真去打外网，其余等结果」、长任务 tid 改为拿到写锁后再绑定（否则后来启动的任务会把正在跑的任务 id 顶掉，结果写进别人的任务日志）。`OVPN_WEB_THREADS` 调线程数，`OVPN_WEB_SERVER=werkzeug` 一键退回；版本页显示当前实际服务器

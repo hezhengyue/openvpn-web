@@ -1262,9 +1262,25 @@ def main():
     wk.action_rollback_binary({})
     check("指纹对得上才真的回滚", open(core.BIN, "rb").read() == b"EVIL-BINARY")
 
+    _inst = open(os.path.join(CODE, "install.sh"), encoding="utf-8").read()
     check("install.sh 把 bin/ 收给 root（Web 用户不能再写要被 root 执行的程序）",
-          'chown -R root:root "$DEST/bin"' in open(os.path.join(CODE, "install.sh"),
-                                                   encoding="utf-8").read())
+          'chown -R root:root "$DEST/bin"' in _inst)
+    # 装完必须 openvpn + web 都在跑：缺二进制不许「装到一半退出、让用户去还没起的网页上传」
+    check("install.sh 装了二进制准备步骤（缺件自己补，不半途而废）",
+          'prepare-openvpn.sh' in _inst)
+    check("install.sh 不再因为缺 bin/openvpn 直接 exit 1",
+          '缺少静态二进制' not in _inst)
+    check("服务端没起来时 install.sh 以非 0 退出（别让自动化以为装好了）",
+          "exit 3" in _inst)
+    _prep = os.path.join(CODE, "prepare-openvpn.sh")
+    check("prepare-openvpn.sh 随包分发", os.path.isfile(_prep))
+    _prepsrc = open(_prep, encoding="utf-8").read() if os.path.isfile(_prep) else ""
+    check("缺二进制时就地编译（源码与依赖都在包内，不联网）",
+          "VENDOR_ONLY=1" in _prepsrc and "OPENVPN_SRC" in _prepsrc)
+    _bo = open(os.path.join(CODE, "..", "build", "build-offline.sh"),
+               encoding="utf-8").read()
+    check("打包脚本把源码包一起带上（否则目标机想编也没料）",
+          'vendor/src' in _bo and '"$VENDOR"/src/*.tar.gz' in _bo)
 
     # 闸门做在 worker 里，但用户得能在界面上把码填进来，否则这功能等于没有
     _html = open(os.path.join(CODE, "index.html"), encoding="utf-8").read()
