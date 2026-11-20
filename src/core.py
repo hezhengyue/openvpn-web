@@ -55,7 +55,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "1.3.27"
+WEB_VERSION = "1.3.28"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -739,6 +739,12 @@ def validate_cfg(c):
         errs.append("网络模式只能是 nat / no-nat")
     if c.get("compress", "off") not in ("off", "lz4-v2", "lzo"):
         errs.append("压缩方式只能是 off / lz4-v2 / lzo")
+    # tls_min 会被原样写进以 root 运行的 server.conf（tls-version-min 行）：
+    # 不设白名单的话，一个带换行的字符串就能往配置里注入任意 OpenVPN 指令
+    # （比如 up/plugin 钩子），等于 root 命令执行。前端只有 1.2/1.3 两个选项，
+    # 这里是给「绕过前端直接打 API」和「恢复被篡改的备份包」兜底。
+    if c.get("tls_min") not in ("1.2", "1.3"):
+        errs.append("最低 TLS 版本只能是 1.2 / 1.3")
     if not (c.get("data_ciphers") or "").strip():
         errs.append("数据加密套件不能为空")
     else:
@@ -771,6 +777,31 @@ def validate_cfg(c):
         except Exception:
             errs.append("动态地址池的起止地址不合法")
     return errs
+
+
+def validate_meta_rows(rows):
+    """复核一组 (k, v) meta 行（v 为 JSON 字符串，来自备份包里的数据库）。
+
+    恢复备份会整库覆盖 meta，随后这些值会被渲染成 root 执行的 server.conf /
+    rules.sh——被篡改过的备份包（哪怕重算了 manifest 哈希）不能借「恢复」
+    注入指令。配置不合法就整包拒绝，而不是恢复完再炸。
+    """
+    raw = {}
+    for k, v in rows:
+        raw[k] = v
+    out = {}
+    for k in DEFAULT_CFG:
+        if k not in raw or raw[k] is None:
+            out[k] = copy.deepcopy(DEFAULT_CFG[k])
+            continue
+        try:
+            out[k] = json.loads(raw[k])
+        except Exception:
+            out[k] = raw[k]
+    errs = validate_cfg(out)
+    if errs:
+        raise ValueError("备份包内的服务端配置未通过校验，已拒绝恢复：%s" % "；".join(errs))
+    return out
 
 
 # --------------------------------------------------------------------------- 日志 / 审计
@@ -2031,7 +2062,40 @@ def delete_peer_grant(pid, actor="web"):
     log_audit(actor, "peer.delete", "id=%s" % pid)
 
 
+def _iptables_safe_addr(v, what):
+    """rules.sh 渲染的最后一道防线：进 iptables 命令行的地址必须是纯 IPv4/网段。
+
+    这些值都来自数据库（账号固定 IP、资产网段），正常写入路径上各自校验过；
+    但「恢复被篡改的备份包」「手工改库」能绕过写入校验直接改 DB——
+    渲染时再校验一次，脏值宁可让 apply-rules 失败，也不能生成被注入的脚本。
+    """
+    s = str(v or "").strip()
+    try:
+        ipaddress.IPv4Address(s)
+        return s
+    except Exception:
+        pass
+    try:
+        ipaddress.IPv4Network(s, strict=False)
+        return s
+    except Exception:
+        raise ValueError("%s 中的 %r 不是合法 IPv4 地址/网段，拒绝生成 rules.sh（疑似注入）"
+                         % (what, v))
+
+
+def _iptables_safe_ports(ports):
+    for p in (ports or "").split(","):
+        p = p.strip()
+        if p and not re.match(r"^\d{1,5}(-\d{1,5})?$", p):
+            raise ValueError("端口 %r 不合法，拒绝生成 rules.sh（疑似注入）" % p)
+
+
 def _render_accept(L, src, dst, proto, ports):
+    src = _iptables_safe_addr(src, "源地址")
+    dst = _iptables_safe_addr(dst, "目标网段")
+    if proto not in ("any", "icmp", "tcp", "udp"):
+        raise ValueError("协议 %r 不合法，拒绝生成 rules.sh（疑似注入）" % proto)
+    _iptables_safe_ports(ports)
     plist = [p.strip() for p in (ports or "").split(",") if p.strip()]
     if proto == "any":
         if not plist:
@@ -2190,6 +2254,11 @@ def _proto_name(c, role):
 
 
 def render_server_conf(c):
+    # 深度防御：这份文件会被 root 的 openvpn 读取，tls_version_min 是少数
+    # 「原样 %s 进配置」的用户可控字段。validate_cfg 在正常写入路径上拦过了，
+    # 但备份恢复 / 手工改库都可能把脏值带进来——渲染时再拦一次，宁可失败也不生成。
+    if c.get("tls_min") not in ("1.2", "1.3"):
+        raise ValueError("tls_min 非法（%r），拒绝生成 server.conf" % (c.get("tls_min"),))
     net = vpn_network(c)
     local = str(net.network_address + 1)
     # 手工展开 --server 宏：官方 wiki 指出宏会占用整段做动态池，与 ccd 静态地址冲突
@@ -2344,6 +2413,13 @@ def _rebuild_ccd():
     for u in list_users():
         if not u["enabled"]:
             continue        # 停用账号没有 ccd，ccd-exclusive 直接拒
+        # ccd 文件会被 root 的 openvpn 按配置片段解析：vpn_ip 只能是纯 IPv4，
+        # 脏值（篡改过的备份包 / 手工改库）宁可让这个账号不发 ccd，也不写进去。
+        try:
+            ipaddress.IPv4Address(str(u["vpn_ip"]))
+        except Exception:
+            raise ValueError("账号 %s 的固定 IP %r 不是合法 IPv4，拒绝生成 ccd（疑似注入）"
+                             % (u["username"], u["vpn_ip"]))
         with open(os.path.join(CCD, u["username"]), "w") as f:
             f.write("ifconfig-push %s %s\n" % (u["vpn_ip"], mask))
     return len([u for u in list_users() if u["enabled"]])
@@ -2351,7 +2427,9 @@ def _rebuild_ccd():
 
 def render_rules(c):
     """全量重建：OVPNWEB_NAT（按网络模式）+ OVPN_ACL（按账号授权 + 客户端互访）"""
-    net = c["vpn_cidr"]
+    # 渲染防线：NET 会被 %s 进单引号字符串，原始值里有引号就能逃逸出 shell。
+    # 统一过一遍 IPv4Network 并取规范化写法（非法直接抛，宁可失败不生成）。
+    net = str(ipaddress.IPv4Network(str(c["vpn_cidr"]), strict=False))
     mode = c["acl_mode"]
     nat_mode = c.get("nat_mode", "nat")
     L = [
@@ -2419,6 +2497,14 @@ def render_rules(c):
         '$IPT -I FORWARD 1 -i tun0 -s "$NET" -j OVPN_ACL',
     ]
     # DNS / NTP 基础例外（只放具体 IP，不放整段）
+    # 渲染防线：这些值直接 %s 进 iptables 命令行，一旦混入非 IPv4 的内容
+    # （备份包被篡改、手工改库）就等于往 root 执行的脚本里注 shell。宁可拒绝生成。
+    for _f in ("dns", "ntp"):
+        for _ip in (c.get(_f) or []):
+            try:
+                ipaddress.IPv4Address(str(_ip))
+            except Exception:
+                raise ValueError("%s 中的 %r 不是合法 IPv4，拒绝生成 rules.sh" % (_f, _ip))
     for ip in c.get("dns") or []:
         for proto in ("udp", "tcp"):
             L.append('$IPT -A OVPN_ACL -s "$NET" -d %s -p %s --dport 53 -j ACCEPT' % (ip, proto))

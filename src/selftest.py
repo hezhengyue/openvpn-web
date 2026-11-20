@@ -631,10 +631,16 @@ def main():
     check("安装任务完成", tj["status"] == "done", tj.get("msg"))
     check("初始化标记写入", bool(core.get_meta("initialized")))
     check("向导后 company.ovpn 存在", os.path.exists(os.path.join(core.DATA, "company.ovpn")))
+    # 前端 api() 对所有请求（含 GET）都带 X-CSRF-Token，这里保持一致；
+    # logs/selfcheck 这两个 GET 带副作用（触发 root worker），必须过 CSRF。
+    _gh = {"X-CSRF-Token": c.get("/api/session").get_json()["csrf"]}
     for path in ("/api/state", "/api/users", "/api/acl", "/api/settings", "/api/settings/preview",
                  "/api/version", "/api/update/build-env", "/api/online", "/api/logs?kind=audit", "/api/logs?kind=auth",
                  "/api/logs?kind=deny", "/api/route-guide", "/api/selfcheck", "/api/backups"):
-        check("GET " + path, c.get(path).status_code == 200)
+        check("GET " + path, c.get(path, headers=_gh).status_code == 200)
+    r_nocsrf = c.get("/api/logs?kind=deny")
+    check("GET /api/logs 不带 CSRF 被拒（防跨站 <img> 白嫖触发 worker）",
+          r_nocsrf.status_code == 403, (r_nocsrf.status_code, r_nocsrf.data[:120]))
     check("导出 ovpn", c.get("/api/client.ovpn").status_code == 200)
     # 版本自愈：页面内版本常量必须与服务端一致，否则每次打开都会误触发强制刷新
     section("页面版本自校验（防浏览器缓存旧界面）")
@@ -927,6 +933,39 @@ def main():
         check("拒绝路径穿越的备份包", False)
     except ValueError:
         check("拒绝路径穿越的备份包", True)
+    # 回归：恢复会整库覆盖 meta，随后这些值被渲染成 root 执行的 server.conf / rules.sh。
+    # manifest 哈希只能证明「包自洽」——改库重算哈希就能过。所以恢复前必须复核
+    # 包内配置内容本身，不合法整包拒绝（在任何生产文件被覆盖之前）。
+    _tam = os.path.join(TMP, "tampered.tar.gz")
+    _txd = os.path.join(TMP, "tampered-x")
+    os.makedirs(_txd, exist_ok=True)
+    with tarfile.open(fp, "r:gz") as tf:
+        tf.extractall(_txd, filter="data")
+    import sqlite3 as _sq3
+    _tcon = _sq3.connect(os.path.join(_txd, "web", "openvpn-web.db"))
+    _tcon.execute("INSERT INTO meta(k,v) VALUES('tls_min',?) "
+                  "ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                  (json.dumps('1.2\nup "/bin/sh -c \'touch /tmp/pwned\'"\n'),))
+    _tcon.commit()
+    _tcon.close()
+    _mf = os.path.join(_txd, "manifest.json")
+    with open(_mf, encoding="utf-8") as f:
+        _mm = json.load(f)
+    for _blk, _rels in _mm["files"].items():
+        for _rel in _rels:
+            _mm["files"][_blk][_rel] = fullbackup._sha256(os.path.join(_txd, _blk, _rel))
+    with open(_mf, "w", encoding="utf-8") as f:
+        json.dump(_mm, f, ensure_ascii=False, indent=2)
+    with tarfile.open(_tam, "w:gz") as tf:
+        tf.add(_mf, arcname="manifest.json")
+        tf.add(os.path.join(_txd, "openvpn"), arcname="openvpn")
+        tf.add(os.path.join(_txd, "web"), arcname="web")
+    try:
+        fullbackup.restore(_tam, audit=False)
+        check("恢复篡改过 meta 的备份包被整包拒绝", False)
+    except ValueError as _e:
+        check("恢复篡改过 meta 的备份包被整包拒绝", "未通过校验" in str(_e), str(_e)[:160])
+    shutil.rmtree(_txd, ignore_errors=True)
     # 接口层
     j = P("/api/full-backup/create", {"tag": "接口"}).get_json()
     check("接口生成全备份", j.get("ok") and os.path.isfile(j["path"]), j)
@@ -1241,6 +1280,73 @@ def main():
     check("app.py 把 MOCK/SELFTEST 都随 MOCK 标志设置（生产路径经 sudo 由 env_reset 清空）",
           'OVPN_WEB_MOCK="1" if MOCK else "0"' in _asrc0
           and 'OVPN_WEB_SELFTEST="1" if MOCK else "0"' in _asrc0)
+    check("带副作用的 GET（logs/selfcheck）也纳入 CSRF 校验",
+          'request.path in ("/api/logs", "/api/selfcheck")' in _asrc0)
+
+    # 回归：tls_min 曾是 validate_cfg 的盲区——带换行的字符串被原样写进以 root
+    # 运行的 server.conf（tls-version-min 行），可注入 up/plugin 等任意指令，等于 root RCE。
+    _scfg = core.cfg()
+    _bad_tls = dict(_scfg)
+    _bad_tls["tls_min"] = '1.2\nup "/bin/sh -c \'touch /tmp/pwned\'"\n'
+    check("validate_cfg 拒绝带换行的 tls_min（server.conf 注入）",
+          any("TLS" in e for e in core.validate_cfg(_bad_tls)), core.validate_cfg(_bad_tls))
+    for _v in ("1.2", "1.3"):
+        _ok_tls = dict(_scfg)
+        _ok_tls["tls_min"] = _v
+        check("validate_cfg 接受合法 tls_min %s" % _v, not core.validate_cfg(_ok_tls))
+    try:
+        core.render_server_conf(_bad_tls)
+        check("render_server_conf 对脏 tls_min 拒绝生成（fail-closed）", False)
+    except Exception:
+        check("render_server_conf 对脏 tls_min 拒绝生成（fail-closed）", True)
+
+    # 回归：rules.sh 是 root 执行的脚本，dns/ntp/网段/账号 IP/端口/协议都从数据库
+    # %s 进命令行。写入路径有校验，但「篡改过的备份包 / 手工改库」能绕过——
+    # 渲染时必须 fail-closed，脏值宁可让 apply-rules 失败也不能生成被注入的脚本。
+    _bad_dns = dict(_scfg)
+    _bad_dns["dns"] = ["1.1.1.1 -j ACCEPT; touch /tmp/pwned; #"]
+    try:
+        core.render_rules(_bad_dns)
+        check("render_rules 对脏 dns 拒绝生成", False)
+    except Exception:
+        check("render_rules 对脏 dns 拒绝生成", True)
+    _bad_net = dict(_scfg)
+    _bad_net["vpn_cidr"] = "10.8.0.0/24'; touch /tmp/pwned; '"
+    try:
+        core.render_rules(_bad_net)
+        check("render_rules 对带引号的 vpn_cidr 拒绝生成", False)
+    except Exception:
+        check("render_rules 对带引号的 vpn_cidr 拒绝生成", True)
+    try:
+        core._render_accept([], "10.8.0.3", "1.1.1.1/32", "tcp", "22; touch /tmp/pwned")
+        check("_render_accept 对脏端口拒绝生成", False)
+    except Exception:
+        check("_render_accept 对脏端口拒绝生成", True)
+    try:
+        core._render_accept([], "10.8.0.3; touch /tmp/x", "1.1.1.1/32", "any", "")
+        check("_render_accept 对脏源地址拒绝生成", False)
+    except Exception:
+        check("_render_accept 对脏源地址拒绝生成", True)
+
+    # ccd 文件同样被 root 的 openvpn 按配置片段解析：脏 vpn_ip 不能写进去
+    _ccd_u = core.list_users()[0]
+    _ccd_oldip = _ccd_u["vpn_ip"]
+    _con = core.db()
+    _con.execute("UPDATE users SET vpn_ip=? WHERE username=?",
+                 ('10.8.0.5\nup "/bin/sh -c id"', _ccd_u["username"]))
+    _con.commit()
+    _con.close()
+    try:
+        core.rebuild_ccd()
+        check("rebuild_ccd 对脏 vpn_ip 拒绝生成 ccd", False)
+    except Exception:
+        check("rebuild_ccd 对脏 vpn_ip 拒绝生成 ccd", True)
+    _con = core.db()
+    _con.execute("UPDATE users SET vpn_ip=? WHERE username=?", (_ccd_oldip, _ccd_u["username"]))
+    _con.commit()
+    _con.close()
+    core.rebuild_ccd()
+    check("脏数据清理后 ccd 恢复正常生成", True)
 
     if POSIX:
         _r = subprocess.run(["bash", os.path.join(CODE, "install-code.sh"), "600"],

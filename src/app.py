@@ -217,7 +217,11 @@ def guard():
     # 防止有人绕开首屏直接改配置 / 看审计 / 改账户名。
     if admin_must_change_session() and request.path not in ("/api/session", "/api/logout", "/api/password"):
         return jsonify(ok=False, msg="首次登录请先修改管理密码", must_change=True), 403
-    if request.method in ("POST", "PUT", "DELETE", "PATCH"):
+    if request.method in ("POST", "PUT", "DELETE", "PATCH") or \
+            request.path in ("/api/logs", "/api/selfcheck"):
+        # 这两个 GET 带副作用（触发 root worker 的 deny 日志收集 / 系统自检），
+        # 跨站 <img src=...> 就能白嫖触发，所以和写接口一样要过 CSRF；
+        # 前端 api() 封装对所有请求都带 X-CSRF-Token，正常使用不受影响。
         token = request.headers.get("X-CSRF-Token") or (request.get_json(silent=True) or {}).get("csrf")
         if not token or token != session.get("csrf"):
             return jsonify(ok=False, msg="CSRF 校验失败，请刷新页面"), 403

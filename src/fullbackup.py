@@ -273,6 +273,19 @@ def _restore(path, audit=True, protect=True, with_bin=False):
                 if not os.path.isfile(p) or _sha256(p) != sha:
                     raise ValueError("备份包校验失败：%s/%s" % (block, rel))
 
+        # 复核包内数据库的服务端配置：恢复会整库覆盖 meta，这些值随后会被渲染成
+        # root 执行的 server.conf / rules.sh。manifest 的哈希只能证明「包自洽」，
+        # 证明不了「包没被改过」（改库重算哈希就能过）——所以内容本身必须再校验一遍，
+        # 不合法整包拒绝，在任何文件被覆盖之前。
+        _dbfile = os.path.join(tmp, "web", "openvpn-web.db")
+        if os.path.isfile(_dbfile):
+            _src = sqlite3.connect(_dbfile)
+            try:
+                _rows = _src.execute("SELECT k,v FROM meta").fetchall()
+            finally:
+                _src.close()
+            core.validate_meta_rows(_rows)
+
         # ---- 恢复 openvpn/：证书 + 配置 + ccd ----
         ov = os.path.join(tmp, "openvpn")
         for rel in sorted(m["files"]["openvpn"]):
