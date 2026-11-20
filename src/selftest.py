@@ -359,6 +359,41 @@ def main():
     except ValueError:
         check("IP 重复整批拒绝", True)
 
+    # ---------- 台账备份：下载 + 就地恢复 ----------
+    section("台账备份与恢复")
+    ub = core.backup_users("selftest")
+    check("台账备份是 users-*.tsv", os.path.basename(ub).startswith("users-") and ub.endswith(".tsv"))
+    check("台账备份路径可校验", core.user_backup_path(ub) == os.path.realpath(ub))
+    try:
+        core.user_backup_path("/etc/passwd"); check("台账备份路径越界被拒", False)
+    except ValueError:
+        check("台账备份路径越界被拒", True)
+    try:
+        core.preview_import(core.read_user_backup("/etc/passwd")[0], "x.tsv")
+        check("非台账文件不能当备份恢复", False)
+    except ValueError:
+        check("非台账文件不能当备份恢复", True)
+    data, fname = core.read_user_backup(ub)
+    core.delete_user("wangwu", "selftest")          # 模拟误删
+    check("误删后账号确实少了", not [u for u in core.list_users() if u["username"] == "wangwu"])
+    pv = core.preview_import(data, fname)
+    check("台账恢复预览列出要补回的账号",
+          any(x["op"] == "新增" and x["username"] == "wangwu" for x in pv["changes"]))
+    rs = core.apply_import(pv["token"], action="user_backup.restore")
+    check("台账恢复把账号补回来", rs["count"] == 3 and
+          [u for u in core.list_users() if u["username"] == "wangwu"][0]["password_plain"] == "ImpPass9012")
+    check("台账恢复前会再备份当前台账", os.path.exists(rs["backup"]))
+    check("恢复动作审计用的是台账口径",
+          any(r.get("action") == "user_backup.restore" for r in core.get_logs("audit", 200)))
+
+    # ---------- 公网 IP 识别 ----------
+    section("对外地址自动识别")
+    check("公网 IPv4 判定", core.is_public_ipv4("8.8.8.8") and core.is_public_ipv4("1.1.1.1"))
+    check("内网/回环不算公网", not core.is_public_ipv4("10.8.0.2") and
+          not core.is_public_ipv4("192.168.1.1") and not core.is_public_ipv4("127.0.0.1") and
+          not core.is_public_ipv4("abc"))
+    check("MOCK 下不发起外网探测", core.detect_public_ip() == ("", ""))
+
     # ---------- 密码覆盖 / 有效期自动停用 ----------
     section("密码覆盖与有效期自动停用")
     def _hash(n):

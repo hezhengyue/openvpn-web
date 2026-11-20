@@ -992,6 +992,15 @@ def settings_preview():
                "warnings": core.route_warnings(c)})
 
 
+@app.get("/api/settings/public-ip")
+def settings_public_ip():
+    """探测本机出口公网 IP，仅用于「对外地址」留空时的默认建议"""
+    ip, src = core.detect_public_ip()
+    return ok({"ip": ip, "source": src,
+               "msg": ("已识别公网 IP %s" % ip) if ip else
+                      "没探测到公网 IP（内网机器或无外网出口），请手动填写公网 IP 或域名"})
+
+
 @app.get("/api/settings/capacity")
 def settings_capacity():
     """地址容量：网段里到底还剩多少个固定 IP 可分（一人一个，池子占掉的不算）"""
@@ -1261,6 +1270,35 @@ def backups_restore():
     sudo_worker(tid, "restart-vpn")
     core.log_audit("admin", "backup.restore", path)
     return ok({"msg": "已恢复备份并重启服务"})
+
+
+# --------------------------------------------------------------------------- 台账备份（users-*.tsv）
+@app.get("/api/user-backups")
+def user_backups_list():
+    """只列台账备份（每次账号变更自动生成的那份 tsv）"""
+    items = [b for b in core.list_backups() if b.get("kind") == "users"]
+    return ok({"items": items})
+
+
+@app.get("/api/user-backups/download")
+def user_backup_download():
+    data, name = core.read_user_backup(request.args.get("path", ""))
+    return send_file(io.BytesIO(data), mimetype="text/tab-separated-values; charset=utf-8",
+                     as_attachment=True, download_name=name)
+
+
+@app.post("/api/user-backups/restore")
+def user_backup_restore():
+    """从这里恢复台账：step=preview 看变更清单，step=apply 才真正写库（写前自动备份当前台账）"""
+    d = request.get_json(silent=True) or {}
+    if d.get("step") == "apply":
+        r = core.apply_import(d.get("token", ""), action="user_backup.restore")
+        after_change(kick=False)
+        return ok(r)
+    data, name = core.read_user_backup(d.get("path", ""))
+    r = core.preview_import(data, name)
+    r["file"] = name
+    return ok(r)
 
 
 # --------------------------------------------------------------------------- 全备份 / 迁移

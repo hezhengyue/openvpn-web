@@ -46,7 +46,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "1.3.14"
+WEB_VERSION = "1.3.15"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -619,6 +619,40 @@ def validate_vpn_ip(ip, c, exclude_user=None, con=None):
         raise ValueError("固定 IP %s 已被账号 %s 占用" % (ip, row[0]))
 
 
+def is_public_ipv4(text):
+    """是不是一个「能被公网访问」的 IPv4 字面量（排除内网/回环/保留段）"""
+    try:
+        a = ipaddress.IPv4Address(str(text or "").strip())
+    except Exception:
+        return False
+    return not (a.is_private or a.is_loopback or a.is_link_local or a.is_multicast
+                or a.is_reserved or a.is_unspecified)
+
+
+def detect_public_ip(timeout=2.5):
+    """探测本机出口公网 IP，只用来给「对外地址」做默认建议。
+
+    探测不到（内网机器、没开外网、被墙）返回 ("", "")，不影响任何功能。
+    """
+    if MOCK:
+        return "", ""
+    urls = ("https://api.ipify.org", "https://ifconfig.me/ip", "https://ipinfo.io/ip")
+    try:
+        import urllib.request
+    except Exception:
+        return "", ""
+    for u in urls:
+        try:
+            req = urllib.request.Request(u, headers={"User-Agent": "curl/8.0"})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                txt = r.read(64).decode("utf-8", "ignore").strip()
+        except Exception:
+            continue
+        if is_public_ipv4(txt):
+            return txt, u
+    return "", ""
+
+
 def validate_cfg(c):
     errs = []
     if not c.get("public_addr") or not re.match(r"^[A-Za-z0-9._:-]{1,128}$", c["public_addr"]):
@@ -955,7 +989,29 @@ def backup_users(actor="web"):
     return path
 
 
+def user_backup_path(path):
+    """校验并返回台账备份的真实路径（必须落在 BACKUPS 目录、且是 users-*.tsv）"""
+    p = os.path.realpath(str(path or "").strip())
+    base = os.path.realpath(BACKUPS)
+    if not p.startswith(base + os.sep):
+        raise ValueError("备份路径非法")
+    name = os.path.basename(p)
+    if not (name.startswith("users-") and name.endswith(".tsv")):
+        raise ValueError("这不是台账备份文件")
+    if not os.path.isfile(p):
+        raise ValueError("备份文件不存在，可能已被清理")
+    return p
+
+
+def read_user_backup(path):
+    """读取台账备份（tsv 全量台账），返回 (内容字节, 文件名)"""
+    p = user_backup_path(path)
+    with open(p, "rb") as f:
+        return f.read(), os.path.basename(p)
+
+
 # --------------------------------------------------------------------------- Excel / CSV 台账（全量同步）
+
 
 EXPORT_HEADER = ["用户名", "姓名", "部门", "密码", "VPN固定IP", "状态", "有效期", "备注"]
 
@@ -1122,12 +1178,13 @@ def preview_import(content, filename="", actor="web"):
     return {"changes": changes, "token": token, "expires_in": 300}
 
 
-def apply_import(token, actor="web", reset_empty=False):
+def apply_import(token, actor="web", reset_empty=False, action="import.apply"):
     """正式提交全量同步。二次确认由前端弹窗按钮完成；
     这里靠 5 分钟预览令牌防重放，并在写入前自动备份台账。
 
     密码列必填（parse_users_file 已整批校验），表里写什么明文就落什么；
     reset_empty 只为兼容旧脚本保留，已不再有任何作用。
+    action 只影响审计里的动作名（Excel 同步 / 从台账备份恢复）。
     """
     con = db()
     row = con.execute("SELECT payload,created_at FROM preview_tokens WHERE token=?", (token,)).fetchone()
@@ -1176,7 +1233,7 @@ def apply_import(token, actor="web", reset_empty=False):
     db2 = db()
     db2.execute("DELETE FROM preview_tokens WHERE token=?", (token,))
     db2.commit(); db2.close()
-    log_audit(actor, "import.apply", "%d 个账号，密码按表中明文覆盖，备份 %s" % (len(rows), path))
+    log_audit(actor, action, "%d 个账号，密码按表中明文覆盖，备份 %s" % (len(rows), path))
     return {"count": len(rows), "backup": path, "initial_password_file": "",
             "initial": initial, "kept": kept}
 

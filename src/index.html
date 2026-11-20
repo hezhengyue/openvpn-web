@@ -272,7 +272,7 @@ pre::-webkit-scrollbar-thumb{background:oklch(.45 .02 250);background-clip:conte
 <script>
 /* 页面版本：每次升级手动同步 core.WEB_VERSION（selftest 会校验两者一致）。
    浏览器若缓存了旧 HTML（标签页常开不重载、或中间层缓存），靠这个跟服务端版本比对来自愈。 */
-const PAGE_VERSION='1.3.14';
+const PAGE_VERSION='1.3.15';
 const S={csrf:'',logged:false,cfg:null,page:'overview',task:null};
 const $=s=>document.querySelector(s);
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -527,7 +527,7 @@ async function pgWizard(){
       ?'已选「无 NAT 溯源」：回程静态路由必须先配好，否则客户端 ping 不通内网。'
       :'当前 NAT 模式，开箱可用。'}<br>客户端需 OpenVPN ≥ 2.4；账号在「认证账号」里建，互访在「资产与授权」里授。</div></div>`;
   if(W.step===1)wCheck();
-  poolToggle();
+  poolToggle();autoFillPublicAddr();
 }
 const CIPHERS=[['AES-256-GCM','AES-256-GCM','首选。有 AES-NI 的 x86 服务器上最快'],
  ['AES-128-GCM','AES-128-GCM','老 CPU 上略省算力，安全性仍足够'],
@@ -539,13 +539,15 @@ function cfgForm(c){c=c||S.cfg||{};const v=(k,d)=>esc(c[k]==null?(d||''):c[k]);
  tagInit('extra_routes',c.extra_routes||[]);
  return `<div class="sub" style="margin-bottom:6px">客户端连接入口 <span style="opacity:.7">· 有内网端口映射时填映射后的公网 IP 和端口</span></div>
  <div class="row3">
-  <label class="f"><span>对外地址/域名</span><input id="c_public_addr" value="${v('public_addr')}" placeholder="vpn.example.com"></label>
-  <label class="f"><span>对外端口（映射后）</span><input type="number" id="c_public_port" value="${c.public_port?esc(c.public_port):''}" placeholder="同服务端口"></label>
-  <label class="f"><span>隧道协议</span><select id="c_proto"><option value="tcp" ${(c.proto||'tcp')==='tcp'?'selected':''}>TCP（默认，穿透性最好）</option><option value="udp" ${c.proto==='udp'?'selected':''}>UDP（延迟低，被限 UDP 时不通）</option></select></label>
- </div>
- <div class="hint" style="margin:-6px 0 12px">服务器在内网、靠路由器把某个公网端口转到这台机器时：<b>服务端口</b>填本机实际监听端口，<b>对外端口</b>填公网映射端口，<b>对外地址</b>填公网 IP／域名。两者<b>不需要一致</b>，导出的客户端配置会自动使用「对外地址 + 对外端口」。对外端口留空表示与服务端口相同。</div>
- <div class="row3">
+  <label class="f"><span style="display:flex;align-items:center;gap:8px">对外地址/域名
+    <a href="javascript:void(0)" onclick="detectPubAddr(true)" style="font-size:11.5px;color:var(--primary);text-decoration:none;border:1px solid var(--border);border-radius:6px;padding:1px 7px">自动识别公网 IP</a></span>
+   <input id="c_public_addr" value="${v('public_addr')}" placeholder="vpn.example.com 或 1.2.3.4"></label>
   <label class="f"><span>服务端口（本机监听）</span><input type="number" id="c_port" value="${v('port',1194)}"></label>
+  <label class="f"><span>对外端口（映射后）</span><input type="number" id="c_public_port" value="${c.public_port?esc(c.public_port):''}" placeholder="留空 = 同服务端口"></label>
+ </div>
+ <div class="hint" id="addr_tip" style="margin:-6px 0 12px">服务器在内网、靠路由器把某个公网端口转到这台机器时：<b>服务端口</b>填本机实际监听端口，<b>对外端口</b>填公网映射端口，<b>对外地址</b>填公网 IP／域名。两者<b>不需要一致</b>，导出的客户端配置会自动使用「对外地址 + 对外端口」。</div>
+ <div class="row3">
+  <label class="f"><span>隧道协议</span><select id="c_proto"><option value="tcp" ${(c.proto||'tcp')==='tcp'?'selected':''}>TCP（默认，穿透性最好）</option><option value="udp" ${c.proto==='udp'?'selected':''}>UDP（延迟低，被限 UDP 时不通）</option></select></label>
   <label class="f"><span>VPN 网段</span><input id="c_vpn_cidr" value="${v('vpn_cidr','10.8.0.0/24')}"></label>
   <label class="f"><span>tun-mtu</span><input type="number" id="c_tun_mtu" value="${v('tun_mtu',1400)}"></label>
  </div>
@@ -591,6 +593,34 @@ function cfgForm(c){c=c||S.cfg||{};const v=(k,d)=>esc(c[k]==null?(d||''):c[k]);
   </div>
  </details>`}
 
+/* 对外地址留空时，自动探测本机出口公网 IP 填进去（只是建议值，保存前可随时改） */
+function isPubIp(h){if(!/^\d{1,3}(\.\d{1,3}){3}$/.test(h||''))return false;
+ const p=h.split('.').map(Number);
+ if(p.some(x=>x>255))return false;
+ if(p[0]===0||p[0]===10||p[0]===127||p[0]>=224)return false;
+ if(p[0]===192&&p[1]===168)return false;
+ if(p[0]===172&&p[1]>=16&&p[1]<=31)return false;
+ if(p[0]===169&&p[1]===254)return false;
+ return true}
+async function detectPubAddr(manual){
+ const el=$('#c_public_addr'),tip=$('#addr_tip');
+ if(!el)return;
+ if(manual)toast('正在识别公网 IP…','');
+ try{const j=await get('/api/settings/public-ip');
+  if(j.ip){                                   // 服务器能从外网服务反查出自己的出口 IP
+   if(manual||!el.value.trim())el.value=j.ip;
+   if(tip)tip.innerHTML='已自动填入识别到的公网 IP <b class="mono">'+esc(j.ip)+'</b>；如果服务器走多出口或代理、实际出口和它不一致，直接改成真正的公网地址。对外端口与<b>服务端口不需要一致</b>。';
+  }else if(isPubIp(location.hostname)){      // 反查不到，但你此刻就是从公网 IP 访问的，用这个
+   if(manual||!el.value.trim())el.value=location.hostname;
+   if(tip)tip.innerHTML='已按当前访问地址填入 <b class="mono">'+esc(location.hostname)+'</b>（你就是从这个公网 IP 打开的后台）；如与实际映射不一致可直接改。对外端口与<b>服务端口不需要一致</b>。';
+  }else if(tip){
+   tip.innerHTML='没探测到公网 IP（服务器在内网、没有外网出口或被限制访问），请手动填写<b>公网 IP 或域名</b>。对外端口与<b>服务端口不需要一致</b>。';
+  }
+  if(manual&&!j.ip&&!isPubIp(location.hostname))toast('没识别到公网 IP，请手动填写','err');
+  else if(manual)toast(j.ip?j.msg:'已按当前访问地址填入','ok');
+ }catch(e){if(manual)toast('识别失败，请手动填写','err')}
+}
+function autoFillPublicAddr(){const el=$('#c_public_addr');if(el&&!el.value.trim())detectPubAddr(false)}
 function readCfg(){const g=id=>($('#'+id)||{}).value?$('#'+id).value.trim():'';
  const lst=id=>g(id)?g(id).split(/[,，\s]+/).filter(Boolean):[];
  const ck=[...document.querySelectorAll('.cck:checked')].map(x=>x.value);
@@ -983,7 +1013,7 @@ async function pgSettings(){const j=await get('/api/settings'),p=(await get('/ap
    <button class="btn danger" onclick="restoreDefault()">恢复默认</button></div>
   <div class="card"><h3>重新初始化 CA / tls-crypt</h3><div class="hint err">全员现有 company.ovpn 立即失效，必须重新分发。</div>
    <button class="btn danger" onclick="reinitCA()">重新签发</button></div></div>`;
- poolToggle();poolInfo()}
+ poolToggle();poolInfo();autoFillPublicAddr()}
 function daysBadge(d){if(d===null||d===undefined)return '—';if(d<0)return badge('已过期','err');if(d<30)return badge(d+' 天','err');if(d<90)return badge(d+' 天','warn');return badge(d+' 天','ok')}
 async function settingsSave(){
  confirmAct('保存服务端设置并重启','应用新配置会<b>重启 OpenVPN，所有在线连接断开并自动重连</b>。若改了端口/协议/CA/加密套件，还需重新导出并全员替换 company.ovpn。',
@@ -1006,7 +1036,8 @@ async function reinitCA(){confirmAct('重新初始化 CA / tls-crypt',
 
 /* ---------------- 版本与更新 ---------------- */
 async function pgUpdate(){const v=await get('/api/version'),
- be=(await get('/api/update/build-env')).env,fb=await get('/api/full-backup/list'),fr=fb.items||[];
+ be=(await get('/api/update/build-env')).env,fb=await get('/api/full-backup/list'),fr=fb.items||[],
+ ub=await get('/api/user-backups'),ul=ub.items||[];
  $('#page').innerHTML=`<div class="grid">
   <div class="stat"><div class="n">${esc(v.version)}</div><div class="t">服务端版本</div></div>
   <div class="stat"><div class="n">${esc(v.web_version)}</div><div class="t">Web 版本</div></div></div>
@@ -1033,19 +1064,24 @@ async function pgUpdate(){const v=await get('/api/version'),
    '<span class="muted">'+(x.origin==='auto'?'自动':'手动')+'</span>',
    esc(x.created_at),esc(x.tag||'—'),(x.size/1048576).toFixed(2)+' MB',
    `<button class="btn sm" onclick="download('/api/full-backup/download/'+encodeURIComponent('${esc(x.name)}'))">下载</button>
+    <button class="btn sm" onclick="fullRestoreName('${esc(x.name)}')">恢复</button>
     <button class="btn sm danger" onclick="fullDel('${esc(x.name)}')">删除</button>`]),'还没有备份，点上面按钮生成','backups',10,'pgUpdate')}</div>
- <div class="card"><h3>恢复 <small>回滚本机备份点 · 导入迁移包</small></h3>
+ <div class="card"><h3>恢复 <small>只用本地备份包恢复</small></h3>
   <div class="hint">恢复会覆盖当前证书、台账、配置与白名单，并重建规则、重启服务；在线用户会被断开后自动重连。
-   <b>动手前系统会先自动打一份保护备份</b>，误操作也能再退回来。</div>
-  ${fr.length?`<div class="bar"><select id="fbpick" style="min-width:320px">${fr.map(x=>
-   `<option value="${esc(x.name)}">${esc(x.name)} · ${esc(x.created_at)} · ${x.tag||'无标记'}</option>`).join('')}</select>
-   <button class="btn pri" onclick="fullRestoreSelected()">恢复选中的备份</button>
-   <span class="muted">列表在「备份」卡片里，可先下载留档</span></div>`
-   :'<div class="muted">还没有本机备份点，先在「备份」卡片生成一份，或直接上传迁移包。</div>'}
-  <div class="bar" style="margin-top:12px"><input type="file" id="fbf" accept=".tar.gz">
-   <button class="btn" onclick="fullPreview()">检查备份包</button>
+   <b>动手前系统会先自动打一份保护备份</b>，误操作也能再退回来。
+   机器上的备份点直接在「备份」卡片那一行的【恢复】按钮操作。</div>
+  <div class="bar"><input type="file" id="fbf" accept=".tar.gz">
+   <button class="btn pri" onclick="fullPreview()">检查本地备份包</button>
    <span class="muted">从别处迁移来的包：上传 → 校验 → 确认恢复。</span></div>
-  <div id="fbres"></div></div>`}
+  <div id="fbres"></div></div>
+ <div class="card"><h3>台账备份 <small>每次账号变更自动生成</small></h3>
+  <div class="hint">账号新增 / 修改 / 删除 / Excel 全量同步前都会自动存一份台账（含明文密码，文件权限 600）。
+   误删账号或同步写错时，点这一行的【恢复】把台账退回当时的状态：<b>这份备份里没有的账号会被删除</b>，恢复前系统同样会先备份当前台账。</div>
+  ${tbl(['时间','文件','操作'],ul.map(x=>[
+   esc(x.ts),
+   '<span class="mono">'+esc((x.path||'').split('/').pop())+'</span>',
+   `<button class="btn sm" onclick="download('/api/user-backups/download?path='+encodeURIComponent('${esc(x.path)}'))">下载</button>
+    <button class="btn sm" onclick="ubRestore('${esc(x.path)}')">恢复</button>`]),'还没有台账备份，账号变更时会自动生成','userbackups',10,'pgUpdate')}</div>`}
 
 async function recheckBuildEnv(){try{await get('/api/update/build-env?refresh=1');toast('已重新检测编译环境','ok');pgUpdate()}catch(e){}}
 async function upSource(){const f=$('#upsrc').files[0];if(!f){toast('请选择 openvpn 源码包','err');return}
@@ -1065,7 +1101,21 @@ function fullRestoreName(n){confirmAct('恢复备份','将用 <b>'+esc(n)+'</b> 
  +'<br>当前状态会先自动打一份保护备份。在线用户会被断开，需要重新拨入。',
  async()=>{const j=await post('/api/full-backup/restore',{name:n});
   toast(j.msg,'ok');setTimeout(()=>location.reload(),1800)},'确认恢复')}
-function fullRestoreSelected(){const n=($('#fbpick')||{}).value;if(!n){toast('请先选择要恢复的备份','err');return}fullRestoreName(n)}
+/* 台账备份恢复：先看变更清单，确认后才真正写库（写前自动备份当前台账） */
+async function ubRestore(path){
+ try{const j=await post('/api/user-backups/restore',{path:path,step:'preview'});
+  const ch=j.changes||[],del=ch.filter(x=>x.op==='删除').length;
+  const body=ch.length
+   ?`<div class="hint">这份备份是 <b class="mono">${esc(j.file||'')}</b>，与当前台账比有 <b>${ch.length}</b> 项变更${del?'，其中<b class="err">删除 '+del+' 个账号</b>':''}：
+      <br>表里没有的账号会被删除，恢复前系统会先自动备份当前台账，误操作还能再退回来。</div>
+     <pre style="max-height:38vh;overflow:auto;font-size:12px">${esc(ch.map(x=>x.op+'  '+x.username+'  '+(x.detail||'')).join('\n'))}</pre>`
+   :'<div class="hint ok">这份备份与当前台账完全一致，恢复不会改变任何账号。</div>';
+  modal('恢复台账备份',body,async()=>{
+   const r=await post('/api/user-backups/restore',{token:j.token,step:'apply'});
+   toast('已恢复 '+r.count+' 个账号；恢复前的台账已备份到 '+r.backup,'ok');
+   await loadState();pgUpdate()},'确认恢复',true);
+ }catch(e){}
+}
 async function fullPreview(){const f=$('#fbf').files[0];if(!f){toast('请选择备份包','err');return}
  try{const j=await upload('/api/full-backup/upload',f,{});FB.token=j.token;FB.name=j.preview.name;
   const m=j.preview.manifest;
@@ -1086,6 +1136,7 @@ const ACTCN={
  'login':'登录','logout':'退出登录','bootstrap':'初始化后台',
  'user.add':'新增账号','user.update':'修改账号','user.delete':'删除账号','user.kick':'断开连接',
  'users.export':'导出账号表','import.preview':'Excel 导入·预览','import.apply':'Excel 全量同步',
+ 'user_backup.restore':'从台账备份恢复',
  'settings.save':'保存服务端设置','settings.default':'恢复默认参数',
  'service.restart':'重启服务','rules.rebuild':'重建防火墙规则','ovpn.download':'下载客户端配置',
  'network.nat':'切换网络模式','acl.mode':'切换 ACL 模式',
@@ -1111,7 +1162,7 @@ function actorCN(a){a=(a||'').trim();
  if(a==='installer')return '安装脚本';
  return a}
 let LK='audit';
-async function pgLogs(){const j=await get('/api/logs?kind='+LK),b=await get('/api/backups');
+async function pgLogs(){const j=await get('/api/logs?kind='+LK);
  const tabs=[['auth','认证日志'],['server','服务端日志'],['audit','Web 操作审计'],['deny','越权尝试']];
  const rows=j.rows.map(r=>{
   if(LK==='server')return [esc(r.detail)];
@@ -1124,10 +1175,7 @@ async function pgLogs(){const j=await get('/api/logs?kind='+LK),b=await get('/ap
   deny:['时间','模式','源 IP','目标','端口','协议']}[LK];
  $('#page').innerHTML=`<div class="card"><h3>日志与审计</h3><div class="tabs">${tabs.map(t=>`<div class="tab ${LK===t[0]?'on':''}" onclick="LK='${t[0]}';PG.logs=0;pgLogs()">${t[1]}</div>`).join('')}</div>
   <div class="bar"><button class="btn" onclick="pgLogs()">刷新</button><span class="muted">越权尝试（含观察模式）本身就是审计证据，DROP 前限流记录</span></div>
-  ${tbl(cols,rows,null,'logs',20,'pgLogs')}</div>
- <div class="card"><h3>台账备份 <small>每次账号变更自动生成，留作回滚</small></h3>
-  <div class="hint">这不是强制步骤，但账号误删或 Excel 全量同步写错时，只有它能把台账退回去，所以自动生成机制保留。完整系统备份（含 OpenVPN 材料）在「版本与更新」页。</div>
-  ${tbl(['时间','类型','文件'],b.backups.filter(x=>x.kind==='users').map(x=>[esc(x.ts),esc(x.kind),'<span class="mono">'+esc(x.path)+'</span>']),'还没有台账备份','userbackups',10,'pgLogs')}</div>`}
+  ${tbl(cols,rows,null,'logs',20,'pgLogs')}</div>`}
 
 /* ---------------- 回程路由 / 自检 ---------------- */
 async function pgRoute(){const r=await get('/api/route-guide'),s=await get('/api/selfcheck');

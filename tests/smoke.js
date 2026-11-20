@@ -32,6 +32,10 @@ core.add_grant("user","bob",g["id"])
 core.set_meta("public_addr","vpn.example.com"); core.set_meta("initialized",1)
 core.set_meta("extra_routes",["10.10.0.0/16","10.20.0.0/16","10.30.0.0/16"])
 core.write_all_config()
+# 备份/恢复页要有真实数据行，才能验证行内【恢复】按钮
+core.backup_users("smoke")
+try: core.snapshot("smoke")
+except Exception as e: print("snapshot skipped:", e)
 print("seeded")
 `;
 // 造数据的脚本写进临时目录，不在 tests/ 留生成物
@@ -168,6 +172,13 @@ async function waitUp() {
       if (cfg.data_ciphers !== 'AES-256-GCM:CHACHA20-POLY1305') errors.push('readCfg 加密套件=' + cfg.data_ciphers);
       if (!w.document.querySelector('#c_public_port')) errors.push('设置页缺少对外映射端口输入框');
       if (cfg.public_port !== 0) errors.push('readCfg 默认对外端口应为 0（同服务端口），实际=' + cfg.public_port);
+      // 本机监听端口与对外映射端口必须在同一行，改动时才看得清对应关系
+      const pc = w.document.querySelector('#c_port'), pp = w.document.querySelector('#c_public_port');
+      if (!pc) errors.push('设置页缺少服务端口输入框');
+      else if (!pp || pc.closest('.row3') !== pp.closest('.row3')) errors.push('服务端口与对外端口不在同一行');
+      if (!w.document.querySelector('#c_public_addr')) errors.push('设置页缺少对外地址输入框');
+      if (!/自动识别公网 IP/.test(w.document.querySelector('#page').textContent))
+        errors.push('设置页缺少「自动识别公网 IP」入口');
       if (!/不需要一致/.test(w.document.querySelector('#page').textContent))
         errors.push('设置页没说明公网端口与服务端口可以不一致');
       if (w.document.querySelector('#c_lan_nets')) errors.push('设置页仍然出现「内网网段」输入框');
@@ -221,9 +232,17 @@ async function waitUp() {
       const cards = [...w.document.querySelectorAll('#page > .card')];
       const upIdx = cards.findIndex(c => c.textContent.includes('升级 OpenVPN'));
       const bkIdx = cards.findIndex(c => c.textContent.includes('立即备份'));
-      const rsIdx = cards.findIndex(c => c.textContent.includes('恢复选中的备份') || c.textContent.includes('检查备份包'));
-      if (upIdx < 0 || bkIdx < 0 || rsIdx < 0 || upIdx > bkIdx || bkIdx > rsIdx)
-        errors.push('版本页顺序应为：升级 OpenVPN → 备份 → 恢复');
+      const rsIdx = cards.findIndex(c => c.textContent.includes('检查本地备份包'));
+      const ubIdx = cards.findIndex(c => c.textContent.includes('台账备份'));
+      if (upIdx < 0 || bkIdx < 0 || rsIdx < 0 || ubIdx < 0 ||
+          upIdx > bkIdx || bkIdx > rsIdx || rsIdx > ubIdx)
+        errors.push('版本页顺序应为：升级 OpenVPN → 备份 → 恢复 → 台账备份');
+      // 机器上的备份点就地恢复（按钮在备份列表行内），恢复卡片只负责本地文件
+      if (w.document.querySelector('#fbpick')) errors.push('恢复卡片仍保留「选择本机备份点」下拉');
+      const bkBtn = cards[bkIdx] ? [...cards[bkIdx].querySelectorAll('button')].map(x => x.textContent.trim()) : [];
+      if (!bkBtn.includes('恢复')) errors.push('备份列表行内缺少【恢复】按钮');
+      const ubBtn = cards[ubIdx] ? [...cards[ubIdx].querySelectorAll('button')].map(x => x.textContent.trim()) : [];
+      if (!ubBtn.includes('下载') || !ubBtn.includes('恢复')) errors.push('台账备份缺少下载/恢复按钮');
       if (w.document.querySelector('#page > .row'))
         errors.push('版本页卡片仍被两栏 .row 包裹，未与备份卡片对齐');
     } catch (e) { errors.push('版本页交互抛错: ' + e.message); }
@@ -357,7 +376,7 @@ async function waitUp() {
         errors.push('审计日志动作仍显示英文 key: ' + body.slice(0, 120));
       if (!/新增账号|修改账号|系统/.test(body)) errors.push('审计日志没有中文化的动作/操作者');
       const allTxt = w.document.querySelector('#page').textContent;
-      if (!/台账备份/.test(allTxt)) errors.push('台账备份应显示在日志审计页');
+      if (/台账备份/.test(allTxt)) errors.push('台账备份已移到备份恢复页，日志页不该再显示');
     } catch (e) { errors.push('日志页交互抛错: ' + e.message); }
 
     // 在线页：搜索框 + 停用账号（不再有踢下线，踢了客户端会自动重连）
