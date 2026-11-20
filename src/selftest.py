@@ -1347,6 +1347,23 @@ def main():
     _con.close()
     core.rebuild_ccd()
     check("脏数据清理后 ccd 恢复正常生成", True)
+    check("valid_username 拒绝尾随换行的名字（match 的 $ 会放过）",
+          not core.valid_username("张三\n") and not core.valid_username("x\n")
+          and core.valid_username("张三") and core.valid_username("alice-01"))
+    _con = core.db()
+    _con.execute("UPDATE users SET username=? WHERE username=?", ("../staging/x", _ccd_u["username"]))
+    _con.commit()
+    _con.close()
+    try:
+        core.rebuild_ccd()
+        check("rebuild_ccd 对脏 username（路径穿越）拒绝生成", False)
+    except Exception:
+        check("rebuild_ccd 对脏 username（路径穿越）拒绝生成", True)
+    _con = core.db()
+    _con.execute("UPDATE users SET username=? WHERE username=?", (_ccd_u["username"], "../staging/x"))
+    _con.commit()
+    _con.close()
+    core.rebuild_ccd()
 
     if POSIX:
         _r = subprocess.run(["bash", os.path.join(CODE, "install-code.sh"), "600"],

@@ -484,7 +484,9 @@ def valid_username(name):
     # "." / ".." 会变成 ccd 目录本身，文件名层面也建不出来
     if name.strip(".") == "":
         return False
-    return bool(USERNAME_RE.match(name))
+    # 用 fullmatch 而不是 match：Python 的 $ 能匹配「结尾换行之前」，
+    # match 会放过 "张三\n" 这种带尾随换行的名字（它会进 ccd 文件名和管理接口命令）
+    return bool(USERNAME_RE.fullmatch(name))
 
 
 def parse_version(v):
@@ -2413,6 +2415,11 @@ def _rebuild_ccd():
     for u in list_users():
         if not u["enabled"]:
             continue        # 停用账号没有 ccd，ccd-exclusive 直接拒
+        # username 既是 ccd 的文件名（join 后写盘），又是管理接口命令的参数：
+        # 正常写入路径有 valid_username 把关，但「篡改过的备份包 / 手工改库」
+        # 能把脏值直接塞进 DB——渲染时再校验一次，宁可这个账号不发 ccd 也不写脏文件。
+        if not valid_username(u["username"]):
+            raise ValueError("账号名 %r 不合法，拒绝生成 ccd（疑似注入）" % u["username"])
         # ccd 文件会被 root 的 openvpn 按配置片段解析：vpn_ip 只能是纯 IPv4，
         # 脏值（篡改过的备份包 / 手工改库）宁可让这个账号不发 ccd，也不写进去。
         try:
