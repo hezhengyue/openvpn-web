@@ -46,7 +46,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "1.3.13"
+WEB_VERSION = "1.3.14"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -58,7 +58,8 @@ LAST_HOST = 254                         # 广播地址留给网段
 
 DEFAULT_CFG = {
     "public_addr": "",
-    "port": 1194,
+    "port": 1194,                   # 本机监听端口（内网）
+    "public_port": 0,               # 对外映射端口；0 = 与本机监听端口相同
     "proto": "tcp",                 # 默认 TCP：穿透性最好，弱网/被限 UDP 的机房线路更稳
     "vpn_cidr": "10.8.0.0/24",
     # lan_nets 已废弃：页面不再暴露「内网网段」这个概念，只保留一个「附加推送路由」。
@@ -628,6 +629,12 @@ def validate_cfg(c):
             raise ValueError
     except Exception:
         errs.append("端口必须是 1~65535")
+    try:
+        pub_port = int(c.get("public_port") or 0)
+        if pub_port and not (1 <= pub_port <= 65535):
+            raise ValueError
+    except Exception:
+        errs.append("对外端口留空表示同服务端口，或填 1~65535")
     if c["proto"] not in ("udp", "tcp"):
         errs.append("协议只能是 udp 或 tcp")
     try:
@@ -1957,7 +1964,7 @@ def render_ovpn(c):
         # 客户端必须一致，否则 Windows 会按点对点解析而启动失败。
         "topology subnet",
         "proto %s" % _proto_name(c, "client"),
-        "remote %s %s" % (c["public_addr"], c["port"]),
+        "remote %s %s" % (c["public_addr"], int(c.get("public_port") or c["port"])),
         "resolv-retry infinite",
         "nobind",
         "persist-key",
@@ -1992,7 +1999,7 @@ def config_fingerprint(c):
     routes = ["%s/%s" % (n.network_address, n.prefixlen)
               for n in push_targets(c, include_vpn=False)]
     blob = json.dumps({
-        "addr": c["public_addr"], "port": c["port"], "proto": c["proto"],
+        "addr": c["public_addr"], "port": int(c.get("public_port") or c["port"]), "proto": c["proto"],
         "vpn_cidr": c["vpn_cidr"], "routes": routes,
         "ciphers": c["data_ciphers"], "tls_min": c["tls_min"], "mtu": c["tun_mtu"],
         "compress": c.get("compress", "off"),

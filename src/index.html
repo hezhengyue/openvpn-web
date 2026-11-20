@@ -272,7 +272,7 @@ pre::-webkit-scrollbar-thumb{background:oklch(.45 .02 250);background-clip:conte
 <script>
 /* 页面版本：每次升级手动同步 core.WEB_VERSION（selftest 会校验两者一致）。
    浏览器若缓存了旧 HTML（标签页常开不重载、或中间层缓存），靠这个跟服务端版本比对来自愈。 */
-const PAGE_VERSION='1.3.13';
+const PAGE_VERSION='1.3.14';
 const S={csrf:'',logged:false,cfg:null,page:'overview',task:null};
 const $=s=>document.querySelector(s);
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -537,10 +537,15 @@ function cfgForm(c){c=c||S.cfg||{};const v=(k,d)=>esc(c[k]==null?(d||''):c[k]);
  const have=(c.data_ciphers||'AES-256-GCM:CHACHA20-POLY1305').split(':').filter(Boolean);
  const extra=have.filter(x=>!CIPHERS.some(y=>y[0]===x));
  tagInit('extra_routes',c.extra_routes||[]);
- return `<div class="row3">
+ return `<div class="sub" style="margin-bottom:6px">客户端连接入口 <span style="opacity:.7">· 有内网端口映射时填映射后的公网 IP 和端口</span></div>
+ <div class="row3">
   <label class="f"><span>对外地址/域名</span><input id="c_public_addr" value="${v('public_addr')}" placeholder="vpn.example.com"></label>
-  <label class="f"><span>服务端口</span><input type="number" id="c_port" value="${v('port',1194)}"></label>
+  <label class="f"><span>对外端口（映射后）</span><input type="number" id="c_public_port" value="${c.public_port?esc(c.public_port):''}" placeholder="同服务端口"></label>
   <label class="f"><span>隧道协议</span><select id="c_proto"><option value="tcp" ${(c.proto||'tcp')==='tcp'?'selected':''}>TCP（默认，穿透性最好）</option><option value="udp" ${c.proto==='udp'?'selected':''}>UDP（延迟低，被限 UDP 时不通）</option></select></label>
+ </div>
+ <div class="hint" style="margin:-6px 0 12px">服务器在内网、靠路由器把某个公网端口转到这台机器时：<b>服务端口</b>填本机实际监听端口，<b>对外端口</b>填公网映射端口，<b>对外地址</b>填公网 IP／域名。两者<b>不需要一致</b>，导出的客户端配置会自动使用「对外地址 + 对外端口」。对外端口留空表示与服务端口相同。</div>
+ <div class="row3">
+  <label class="f"><span>服务端口（本机监听）</span><input type="number" id="c_port" value="${v('port',1194)}"></label>
   <label class="f"><span>VPN 网段</span><input id="c_vpn_cidr" value="${v('vpn_cidr','10.8.0.0/24')}"></label>
   <label class="f"><span>tun-mtu</span><input type="number" id="c_tun_mtu" value="${v('tun_mtu',1400)}"></label>
  </div>
@@ -589,7 +594,9 @@ function cfgForm(c){c=c||S.cfg||{};const v=(k,d)=>esc(c[k]==null?(d||''):c[k]);
 function readCfg(){const g=id=>($('#'+id)||{}).value?$('#'+id).value.trim():'';
  const lst=id=>g(id)?g(id).split(/[,，\s]+/).filter(Boolean):[];
  const ck=[...document.querySelectorAll('.cck:checked')].map(x=>x.value);
- return {public_addr:g('c_public_addr'),port:parseInt(g('c_port')),proto:g('c_proto'),vpn_cidr:g('c_vpn_cidr'),
+ return {public_addr:g('c_public_addr'),port:parseInt(g('c_port')),
+  public_port:g('c_public_port')?parseInt(g('c_public_port')):0,
+  proto:g('c_proto'),vpn_cidr:g('c_vpn_cidr'),
   extra_routes:(TAGS.extra_routes||[]).slice(),dns:lst('c_dns'),ntp:lst('c_ntp'),
   tun_mtu:parseInt(g('c_tun_mtu')),compress:g('c_compress'),data_ciphers:ck.join(':'),
   tls_min:g('c_tls_min'),
@@ -1011,11 +1018,11 @@ async function pgUpdate(){const v=await get('/api/version'),
   ${be.ok?`<div class="bar"><input type="file" id="upsrc" accept=".gz,.tgz"></div>
    <div class="bar"><label style="font-size:12px"><input type="checkbox" id="upsrcmajor"> 允许跨大版本</label>
     <button class="btn pri" onclick="upSource()">编译并更新</button></div><div id="uptask2"></div>`
-   :'<div class="hint">本机没有编译工具，<b>不影响当前 OpenVPN 服务和客户端使用</b>，只是不能在这里从源码编译新版本。请在构建机上用 <span class="mono">build/build-static-openvpn.sh</span> 编好后，到下方或「备份与恢复」替换 <span class="mono">bin/openvpn</span> 再重启服务。</div>'}
+   :'<div class="hint">本机没有编译工具，<b>不影响当前 OpenVPN 服务和客户端使用</b>，只是不能在这里从源码编译新版本。请在构建机上用 <span class="mono">build/build-static-openvpn.sh</span> 编好后，到下方「恢复」导入替换 <span class="mono">bin/openvpn</span> 再重启服务。</div>'}
   <div class="muted">只换二进制不改配置指纹，客户端不用重新分发；编译失败会自动回滚到备份点。二进制最近更新：${esc(v.last_update||'无')}</div></div>
- <div class="card"><h3>备份与恢复 <small>回滚 · 下载 · 迁移，同一套</small></h3>
+ <div class="card"><h3>备份 <small>打包下载 · 本机快照</small></h3>
   <div class="hint">改配置、升级前系统会自动打备份点（来源「自动」），也可以手工打一份（来源「手动」）。
-   <b>两种备份都是同一个 tar.gz，都能在本机一键恢复，也都能下载搬到另一台机器。</b>
+   <b>两种备份都是同一个 tar.gz，都能下载搬到另一台机器，也都能在「恢复」里一键回退。</b>
    一个包分两块：<b>openvpn/</b> 是纯 OpenVPN 材料（CA、证书、ta.key、server.conf、company.ovpn、ccd、二进制），不依赖 Web；
    <b>web/</b> 是 Web 台账与密钥，装好 Web 后一条命令还原。</div>
   <div class="bar"><button class="btn pri" onclick="fullNow(false)">立即备份</button>
@@ -1026,11 +1033,18 @@ async function pgUpdate(){const v=await get('/api/version'),
    '<span class="muted">'+(x.origin==='auto'?'自动':'手动')+'</span>',
    esc(x.created_at),esc(x.tag||'—'),(x.size/1048576).toFixed(2)+' MB',
    `<button class="btn sm" onclick="download('/api/full-backup/download/'+encodeURIComponent('${esc(x.name)}'))">下载</button>
-    <button class="btn sm" onclick="fullRestoreName('${esc(x.name)}')">恢复</button>
-    <button class="btn sm danger" onclick="fullDel('${esc(x.name)}')">删除</button>`]),'还没有备份，点上面按钮生成','backups',10,'pgUpdate')}
+    <button class="btn sm danger" onclick="fullDel('${esc(x.name)}')">删除</button>`]),'还没有备份，点上面按钮生成','backups',10,'pgUpdate')}</div>
+ <div class="card"><h3>恢复 <small>回滚本机备份点 · 导入迁移包</small></h3>
+  <div class="hint">恢复会覆盖当前证书、台账、配置与白名单，并重建规则、重启服务；在线用户会被断开后自动重连。
+   <b>动手前系统会先自动打一份保护备份</b>，误操作也能再退回来。</div>
+  ${fr.length?`<div class="bar"><select id="fbpick" style="min-width:320px">${fr.map(x=>
+   `<option value="${esc(x.name)}">${esc(x.name)} · ${esc(x.created_at)} · ${x.tag||'无标记'}</option>`).join('')}</select>
+   <button class="btn pri" onclick="fullRestoreSelected()">恢复选中的备份</button>
+   <span class="muted">列表在「备份」卡片里，可先下载留档</span></div>`
+   :'<div class="muted">还没有本机备份点，先在「备份」卡片生成一份，或直接上传迁移包。</div>'}
   <div class="bar" style="margin-top:12px"><input type="file" id="fbf" accept=".tar.gz">
    <button class="btn" onclick="fullPreview()">检查备份包</button>
-   <span class="muted">从别处迁移来的包：上传 → 校验 → 确认恢复；恢复前会自动打一份保护备份。</span></div>
+   <span class="muted">从别处迁移来的包：上传 → 校验 → 确认恢复。</span></div>
   <div id="fbres"></div></div>`}
 
 async function recheckBuildEnv(){try{await get('/api/update/build-env?refresh=1');toast('已重新检测编译环境','ok');pgUpdate()}catch(e){}}
@@ -1051,6 +1065,7 @@ function fullRestoreName(n){confirmAct('恢复备份','将用 <b>'+esc(n)+'</b> 
  +'<br>当前状态会先自动打一份保护备份。在线用户会被断开，需要重新拨入。',
  async()=>{const j=await post('/api/full-backup/restore',{name:n});
   toast(j.msg,'ok');setTimeout(()=>location.reload(),1800)},'确认恢复')}
+function fullRestoreSelected(){const n=($('#fbpick')||{}).value;if(!n){toast('请先选择要恢复的备份','err');return}fullRestoreName(n)}
 async function fullPreview(){const f=$('#fbf').files[0];if(!f){toast('请选择备份包','err');return}
  try{const j=await upload('/api/full-backup/upload',f,{});FB.token=j.token;FB.name=j.preview.name;
   const m=j.preview.manifest;
@@ -1096,7 +1111,7 @@ function actorCN(a){a=(a||'').trim();
  if(a==='installer')return '安装脚本';
  return a}
 let LK='audit';
-async function pgLogs(){const j=await get('/api/logs?kind='+LK);
+async function pgLogs(){const j=await get('/api/logs?kind='+LK),b=await get('/api/backups');
  const tabs=[['auth','认证日志'],['server','服务端日志'],['audit','Web 操作审计'],['deny','越权尝试']];
  const rows=j.rows.map(r=>{
   if(LK==='server')return [esc(r.detail)];
@@ -1109,7 +1124,10 @@ async function pgLogs(){const j=await get('/api/logs?kind='+LK);
   deny:['时间','模式','源 IP','目标','端口','协议']}[LK];
  $('#page').innerHTML=`<div class="card"><h3>日志与审计</h3><div class="tabs">${tabs.map(t=>`<div class="tab ${LK===t[0]?'on':''}" onclick="LK='${t[0]}';PG.logs=0;pgLogs()">${t[1]}</div>`).join('')}</div>
   <div class="bar"><button class="btn" onclick="pgLogs()">刷新</button><span class="muted">越权尝试（含观察模式）本身就是审计证据，DROP 前限流记录</span></div>
-  ${tbl(cols,rows,null,'logs',20,'pgLogs')}</div>`}
+  ${tbl(cols,rows,null,'logs',20,'pgLogs')}</div>
+ <div class="card"><h3>台账备份 <small>每次账号变更自动生成，留作回滚</small></h3>
+  <div class="hint">这不是强制步骤，但账号误删或 Excel 全量同步写错时，只有它能把台账退回去，所以自动生成机制保留。完整系统备份（含 OpenVPN 材料）在「版本与更新」页。</div>
+  ${tbl(['时间','类型','文件'],b.backups.filter(x=>x.kind==='users').map(x=>[esc(x.ts),esc(x.kind),'<span class="mono">'+esc(x.path)+'</span>']),'还没有台账备份','userbackups',10,'pgLogs')}</div>`}
 
 /* ---------------- 回程路由 / 自检 ---------------- */
 async function pgRoute(){const r=await get('/api/route-guide'),s=await get('/api/selfcheck');
@@ -1127,7 +1145,6 @@ async function pgRoute(){const r=await get('/api/route-guide'),s=await get('/api
 /* ---------------- 安全 ---------------- */
 let SEC={allow:[],detected:[],current_ip:''};
 async function pgSecurity(){
- const b=await get('/api/backups');
  const a=await get('/api/security/allow');SEC=a;
  tagInit('web_allow',a.allow||[]);
  $('#page').innerHTML=`
@@ -1136,18 +1153,13 @@ async function pgSecurity(){
    <label class="f"><span>管理账户名</span><input id="au" value="${esc(a.admin_user||'admin')}" placeholder="如 admin"></label>
    <div class="muted" style="font-size:12px;margin:6px 0 10px">3~32 位，字母 / 数字 / 下划线 / 短横线。忘了密码时也能直接改账户名，不用验证密码。</div>
    <button class="btn pri" onclick="saveAdminUser()">保存账户名</button></div>
-  <div class="card"><h3>修改管理密码</h3>
+  <div class="card"><h3>修改管理密码 <small>当前密码 → 新密码 ×2</small></h3>
    <label class="f"><span>原密码</span><input type="password" id="op"></label>
    <label class="f"><span>新密码（≥8位）</span><input type="password" id="np" oninput="pwMeter()"></label>
    <label class="f"><span>重复新密码</span><input type="password" id="np2" oninput="pwMeter()"></label>
    <div class="muted" id="npm" style="font-size:12px;margin:-4px 0 10px"></div>
    <button class="btn pri" onclick="chPwd()">修改密码</button>
    <div class="muted" style="font-size:12px;margin-top:8px">两次必须一致，避免手滑输错把自己锁在外面。安装时的临时默认口令已在首次登录时强制改掉；这里日常改密仍需填原密码。</div></div>
-  <div class="card"><h3>重新生成账户与密码 <small>忘了凭据时用</small></h3>
-   <button class="btn danger" onclick="resetAdmin()">一键重置</button>
-   <div class="hint">忘了账户名或密码、进不来后台时用这个：不用验证当前密码，直接生成全新的账户名和密码，旧的立刻作废。
-    重置后必须用新凭据重新登录。<br>
-    如果连后台都打不开，就在服务器上用 root 执行 <span class="mono">bash /opt/openvpn-web/reset-admin.sh</span>（会自动重启服务）。</div></div>
  </div>
  <div class="card"><h3>管理端访问白名单 <small>控制谁能打开这个后台</small></h3>
   <div class="bar"><span class="muted">你当前的来源 IP：<b class="mono">${esc(a.current_ip)}</b></span>
@@ -1159,16 +1171,12 @@ async function pgSecurity(){
    保存时如果名单里已经没有你当前的 IP，会被拒绝——防止把自己关在门外。<br>
    真配错了：SSH 上去执行 <span class="mono">python3 app.py --allow 10.20.30.0/24</span>
    （或 <span class="mono">--allow-reset</span> 恢复成本机网段）。</div></div>
- <div class="row">
-  <div class="card"><h3>台账备份 <small>每次账号变更自动生成</small></h3>
-   ${tbl(['时间','类型','文件'],b.backups.filter(x=>x.kind==='users').map(x=>[esc(x.ts),esc(x.kind),'<span class="mono">'+esc(x.path)+'</span>']),null,'userbackups',10,'pgSecurity')}</div>
-  <div class="card"><h3>安全边界</h3><ul class="muted" style="line-height:1.9;padding-left:18px;margin:0">
+ <div class="card"><h3>安全边界 <small>这套系统已经替你做掉的加固</small></h3><ul class="muted" style="line-height:1.9;padding-left:18px;margin:0">
    <li>纯 HTTP 内网页：按来源白名单放行 + 管理密码，PBKDF2 口令、签名 Cookie、CSRF、失败 5 次锁 10 分钟</li>
    <li>Web 以低权限用户运行，特权动作经 sudoers 白名单交给 worker</li>
    <li>溯源到的是<b>账号</b>不是设备；同账号只允许一处在线。开启「无 NAT 溯源」后内网日志才看得到账号固定 IP</li>
    <li>NAT 由自建 OVPNWEB_NAT 链接管，不要再执行 firewall-cmd --add-masquerade</li>
-   <li>不要把它直接暴露公网，远程管理走 HTTPS 反代或堡垒机</li></ul></div>
- </div>`}
+   <li>不要把它直接暴露公网，远程管理走 HTTPS 反代或堡垒机</li></ul></div>`}
 async function saveAdminUser(){const j=await post('/api/admin-user',{username:$('#au').value.trim()});
  toast(j.msg,'ok');loadState();pgSecurity()}
 function pwMeter(){const a=$('#np').value,b=$('#np2').value,m=$('#npm');if(!m)return;
@@ -1176,15 +1184,6 @@ function pwMeter(){const a=$('#np').value,b=$('#np2').value,m=$('#npm');if(!m)re
  if(a.length&&a.length<8){m.innerHTML='<span style="color:var(--err)">新密码至少 8 位</span>';return}
  m.innerHTML=(a&&a===b)?'<span style="color:var(--ok)">两次一致</span>'
    :'<span style="color:var(--err)">两次输入不一致</span>'}
-async function resetAdmin(){
- confirmAct('重置管理账户与密码','将生成全新的账户名和密码，<b>旧凭据立即作废</b>，不用验证当前密码。重置后需要用新凭据重新登录。',
- async()=>{const j=await post('/api/admin-reset',{});
-  modal('新管理凭据 · 请保存',`<div class="hint">这是唯一一次显示，关掉就看不到了。</div>
-   <label class="f"><span>账户名</span><input id="ncu" readonly value="${esc(j.username)}"></label>
-   <label class="f"><span>密码</span><input id="ncp" readonly value="${esc(j.password)}"></label>
-   <button class="btn" onclick="downloadText('openvpn-admin.txt','管理账户: '+document.getElementById('ncu').value+'\\n管理密码: '+document.getElementById('ncp').value)">下载凭据</button>`,
-  ()=>{},'知道了',false,true);
- },'确认重置')}
 async function saveAllow(){
  const j=await post('/api/security/allow',{allow:TAGS.web_allow||[]});
  toast(j.msg,'ok');SEC.allow=j.allow;pgSecurity()}

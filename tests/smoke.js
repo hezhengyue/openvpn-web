@@ -166,6 +166,10 @@ async function waitUp() {
       if (!Array.isArray(cfg.extra_routes) || cfg.extra_routes.length !== 3) errors.push('readCfg 没读到路由标签');
       if (cfg.tun_mtu !== 1400) errors.push('readCfg tun_mtu=' + cfg.tun_mtu);
       if (cfg.data_ciphers !== 'AES-256-GCM:CHACHA20-POLY1305') errors.push('readCfg 加密套件=' + cfg.data_ciphers);
+      if (!w.document.querySelector('#c_public_port')) errors.push('设置页缺少对外映射端口输入框');
+      if (cfg.public_port !== 0) errors.push('readCfg 默认对外端口应为 0（同服务端口），实际=' + cfg.public_port);
+      if (!/不需要一致/.test(w.document.querySelector('#page').textContent))
+        errors.push('设置页没说明公网端口与服务端口可以不一致');
       if (w.document.querySelector('#c_lan_nets')) errors.push('设置页仍然出现「内网网段」输入框');
       // 最低 TLS / 压缩 应藏在高级折叠区里（默认收起），而不是摆在常用表单上
       const adv = w.document.querySelector('details.adv');
@@ -193,7 +197,7 @@ async function waitUp() {
       else if (nw.style.display !== 'none') errors.push('已初始化后侧栏仍显示安装向导');
     } catch (e) { errors.push('设置页交互抛错: ' + e.message); }
 
-    // 版本与更新页：快照与全备份已合并为一张「备份与恢复」卡片
+    // 版本与更新页：备份、恢复拆成两张独立卡片
     try {
       w.go('update'); await wait(600);
       const t = w.document.querySelector('#page').textContent;
@@ -201,7 +205,8 @@ async function waitUp() {
       if (w.document.querySelector('#upbin')) errors.push('版本页仍有「上传二进制」入口（应只留自动编译）');
       if (!w.document.querySelector('#vstat') || !w.document.querySelector('#vver')) errors.push('顶栏缺少状态片');
       if (/Web 自身更新/.test(t)) errors.push('版本页仍显示 Web 自身更新文案');
-      if (!/备份与恢复/.test(t)) errors.push('版本页缺少合并后的备份与恢复卡片');
+      if (!/备份/.test(t) || !/恢复/.test(t)) errors.push('版本页缺少独立的备份/恢复卡片');
+      if (/备份与恢复/.test(t)) errors.push('版本页仍保留合并的备份与恢复标题');
       if (/快照与回滚|全备份与迁移/.test(t)) errors.push('版本页仍保留旧的两张备份卡片');
       if (!/ta\.key/.test(t)) errors.push('备份说明没写清备份内容');
       if (!w.document.querySelector('#fbf')) errors.push('备份卡片缺少上传备份包的输入框');
@@ -215,9 +220,10 @@ async function waitUp() {
       if (/编译环境不完整/.test(t)) errors.push('版本页仍用「编译环境不完整」制造故障错觉');
       const cards = [...w.document.querySelectorAll('#page > .card')];
       const upIdx = cards.findIndex(c => c.textContent.includes('升级 OpenVPN'));
-      const bkIdx = cards.findIndex(c => c.textContent.includes('备份与恢复'));
-      if (upIdx < 0 || bkIdx < 0 || upIdx > bkIdx)
-        errors.push('升级 OpenVPN 卡片应在备份与恢复卡片上方');
+      const bkIdx = cards.findIndex(c => c.textContent.includes('立即备份'));
+      const rsIdx = cards.findIndex(c => c.textContent.includes('恢复选中的备份') || c.textContent.includes('检查备份包'));
+      if (upIdx < 0 || bkIdx < 0 || rsIdx < 0 || upIdx > bkIdx || bkIdx > rsIdx)
+        errors.push('版本页顺序应为：升级 OpenVPN → 备份 → 恢复');
       if (w.document.querySelector('#page > .row'))
         errors.push('版本页卡片仍被两栏 .row 包裹，未与备份卡片对齐');
     } catch (e) { errors.push('版本页交互抛错: ' + e.message); }
@@ -336,8 +342,8 @@ async function waitUp() {
       if (w.document.querySelector('#aup') || w.document.querySelector('#rp'))
         errors.push('改账户名/重置仍要求输入当前密码（忘了密码时无法使用）');
       if (!w.document.querySelector('#np2')) errors.push('改密码缺少「重复新密码」输入框');
-      if (!/重新生成账户与密码/.test(t)) errors.push('安全页缺少一键重置管理凭据入口');
-      if (!/reset-admin\.sh/.test(t)) errors.push('安全页缺少 Linux 重置脚本提示');
+      if (/重新生成账户与密码|resetAdmin\(/.test(t)) errors.push('安全页仍有一键重置入口（应改用服务器脚本）');
+      if (/reset-admin\.sh/.test(t)) errors.push('安全页仍显示脚本提示（应只在登录页提示）');
     } catch (e) { errors.push('安全页交互抛错: ' + e.message); }
 
     try {
@@ -350,6 +356,8 @@ async function waitUp() {
       if (/user\.add|user\.update|settings\.save/.test(body))
         errors.push('审计日志动作仍显示英文 key: ' + body.slice(0, 120));
       if (!/新增账号|修改账号|系统/.test(body)) errors.push('审计日志没有中文化的动作/操作者');
+      const allTxt = w.document.querySelector('#page').textContent;
+      if (!/台账备份/.test(allTxt)) errors.push('台账备份应显示在日志审计页');
     } catch (e) { errors.push('日志页交互抛错: ' + e.message); }
 
     // 在线页：搜索框 + 停用账号（不再有踢下线，踢了客户端会自动重连）
