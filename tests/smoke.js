@@ -72,6 +72,9 @@ async function waitUp() {
     if (/function userPwd\(/.test(html)) errors.push('前端仍保留独立的改密弹窗 userPwd');
     if (/显示密码列|togglePwCol/.test(html)) errors.push('账号页仍保留【显示密码列】开关');
     if (!/有效期/.test(html)) errors.push('账号页缺少有效期字段');
+    if (!/const PAGE_VERSION=/.test(html)) errors.push('页面缺少版本自校验常量 PAGE_VERSION');
+    if (!/function versionGuard\(/.test(html)) errors.push('页面缺少版本自校验函数 versionGuard');
+    if (!/location\.replace\(/.test(html)) errors.push('页面缺少缓存旧界面时强制刷新的逻辑');
     const jar = {};
     const dom = new JSDOM(html, {url: base + '/', runScripts: 'dangerously', virtualConsole: vc,
       pretendToBeVisual: true, beforeParse(w) {

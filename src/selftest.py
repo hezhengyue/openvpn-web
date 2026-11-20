@@ -530,6 +530,17 @@ def main():
                  "/api/logs?kind=deny", "/api/route-guide", "/api/selfcheck", "/api/backups"):
         check("GET " + path, c.get(path).status_code == 200)
     check("导出 ovpn", c.get("/api/client.ovpn").status_code == 200)
+    # 版本自愈：页面内版本常量必须与服务端一致，否则每次打开都会误触发强制刷新
+    section("页面版本自校验（防浏览器缓存旧界面）")
+    import re as _re
+    _html = c.get("/").data.decode("utf-8", "replace")
+    _m = _re.search(r"const\s+PAGE_VERSION\s*=\s*'([^']+)'", _html)
+    check("页面含 PAGE_VERSION 常量", bool(_m), _m.group(1) if _m else "缺失")
+    check("页面版本与服务端版本一致（防误触发强刷）",
+          bool(_m) and _m.group(1) == core.WEB_VERSION,
+          "%s vs %s" % (_m.group(1) if _m else "缺失", core.WEB_VERSION))
+    check("页面含版本自校验函数 versionGuard", "function versionGuard(" in _html)
+    check("页面含缓存 bust 强刷逻辑", "location.replace(" in _html and "searchParams.set('_v'" in _html)
     sp = c.get("/self")
     check("自助改密页内联在 app.py（不再依赖 self.html）",
           sp.status_code == 200 and b"/api/self/whoami" in sp.data, sp.status_code)
