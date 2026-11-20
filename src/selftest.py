@@ -873,6 +873,27 @@ def main():
     check("全备份恢复后账号回来", any(u["username"] == "备份用户" for u in core.list_users()))
     check("恢复前自动打了保护备份", os.path.isfile(res["snapshot"]))
     check("恢复后 ccd 也跟着回来", os.path.exists(os.path.join(core.CCD, "备份用户")))
+    # bin/ 只认「带安装码的替换/编译」：恢复包里的二进制默认不动，否则等于绕开闸门
+    _binp = core.BIN
+    _had_bin = os.path.isfile(_binp)
+    _old_bin = open(_binp, "rb").read() if _had_bin else b""
+    os.makedirs(os.path.dirname(_binp), exist_ok=True)
+    with open(_binp, "wb") as f:
+        f.write(b"OLD-BINARY")
+    _fp2 = fullbackup.create("二进制自检")["path"]
+    with open(_binp, "wb") as f:
+        f.write(b"NEW-BINARY")
+    _r2 = fullbackup.restore(_fp2, audit=False)
+    check("恢复不覆盖 bin/openvpn（二进制只走安装码那条路）",
+          open(_binp, "rb").read() == b"NEW-BINARY" and _r2.get("bin_skipped") is True)
+    fullbackup.restore(_fp2, audit=False, with_bin=True)
+    check("命令行恢复（with_bin=True，root 手工执行）才连二进制一起放回",
+          open(_binp, "rb").read() == b"OLD-BINARY")
+    if _had_bin:
+        with open(_binp, "wb") as f:
+            f.write(_old_bin)
+    else:
+        os.remove(_binp)
     # 坏包必须整包拒绝，绝不能写一半
     wrong = os.path.join(TMP, "wrong.tar.gz")
     wm = os.path.join(TMP, "wm.json")
@@ -1216,6 +1237,30 @@ def main():
         except RuntimeError:
             _gen_ok = False
         check("脚本生成出来的码能直接通过 worker 校验", _gen_ok)
+
+    # 二进制回滚：不要求安装码，但只认 replace-binary 当时钉下的 sha256
+    _prev = os.path.join(core.DATA, "snapshots", "openvpn.previous")
+    os.makedirs(os.path.dirname(_prev), exist_ok=True)
+    os.makedirs(os.path.dirname(core.BIN), exist_ok=True)
+    with open(_prev, "wb") as f:
+        f.write(b"PREVIOUS-BINARY")
+    with open(core.BIN, "wb") as f:
+        f.write(b"CURRENT-BINARY")
+    wk.pin_rollback(_prev)
+    check("替换成功后钉住了旧二进制的指纹",
+          os.path.exists(os.path.join(_etc, "rollback.token")))
+    with open(_prev, "wb") as f:          # 有人偷换了快照文件
+        f.write(b"EVIL-BINARY")
+    try:
+        wk.action_rollback_binary({})
+        _blocked = False
+    except RuntimeError:
+        _blocked = True
+    check("快照被换过就拒绝回滚，当前二进制保持不变",
+          _blocked and open(core.BIN, "rb").read() == b"CURRENT-BINARY")
+    wk.pin_rollback(_prev)                # 重新按当前快照钉一次
+    wk.action_rollback_binary({})
+    check("指纹对得上才真的回滚", open(core.BIN, "rb").read() == b"EVIL-BINARY")
 
     check("install.sh 把 bin/ 收给 root（Web 用户不能再写要被 root 执行的程序）",
           'chown -R root:root "$DEST/bin"' in open(os.path.join(CODE, "install.sh"),

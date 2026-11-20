@@ -1091,7 +1091,7 @@ async function pgUpdate(){const v=await get('/api/version'),
     <button class="btn sm" onclick="fullRestoreName('${esc(x.name)}')">恢复</button>
     <button class="btn sm danger" onclick="fullDel('${esc(x.name)}')">删除</button>`]),'还没有备份，点上面按钮生成','backups',10,'pgUpdate')}</div>
  <div class="card"><h3>恢复 <small>只用本地备份包恢复</small></h3>
-  <div class="hint">恢复会覆盖当前证书、台账、配置与白名单，并重建规则、重启服务；在线用户会被断开后自动重连。
+  <div class="hint">恢复会覆盖当前证书、台账、配置与白名单，并重建规则、重启服务；在线用户会被断开后自动重连。<b>不动 openvpn 二进制</b>（要换版本请到「升级」上传并填安装码）。
    <b>动手前系统会先自动打一份保护备份</b>，误操作也能再退回来。
    机器上的备份点直接在「备份」卡片那一行的【恢复】按钮操作。</div>
   <div class="bar"><input type="file" id="fbf" accept=".tar.gz">
@@ -1135,7 +1135,7 @@ function afterRestore(j){
   +'<div class="hint">到「认证账号」逐个【编辑】把地址改到本网段（建议保持原来的末位，如 10.8.0.2 → 10.8.1.2），改完会自动重建 ACL。</div>',
   ()=>go('users'),'去认证账号改地址');
   }
-function fullRestoreName(n){confirmAct('恢复备份','将用 <b>'+esc(n)+'</b> 覆盖当前 OpenVPN 证书、配置、ccd、二进制与 Web 台账、白名单，并重建规则、重启服务。'
+function fullRestoreName(n){confirmAct('恢复备份','将用 <b>'+esc(n)+'</b> 覆盖当前 OpenVPN 证书、配置、ccd 与 Web 台账、白名单，并重建规则、重启服务（<b>不动 openvpn 二进制</b>）。'
  +'<br>当前状态会先自动打一份保护备份。在线用户会被断开，需要重新拨入。',
  async()=>{const j=await post('/api/full-backup/restore',{name:n});afterRestore(j)},'确认恢复')}
 /* 台账备份恢复：先看变更清单，确认后才真正写库（写前自动备份当前台账） */

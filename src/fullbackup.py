@@ -234,14 +234,20 @@ def preview(path):
             "size": os.path.getsize(path), "name": os.path.basename(path)}
 
 
-def restore(path, audit=True, protect=True):
-    """恢复一份备份包。protect=True 时动数据前先自动打一份保护备份。"""
+def restore(path, audit=True, protect=True, with_bin=False):
+    """恢复一份备份包。protect=True 时动数据前先自动打一份保护备份。
+
+    with_bin 默认 False：`bin/openvpn` 只认「带安装码的替换/编译」这一条路。
+    备份包里就算带了二进制也跳过——否则任何能写 data/ 的进程（也就是 Web）
+    都能借「恢复」把外面的 ELF 变成 root 运行的程序，闸门就白设了。
+    只有命令行 `app.py --restore-full`（root 手工执行）才显式 with_bin=True。
+    """
     # 恢复会成批覆盖证书、配置、ccd 和数据库：必须独占，不能和「另一个请求在改账号」并行
     with core.SYS_LOCK:
-        return _restore(path, audit, protect)
+        return _restore(path, audit, protect, with_bin)
 
 
-def _restore(path, audit=True, protect=True):
+def _restore(path, audit=True, protect=True, with_bin=False):
     info = preview(path)
     m = info["manifest"]
     snap = core.snapshot("备份恢复前") if protect else ""
@@ -276,9 +282,13 @@ def _restore(path, audit=True, protect=True):
             shutil.copy2(src, os.path.join(core.DATA, rel))
         # 二进制单独放回 ROOT/bin（老版本包没有这一项，跳过即可）
         binfile = os.path.join(ov, "openvpn.bin")
+        bin_skipped = False
         if os.path.isfile(binfile):
-            os.makedirs(os.path.dirname(core.BIN), exist_ok=True)
-            shutil.copy2(binfile, core.BIN)
+            if with_bin:
+                os.makedirs(os.path.dirname(core.BIN), exist_ok=True)
+                shutil.copy2(binfile, core.BIN)
+            else:
+                bin_skipped = True     # 要换二进制走「版本与更新」+ 安装码
         # ccd 整个目录替换，不能留目标机上多出来的旧账号
         for fn in os.listdir(core.CCD):
             p = os.path.join(core.CCD, fn)
@@ -321,7 +331,7 @@ def _restore(path, audit=True, protect=True):
             core.log_audit("admin", "backup.full_restore", info["name"])
         return {"name": info["name"], "snapshot": snap,
                 "openvpn_files": info["openvpn_files"], "web_files": info["web_files"],
-                "web_version": m.get("web_version", "")}
+                "web_version": m.get("web_version", ""), "bin_skipped": bin_skipped}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

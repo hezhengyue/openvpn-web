@@ -1319,7 +1319,13 @@ def update_binary():
     snap = core.snapshot("更新二进制前")
 
     def rb(tid):
+        # 先退二进制（worker 只认安装时钉下的那份 sha256），再退配置；
+        # 恢复包一律不碰 bin/，所以这里必须单独走 rollback-binary。
         tlog(tid, "更新失败，回滚到快照…")
+        try:
+            sudo_worker(tid, "rollback-binary", timeout=60)
+        except Exception as e:
+            tlog(tid, "二进制回滚失败（当前二进制保持不变）: %s" % e)
         try:
             core.restore_snapshot(snap)
             sudo_worker(tid, "restart-vpn")
@@ -1402,6 +1408,10 @@ def update_source():
 
     def rb(tid):
         tlog(tid, "编译升级失败，回滚到快照…")
+        try:
+            sudo_worker(tid, "rollback-binary", timeout=60)
+        except Exception as e:
+            tlog(tid, "二进制回滚失败（当前二进制保持不变）: %s" % e)
         try:
             core.restore_snapshot(snap)
             sudo_worker(tid, "restart-vpn", timeout=60)
@@ -1566,6 +1576,8 @@ def full_backup_restore():
     # 包可能来自改了网段的机器：账号地址与当前网段对不上时只提示，让管理员手工改
     stale = core.stale_ip_users()
     msg = "备份已恢复，服务正在重启"
+    if r.get("bin_skipped"):
+        msg += "（包里的 openvpn 二进制已跳过，当前二进制没动；要换版本请到「版本与更新」上传并填安装码）"
     if stale:
         msg += ("，但当前网段 %s 下有 %d 个账号的固定 IP 不在网段内"
                 "（%s…），请到「认证账号」手工改地址"
@@ -1670,7 +1682,9 @@ def main():
             print("用法: python3 app.py --restore-full /path/to/openvpn-web-full-xxx.tar.gz")
             sys.exit(1)
         core.init_db()
-        r = fullbackup.restore(argv[1], audit=False)
+        # 命令行是 root 手工执行的，允许把包里的二进制一起放回去；
+        # Web 侧的恢复一律不碰 bin/（只认「带安装码的替换/编译」）
+        r = fullbackup.restore(argv[1], audit=False, with_bin=True)
         print("已从 %s 恢复：openvpn %d 个文件 / web %d 个文件（Web %s）"
               % (r["name"], r["openvpn_files"], r["web_files"], r["web_version"]))
         print("保护快照: %s" % r["snapshot"])

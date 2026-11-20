@@ -35,7 +35,8 @@ LOGF = None
 
 ACTIONS = {
     "apply-rules", "start-vpn", "stop-vpn", "restart-vpn", "mask-system-unit",
-    "install-timer", "replace-binary", "build-openvpn", "collect-deny", "selfcheck-system",
+    "install-timer", "replace-binary", "build-openvpn", "rollback-binary", "collect-deny",
+    "selfcheck-system",
     "restore-snapshot", "update-web", "restorecon", "kick-user",
 }
 
@@ -108,6 +109,56 @@ def require_install_code(code):
         raise RuntimeError("安装码不正确（已错 %d 次，错满 %d 次作废）"
                            % (tok["fail"], GATE_FAIL_LIMIT))
     _drop_token()
+
+
+# ---------------------------------------------------------------- 二进制回滚
+# 升级后自检不过要能退回旧二进制，但「能退回」不等于「什么都能退」：
+# 只在 replace-binary 装成功的那一刻，把「装之前那一份」的 sha256 钉在这里，
+# 回滚动作只认这一份。Web 就算往 data/snapshots 里塞别的 ELF 也顶不上来，
+# 所以回滚不需要安装码，也开不出新的提权口子。
+ROLLBACK_TTL = 1800
+
+
+def rollback_token_path():
+    return os.path.join(ETC, "rollback.token")
+
+
+def drop_rollback():
+    try:
+        os.remove(rollback_token_path())
+    except OSError:
+        pass
+
+
+def read_rollback():
+    try:
+        with open(rollback_token_path(), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return {}
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for b in iter(lambda: f.read(1 << 20), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
+def pin_rollback(prev):
+    """装成功后把旧二进制钉住；旧的不存在（首装）就把授权清掉"""
+    if not prev or not os.path.isfile(prev):
+        drop_rollback()
+        return
+    try:
+        with open(rollback_token_path(), "w", encoding="utf-8") as f:
+            json.dump({"sha256": sha256_file(prev), "exp": time.time() + ROLLBACK_TTL}, f)
+        os.chmod(rollback_token_path(), 0o600)
+    except OSError:
+        pass
 
 
 def scrub_install_code(job, spec):
@@ -278,11 +329,40 @@ def action_replace_binary(p):
     shutil.copy2(src, tmp)
     os.chmod(tmp, 0o755)
     os.replace(tmp, dst)
+    pin_rollback(os.path.join(DATA, "snapshots", "openvpn.previous"))
     v, br = core.binary_version(dst)
     core.set_meta("openvpn_version", v)
     core.set_meta("last_update", core.now() + " 更新至 " + v)
     log("二进制已替换为 %s（%s 分支）" % (v, br))
     os.remove(src)
+
+
+def action_rollback_binary(p):
+    """升级后自检不过时退回安装前的二进制（只认当时钉下的 sha256）"""
+    prev = os.path.join(DATA, "snapshots", "openvpn.previous")
+    tok = read_rollback()
+    if tok is None:
+        raise RuntimeError("没有可回滚的二进制（替换成功后 30 分钟内才允许回滚）")
+    if not tok:
+        drop_rollback()
+        raise RuntimeError("回滚授权已损坏，已作废；当前二进制保持不变")
+    if time.time() > float(tok.get("exp") or 0):
+        drop_rollback()
+        raise RuntimeError("回滚授权已过期（30 分钟）。要退回旧版本请上传对应二进制并填安装码")
+    if not os.path.isfile(prev):
+        drop_rollback()
+        raise RuntimeError("找不到安装前的二进制快照，无法回滚")
+    if sha256_file(prev) != str(tok.get("sha256") or ""):
+        drop_rollback()
+        raise RuntimeError("快照与安装时的记录不一致，已拒绝回滚（文件被替换过）")
+    dst = core.BIN
+    tmp = dst + ".new"
+    shutil.copy2(prev, tmp)
+    os.chmod(tmp, 0o755)
+    os.replace(tmp, dst)
+    drop_rollback()
+    v, br = core.binary_version(dst)
+    log("已回滚二进制到安装前版本 %s" % (v or "未知"))
 
 
 def action_build_openvpn(p):
@@ -439,6 +519,7 @@ DISPATCH = {
     "stop-vpn": action_stop_vpn, "restart-vpn": action_restart_vpn,
     "mask-system-unit": action_mask_system_unit, "install-timer": action_install_timer,
     "replace-binary": action_replace_binary, "build-openvpn": action_build_openvpn,
+    "rollback-binary": action_rollback_binary,
     "collect-deny": action_collect_deny,
     "selfcheck-system": action_selfcheck_system, "restore-snapshot": action_restore_snapshot,
     "update-web": action_update_web, "restorecon": action_restorecon,
