@@ -69,8 +69,12 @@ def bootstrap_admin():
         return
     p = os.path.join(core.DATA, "admin_password.txt")
     if os.path.exists(p):
-        core.set_meta("admin_hash", core.hash_password(open(p).read().strip()))
-        core.log_audit("system", "bootstrap", "初始管理密码已导入")
+        # 只取第一行：重置凭据时会在第二行追加账户名说明
+        lines = [x.strip() for x in open(p).read().splitlines() if x.strip() and not x.startswith("#")]
+        pw = lines[0] if lines else ""
+        if pw:
+            core.set_meta("admin_hash", core.hash_password(pw))
+            core.log_audit("system", "bootstrap", "初始管理密码已导入")
 
 
 # --------------------------------------------------------------------------- 鉴权

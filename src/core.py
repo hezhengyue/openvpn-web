@@ -2528,6 +2528,15 @@ def admin_reset_credentials():
     set_meta("admin_user", name)
     set_meta("admin_hash", hash_password(pw))
     log_audit("admin", "admin.reset", "管理账户与密码已重新生成")
+    # 同步覆盖初始凭据文件，避免有人照着旧文件登录失败。
+    # 第一行必须是纯密码：bootstrap_admin() 只取第一行。
+    try:
+        with open(os.path.join(DATA, "admin_password.txt"), "w") as f:
+            f.write(pw + "\n")
+            f.write("# 管理账户: %s（重置于 %s）\n" % (name, now()))
+        os.chmod(os.path.join(DATA, "admin_password.txt"), 0o600)
+    except Exception:
+        pass
     return {"username": name, "password": pw}
 
 
