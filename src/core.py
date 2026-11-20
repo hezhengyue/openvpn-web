@@ -46,7 +46,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "1.3.15"
+WEB_VERSION = "1.3.16"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -965,38 +965,38 @@ def delete_user(username, actor="web"):
 
 
 def backup_users(actor="web"):
-    """每次台账变更前备份，误删可直接把备份当台账导入回滚"""
+    """每次台账变更前备份一份「和导出一模一样」的 Excel（含明文密码）。
+
+    用户在页面上下载这个 xlsx，就能直接到「认证账号 → 导入」做全量同步恢复——
+    和手工导出的文件没有任何区别；机器上的这份也留着，可以一键就地恢复。
+    """
     ensure_dirs()
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    path = os.path.join(BACKUPS, "users-%s.tsv" % ts)
-    with open(path, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.writer(f, delimiter="\t")
-        w.writerow(["用户名", "姓名", "部门", "密码", "VPN固定IP", "状态", "有效期", "备注"])
-        for u in list_users():
-            w.writerow([u["username"], u.get("real_name") or "", u.get("dept") or "",
-                        u.get("password_plain") or "", u["vpn_ip"],
-                        "启用" if u["enabled"] else "停用", u.get("expires_at") or "",
-                        u["note"] or ""])
+    # 备份不做「空密码拒绝」：宁可把空密码如实写进去，也不能让删账号这类操作卡在备份上
+    name, data, _ = users_file(users_rows(strict=False), "xlsx", "users-%s" % ts)
+    path = os.path.join(BACKUPS, name)
+    with open(path, "wb") as f:
+        f.write(data)
     try:
-        os.chmod(path, 0o600)   # 台账备份现在含明文密码，不能让同机普通用户读走
+        os.chmod(path, 0o600)   # 台账备份含明文密码，不能让同机普通用户读走
     except Exception:
         pass
     con = db()
     con.execute("INSERT INTO backups(ts,kind,path,note) VALUES(?,?,?,?)",
-                (now(), "users", path, "台账变更自动备份"))
+                (now(), "users", path, "账号变更自动备份（Excel，含密码）"))
     con.commit()
     con.close()
     return path
 
 
 def user_backup_path(path):
-    """校验并返回台账备份的真实路径（必须落在 BACKUPS 目录、且是 users-*.tsv）"""
+    """校验并返回台账备份的真实路径（必须落在 BACKUPS 目录、且是 users-*.xlsx/csv/tsv）"""
     p = os.path.realpath(str(path or "").strip())
     base = os.path.realpath(BACKUPS)
     if not p.startswith(base + os.sep):
         raise ValueError("备份路径非法")
     name = os.path.basename(p)
-    if not (name.startswith("users-") and name.endswith(".tsv")):
+    if not (name.startswith("users-") and name.lower().endswith((".xlsx", ".csv", ".tsv"))):
         raise ValueError("这不是台账备份文件")
     if not os.path.isfile(p):
         raise ValueError("备份文件不存在，可能已被清理")
@@ -1004,7 +1004,7 @@ def user_backup_path(path):
 
 
 def read_user_backup(path):
-    """读取台账备份（tsv 全量台账），返回 (内容字节, 文件名)"""
+    """读取台账备份（xlsx 为主，兼容历史 tsv/csv），返回 (内容字节, 文件名)"""
     p = user_backup_path(path)
     with open(p, "rb") as f:
         return f.read(), os.path.basename(p)
@@ -1017,23 +1017,38 @@ EXPORT_HEADER = ["用户名", "姓名", "部门", "密码", "VPN固定IP", "状�
 
 
 def export_users(fmt="xlsx"):
+    return users_file(users_rows(strict=True), fmt, "用户台账")
+
+
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def users_rows(strict=True):
+    """台账行：导出、自动备份、Excel 恢复三处共用一套列，保证格式永远一致"""
     users = list_users()
-    blank = [u["username"] for u in users if not (u.get("password_plain") or "").strip()]
-    if blank:
-        raise ValueError("以下账号没有明文密码，不能导出：%s。请到「认证账号 → 编辑」补上密码再导出。"
-                         % "、".join(blank[:10]) + (" 等" if len(blank) > 10 else ""))
+    if strict:
+        blank = [u["username"] for u in users if not (u.get("password_plain") or "").strip()]
+        if blank:
+            raise ValueError("以下账号没有明文密码，不能导出：%s。请到「认证账号 → 编辑」补上密码再导出。"
+                             % "、".join(blank[:10]) + (" 等" if len(blank) > 10 else ""))
     rows = [EXPORT_HEADER]
     for u in users:
         rows.append([u["username"], u.get("real_name") or "", u.get("dept") or "",
-                     u["password_plain"], u["vpn_ip"], "启用" if u["enabled"] else "停用",
+                     u.get("password_plain") or "", u["vpn_ip"],
+                     "启用" if u["enabled"] else "停用",
                      u.get("expires_at") or "", u["note"] or ""])
+    return rows
+
+
+def users_file(rows, fmt="xlsx", fname="用户台账", sheet="认证账号"):
+    """把台账行渲染成 (文件名, 字节, mime)。xlsx 不可用时自动退 csv，保证备份不会因此失败"""
     if fmt == "xlsx":
         try:
             from openpyxl import Workbook
             from openpyxl.styles import Font, PatternFill
             wb = Workbook()
             ws = wb.active
-            ws.title = "认证账号"
+            ws.title = sheet
             for r in rows:
                 ws.append(r)
             for cell in ws[1]:
@@ -1043,15 +1058,20 @@ def export_users(fmt="xlsx"):
                                ("F", 9), ("G", 13), ("H", 26)):
                 ws.column_dimensions[col].width = width
             ws.freeze_panes = "A2"
+            # 公式注入防护：姓名/部门/备注里以 = + - @ 开头的内容，Excel 会当公式执行。
+            # 这里统一按文本落盘，避免「导出的表在自己机器上跑起来」。
+            for row in ws.iter_rows(min_row=2):
+                for cell in row:
+                    if cell.data_type == "f":
+                        cell.data_type = "s"
             buf = io.BytesIO()
             wb.save(buf)
-            return "用户台账.xlsx", buf.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            return fname + ".xlsx", buf.getvalue(), XLSX_MIME
         except Exception:
-            fmt = "csv"
+            pass
     sio = io.StringIO()
-    w = csv.writer(sio)
-    w.writerows(rows)
-    return "用户台账.csv", ("\ufeff" + sio.getvalue()).encode("utf-8"), "text/csv; charset=utf-8"
+    csv.writer(sio).writerows(rows)
+    return fname + ".csv", ("\ufeff" + sio.getvalue()).encode("utf-8"), "text/csv; charset=utf-8"
 
 
 def parse_users_file(content, filename=""):

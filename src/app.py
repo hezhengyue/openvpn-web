@@ -25,6 +25,7 @@ from datetime import timedelta
 
 from flask import (Flask, request, session, jsonify, send_file, Response,
                    send_from_directory)
+from werkzeug.exceptions import HTTPException
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import core  # noqa: E402
@@ -35,9 +36,12 @@ PORT = int(os.environ.get("OVPN_WEB_PORT", "8800"))
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
 app = Flask(__name__, static_folder=None)
+# 走 HTTPS 反代时设 OVPN_WEB_HTTPS=1：会话 cookie 加 Secure，浏览器不再走明文重发
+HTTPS_ONLY = os.environ.get("OVPN_WEB_HTTPS") == "1"
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=HTTPS_ONLY,
     PERMANENT_SESSION_LIFETIME=timedelta(hours=8),
     MAX_CONTENT_LENGTH=80 * 1024 * 1024,
 )
@@ -102,13 +106,28 @@ def client_ip():
 
 
 @app.after_request
-def no_cache_html(resp):
-    """HTML 一律不缓存。
+def security_headers(resp):
+    """HTML 一律不缓存 + 一组基础安全响应头。
 
-    前端是单文件 index.html（内联 CSS/JS），改完只换磁盘上这一个文件。
+    HTML 不缓存：前端是单文件 index.html（内联 CSS/JS），改完只换磁盘上这一个文件。
     浏览器若拿缓存里的旧页面，就会出现"代码明明删了、用户那里还在"的错觉
     （实际踩过：台账页的「踢」按钮和英文审计动作都是这么来的）。
+
+    安全头：前端全内联，CSP 只能允许 inline，但把外部资源、object、base 改写、
+    外站嵌入全部堵掉——真被塞进一段注入脚本时，它也没法把数据带到外部域。
     """
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    resp.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+    resp.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; "
+        "connect-src 'self'; object-src 'none'; base-uri 'self'; "
+        "form-action 'self'; frame-ancestors 'none'")
+    if request.is_secure or (request.headers.get("X-Forwarded-Proto") or "").lower() == "https":
+        resp.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
     if resp.mimetype == "text/html":
         resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         resp.headers["Pragma"] = "no-cache"
@@ -181,10 +200,19 @@ def err(e, code=400):
 
 @app.errorhandler(Exception)
 def on_error(e):
+    if isinstance(e, HTTPException):
+        # 404/405 等保持原状态码，别被包成 500
+        return jsonify(ok=False, msg=e.description or e.name), e.code or 500
     if isinstance(e, ValueError):
         return err(e)
+    # 500 只回通用文案：异常栈里有真实路径、SQL、内部结构，不能回给浏览器。
+    # 细节只写服务器日志 + 审计，排查照样有据可查。
     traceback.print_exc()
-    return jsonify(ok=False, msg="%s: %s" % (type(e).__name__, e)), 500
+    try:
+        core.log_audit("system", "error", "%s: %s" % (type(e).__name__, str(e)[:300]))
+    except Exception:
+        pass
+    return jsonify(ok=False, msg="服务端处理失败，错误已记录；请查看服务器日志"), 500
 
 
 # --------------------------------------------------------------------------- 会话
@@ -193,17 +221,25 @@ def on_error(e):
 def api_session():
     if not session.get("csrf"):
         session["csrf"] = uuid.uuid4().hex
-    return ok({"logged": bool(session.get("user")), "csrf": session["csrf"],
+    logged = bool(session.get("user"))
+    return ok({"logged": logged, "csrf": session["csrf"],
                "initialized": bool(core.get_meta("initialized")),
                "web_version": core.WEB_VERSION, "mock": MOCK,
                "must_change": admin_must_change_session(),
-               "admin_user": core.admin_user(), "src_ip": client_ip(),
+               # 没登录就不回管理账户名：登录页不需要它，回了只是白送一半凭据
+               "admin_user": core.admin_user() if logged else "",
+               "src_ip": client_ip(),
                "allow": core.allow_list()})
 
 
 @app.post("/api/login")
 def api_login():
     ip = client_ip()
+    # 防止有人拿大量源 IP 刷失败次数把这张表撑大（每个 IP 一条也会占内存）
+    if len(LOGIN_FAILS) > 500:
+        _now = time.time()
+        for _k in [k for k, v in LOGIN_FAILS.items() if not any(_now - t < 600 for t in v)]:
+            LOGIN_FAILS.pop(_k, None)
     fails = [t for t in LOGIN_FAILS.get(ip, []) if time.time() - t < 600]
     LOGIN_FAILS[ip] = fails
     if len(fails) >= 5:
@@ -255,12 +291,9 @@ def api_admin_user():
     return ok({"username": name, "msg": "管理账户名已改为 " + name})
 
 
-@app.post("/api/admin-reset")
-def api_admin_reset():
-    """一键重置管理账户 + 密码：忘了凭据时用，不校验当前密码，返回明文只此一次。"""
-    r = core.admin_reset_credentials()
-    return ok({"username": r["username"], "password": r["password"],
-               "msg": "管理账户与密码已重置，请用新凭据重新登录"})
+# 说明：这里原本还有一个 POST /api/admin-reset（已登录就能生成全新管理凭据）。
+# 界面上早就撤掉了，只留服务器脚本；留一个没人用的「改凭据」接口等于多开一扇门，
+# 所以整条路由删除。忘了凭据请用：bash /opt/openvpn-web/reset-admin.sh
 
 
 @app.get("/api/security/allow")
@@ -355,10 +388,27 @@ function lockAll(on) {
     var box = $("#who");
     if (w.ok && w.identified) {
       box.className = "who";
-      box.innerHTML = "已识别：<b>" + (w.real_name || w.username) + "</b>"
-        + (w.dept ? "（" + w.dept + "）" : "") + " · 账号 <b>" + w.username + "</b>"
-        + " · 固定 IP <b>" + w.vpn_ip + "</b>"
-        + (w.enabled ? "" : "<br><span style='color:#c92a0c'>该账号已停用，改密码也连不上，请联系管理员</span>");
+      // 姓名 / 部门 / 账号名都来自台账（Excel 导入），一律 textContent 落进去，
+      // 绝不用 innerHTML 拼——否则一个叫 `<img onerror=...>` 的姓名就能在这页执行脚本。
+      box.textContent = "";
+      var add = function (tag, text) {
+        var el = document.createElement(tag);
+        el.textContent = text;
+        box.appendChild(el);
+        return el;
+      };
+      box.appendChild(document.createTextNode("已识别："));
+      add("b", w.real_name || w.username);
+      if (w.dept) box.appendChild(document.createTextNode("（" + w.dept + "）"));
+      box.appendChild(document.createTextNode(" · 账号 "));
+      add("b", w.username);
+      box.appendChild(document.createTextNode(" · 固定 IP "));
+      add("b", w.vpn_ip);
+      if (!w.enabled) {
+        box.appendChild(document.createElement("br"));
+        var sp = add("span", "该账号已停用，改密码也连不上，请联系管理员");
+        sp.style.color = "#c92a0c";
+      }
       if (w.enabled) { lockAll(false); $("#old").focus(); }
     } else {
       box.className = "who bad";
@@ -1283,8 +1333,12 @@ def user_backups_list():
 @app.get("/api/user-backups/download")
 def user_backup_download():
     data, name = core.read_user_backup(request.args.get("path", ""))
-    return send_file(io.BytesIO(data), mimetype="text/tab-separated-values; charset=utf-8",
-                     as_attachment=True, download_name=name)
+    # 磁盘上统一叫 users-*.xlsx，下载时给个人能看懂的名字；扩展名跟着实际格式走
+    ext = os.path.splitext(name)[1] or ".xlsx"
+    pretty = "认证账号-" + name[len("users-"):-len(ext)] + ext if name.startswith("users-") else name
+    return send_file(io.BytesIO(data), mimetype=(
+        core.XLSX_MIME if ext.lower() == ".xlsx" else "text/csv; charset=utf-8"),
+        as_attachment=True, download_name=pretty)
 
 
 @app.post("/api/user-backups/restore")

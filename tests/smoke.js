@@ -233,10 +233,10 @@ async function waitUp() {
       const upIdx = cards.findIndex(c => c.textContent.includes('升级 OpenVPN'));
       const bkIdx = cards.findIndex(c => c.textContent.includes('立即备份'));
       const rsIdx = cards.findIndex(c => c.textContent.includes('检查本地备份包'));
-      const ubIdx = cards.findIndex(c => c.textContent.includes('台账备份'));
+      const ubIdx = cards.findIndex(c => c.textContent.includes('认证账号备份'));
       if (upIdx < 0 || bkIdx < 0 || rsIdx < 0 || ubIdx < 0 ||
           upIdx > bkIdx || bkIdx > rsIdx || rsIdx > ubIdx)
-        errors.push('版本页顺序应为：升级 OpenVPN → 备份 → 恢复 → 台账备份');
+        errors.push('版本页顺序应为：升级 OpenVPN → 备份 → 恢复 → 认证账号备份');
       // 机器上的备份点就地恢复（按钮在备份列表行内），恢复卡片只负责本地文件
       if (w.document.querySelector('#fbpick')) errors.push('恢复卡片仍保留「选择本机备份点」下拉');
       const bkBtn = cards[bkIdx] ? [...cards[bkIdx].querySelectorAll('button')].map(x => x.textContent.trim()) : [];

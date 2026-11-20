@@ -155,6 +155,14 @@ def main():
     section("登录 / CSRF / 来源白名单")
     j = c.get("/api/session").get_json()
     check("会话接口返回 csrf", bool(j["csrf"]))
+    check("未登录不回管理账户名", j.get("admin_user") == "", j.get("admin_user"))
+    _h0 = c.get("/")
+    check("安全响应头齐全（nosniff / 禁止嵌套 / CSP / no-referrer）",
+          _h0.headers.get("X-Content-Type-Options") == "nosniff"
+          and _h0.headers.get("X-Frame-Options") == "DENY"
+          and _h0.headers.get("Referrer-Policy") == "no-referrer"
+          and "frame-ancestors 'none'" in (_h0.headers.get("Content-Security-Policy") or ""),
+          dict(_h0.headers))
     check("未登录访问 state 被拒", c.get("/api/state").status_code == 401)
     lr = c.post("/api/login", json={"username": "admin", "password": "wrong"})
     check("错误密码被拒", lr.status_code == 401)
@@ -359,10 +367,23 @@ def main():
     except ValueError:
         check("IP 重复整批拒绝", True)
 
-    # ---------- 台账备份：下载 + 就地恢复 ----------
-    section("台账备份与恢复")
+    # ---------- 认证账号备份：Excel 与导出同款 + 就地恢复 ----------
+    section("账号备份（Excel）与恢复")
     ub = core.backup_users("selftest")
-    check("台账备份是 users-*.tsv", os.path.basename(ub).startswith("users-") and ub.endswith(".tsv"))
+    check("账号备份是 users-*.xlsx", os.path.basename(ub).startswith("users-") and ub.endswith(".xlsx"))
+    bk_data, bk_name = core.read_user_backup(ub)
+
+    def _head(data):
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(data), read_only=True)
+        return tuple(next(wb.active.iter_rows(values_only=True)))
+    _exp_name, _exp_data, _ = core.export_users("xlsx")
+    check("自动备份与导出 Excel 表头完全一致",
+          _head(_exp_data) == _head(bk_data) == tuple(core.EXPORT_HEADER))
+    bk_rows, bk_errs = core.parse_users_file(bk_data, bk_name)
+    check("账号备份能直接被导入解析（含密码）",
+          not bk_errs and len(bk_rows) == len(core.list_users())
+          and all(r["password"] for r in bk_rows))
     check("台账备份路径可校验", core.user_backup_path(ub) == os.path.realpath(ub))
     try:
         core.user_backup_path("/etc/passwd"); check("台账备份路径越界被拒", False)
@@ -373,16 +394,15 @@ def main():
         check("非台账文件不能当备份恢复", False)
     except ValueError:
         check("非台账文件不能当备份恢复", True)
-    data, fname = core.read_user_backup(ub)
     core.delete_user("wangwu", "selftest")          # 模拟误删
     check("误删后账号确实少了", not [u for u in core.list_users() if u["username"] == "wangwu"])
-    pv = core.preview_import(data, fname)
-    check("台账恢复预览列出要补回的账号",
+    pv = core.preview_import(bk_data, bk_name)
+    check("账号备份恢复预览列出要补回的账号",
           any(x["op"] == "新增" and x["username"] == "wangwu" for x in pv["changes"]))
     rs = core.apply_import(pv["token"], action="user_backup.restore")
-    check("台账恢复把账号补回来", rs["count"] == 3 and
+    check("账号备份恢复把账号补回来", rs["count"] == 3 and
           [u for u in core.list_users() if u["username"] == "wangwu"][0]["password_plain"] == "ImpPass9012")
-    check("台账恢复前会再备份当前台账", os.path.exists(rs["backup"]))
+    check("账号备份恢复前会再备份当前台账", os.path.exists(rs["backup"]))
     check("恢复动作审计用的是台账口径",
           any(r.get("action") == "user_backup.restore" for r in core.get_logs("audit", 200)))
 
@@ -698,7 +718,7 @@ def main():
     # 登录会重建会话并换 CSRF，刷新测试用的 token 再继续
     H["X-CSRF-Token"] = c.get("/api/session").get_json()["csrf"]
     check("非法账户名被拒", P("/api/admin-user", {"username": "a b"}).status_code == 400)
-    check("重置凭据不需要密码", P("/api/admin-reset", {}).get_json()["ok"])
+    check("Web 已不再暴露重置凭据接口", P("/api/admin-reset", {}).status_code == 404)
     check("重置后不触发首登强改", core.admin_must_change() is False)
     _reset = core.admin_reset_credentials()   # 直接取明文用于登录断言
     check("重置返回新账户名", _reset.get("username", "").startswith("admin-"), _reset)
