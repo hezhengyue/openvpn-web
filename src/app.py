@@ -3,8 +3,17 @@
 """
 OpenVPN Web 一体化管理系统 —— Web 入口
 
-单进程、单线程、零构建：Flask 自带 server + SQLite + 单文件前端。
-    app.run(host, port, threaded=False, use_reloader=False, debug=False)
+单进程 + 线程池，零构建：waitress（纯 Python WSGI 服务器）+ SQLite + 单文件前端。
+    serve(app, host, port, threads=8)
+
+为什么是「单进程多线程」而不是 gunicorn 那种多进程：
+  * 进程内状态（公网 IP 缓存、二进制版本缓存、任务节流）只有一份，不用考虑同步；
+  * SQLite 仍然只有一个写入者，WAL + busy_timeout 就够了，不会出现跨进程抢锁；
+  * 多进程（gunicorn/uwsgi 的 pre-fork）同时写同一个 SQLite 文件会 database is locked。
+没装 waitress 时自动退回 Flask 自带的 Werkzeug 开发服务器（单线程），功能不受影响，
+只是慢请求会挡住别人——journal 里那条 WARNING 就是这么来的。
+    OVPN_WEB_SERVER=werkzeug   # 强制退回开发服务器
+    OVPN_WEB_THREADS=8         # 线程数，默认 8
 
 长任务（安装/更新/重启）走独立后台线程并持全局写锁，HTTP 请求只返回 task_id，
 前端轮询进度与日志；所有特权系统动作交给 worker.py（sudo 白名单）。
@@ -34,6 +43,12 @@ import fullbackup  # noqa: E402
 ROOT = os.path.dirname(os.path.abspath(__file__))      # 代码所在目录
 PORT = int(os.environ.get("OVPN_WEB_PORT", "8800"))
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
+# auto/waitress = 用 waitress；werkzeug = 退回 Flask 自带的开发服务器（救场用）
+SERVER_MODE = (os.environ.get("OVPN_WEB_SERVER") or "auto").strip().lower()
+try:
+    THREADS = max(1, min(64, int(os.environ.get("OVPN_WEB_THREADS", "8"))))
+except ValueError:
+    THREADS = 8
 
 app = Flask(__name__, static_folder=None)
 # 走 HTTPS 反代时设 OVPN_WEB_HTTPS=1：会话 cookie 加 Secure，浏览器不再走明文重发
@@ -48,8 +63,32 @@ app.config.update(
 
 WRITE_LOCK = threading.Lock()
 LOGIN_FAILS = {}          # src_ip -> [(ts, ...)]，Web 登录失败锁定
+LOGIN_LOCK = threading.Lock()   # 多线程下这张表会被并发读写，清理时边遍历边插入会抛 RuntimeError
 TASKS_DIR = os.path.join(core.DATA, "tasks")
 CTX = {"tid": ""}         # 当前长任务 id（全局写锁保证同一时刻只有一个执行者）
+
+
+def _fails_take(key):
+    """取某来源最近 10 分钟的失败时间戳，顺手把过期的清掉（多线程下必须加锁）。"""
+    with LOGIN_LOCK:
+        # 防止有人拿大量源 IP 刷失败次数把这张表撑大（每个 IP 一条也会占内存）
+        if len(LOGIN_FAILS) > 500:
+            _now = time.time()
+            for _k in [k for k, v in list(LOGIN_FAILS.items()) if not any(_now - t < 600 for t in v)]:
+                LOGIN_FAILS.pop(_k, None)
+        fails = [t for t in LOGIN_FAILS.get(key, []) if time.time() - t < 600]
+        LOGIN_FAILS[key] = fails
+        return len(fails)
+
+
+def _fails_add(key):
+    with LOGIN_LOCK:
+        LOGIN_FAILS.setdefault(key, []).append(time.time())
+
+
+def _fails_clear(key):
+    with LOGIN_LOCK:
+        LOGIN_FAILS.pop(key, None)
 
 
 def _default_secret():
@@ -235,20 +274,13 @@ def api_session():
 @app.post("/api/login")
 def api_login():
     ip = client_ip()
-    # 防止有人拿大量源 IP 刷失败次数把这张表撑大（每个 IP 一条也会占内存）
-    if len(LOGIN_FAILS) > 500:
-        _now = time.time()
-        for _k in [k for k, v in LOGIN_FAILS.items() if not any(_now - t < 600 for t in v)]:
-            LOGIN_FAILS.pop(_k, None)
-    fails = [t for t in LOGIN_FAILS.get(ip, []) if time.time() - t < 600]
-    LOGIN_FAILS[ip] = fails
-    if len(fails) >= 5:
+    if _fails_take(ip) >= 5:
         return jsonify(ok=False, msg="失败次数过多，10 分钟后再试"), 429
     d = request.get_json(silent=True) or {}
     if not core.admin_login(d.get("username", ""), d.get("password", "")):
-        fails.append(time.time())
+        _fails_add(ip)
         return jsonify(ok=False, msg="账户或密码错误"), 401
-    LOGIN_FAILS.pop(ip, None)
+    _fails_clear(ip)
     session.clear()
     session.permanent = True
     # 审计里的操作者就是管理员登录账户名，不再单独配「操作者名称」
@@ -480,9 +512,7 @@ def api_self_whoami():
 def api_self_password():
     ip = client_ip()
     key = "self:" + ip
-    fails = [t for t in LOGIN_FAILS.get(key, []) if time.time() - t < 600]
-    LOGIN_FAILS[key] = fails
-    if len(fails) >= 5:
+    if _fails_take(key) >= 5:
         return jsonify(ok=False, msg="失败次数过多，10 分钟后再试"), 429
     token = request.headers.get("X-CSRF-Token") or (request.get_json(silent=True) or {}).get("csrf")
     if not token or token != session.get("csrf"):
@@ -492,15 +522,15 @@ def api_self_password():
     # 认不出来 = 没连 VPN，直接给明确提示，而不是笼统报「密码错」。
     u = core.user_by_vpn_ip(ip)
     if not u:
-        fails.append(time.time())
+        _fails_add(key)
         return jsonify(ok=False,
                        msg="没识别到你的账号，请先连上 VPN 再打开本页；已经连着 VPN 请联系管理员核对固定 IP"), 401
     try:
         r = core.self_change_password(u["vpn_ip"], d.get("old", ""), d.get("new", ""), src_ip=ip)
     except ValueError as e:
-        fails.append(time.time())
+        _fails_add(key)
         return jsonify(ok=False, msg=str(e)), 401
-    LOGIN_FAILS.pop(key, None)
+    _fails_clear(key)
     return ok({"username": r["username"], "msg": "密码已修改，下次拨号请使用新密码"})
 
 
@@ -553,11 +583,13 @@ def start_task(kind, steps, actor="admin", on_error=None):
     con.execute("INSERT INTO tasks(id,kind,status,progress,msg,created_at,actor) VALUES(?,?,?,?,?,?,?)",
                 (tid, kind, "running", 0, "排队中", core.now(), actor))
     con.commit(); con.close()
-    CTX["tid"] = tid      # 先绑定，线程启动后 steps 立即可用
 
     def runner():
         try:
             with WRITE_LOCK:
+                # 只能在拿到写锁后绑定：否则后来的任务会把正在跑的任务的 tid 顶掉，
+                # 前一个任务的 sudo_worker(CTX["tid"]) 就会把结果写进别人的任务日志。
+                # （多线程下这条是必须的；单线程时后台任务与 HTTP 本来也是并发的。）
                 CTX["tid"] = tid
                 total = len(steps)
                 for i, (label, fn) in enumerate(steps):
@@ -1081,24 +1113,33 @@ def settings_preview():
 
 
 _PUBIP = {"ts": 0.0, "ip": "", "src": ""}
+_PUBIP_LOCK = threading.Lock()   # 多线程下同时进来只让一个人真去探测，其余人等结果
+
+
+def _pubip_get(force=False):
+    """取本机出口公网 IP，返回 (ip, source, 是否命中缓存)。
+
+    结果（包括「探不到」）缓存 10 分钟：探测要挨个请求 3 个外部地址
+    （每个 1.5s 超时），没外网的机器不该每次打开设置页都卡几秒。
+    """
+    if not force and time.time() - _PUBIP["ts"] < 600:
+        return _PUBIP["ip"], _PUBIP["src"], True
+    with _PUBIP_LOCK:
+        # 等锁期间别人可能已经探完了，直接复用，别在锁里重复打外网
+        if not force and time.time() - _PUBIP["ts"] < 600:
+            return _PUBIP["ip"], _PUBIP["src"], True
+        ip, src = core.detect_public_ip()
+        _PUBIP.update({"ts": time.time(), "ip": ip, "src": src})
+        return ip, src, False
 
 
 @app.get("/api/settings/public-ip")
 def settings_public_ip():
     """探测本机出口公网 IP，仅用于「对外地址」留空时的默认建议。
 
-    结果（包括「探不到」）缓存 10 分钟：这个服务是单线程的，探测要挨个请求
-    3 个外部地址（每个 1.5s 超时），没外网的机器每次打开向导/设置页都要卡几秒。
     页面上的【自动识别】按钮带 refresh=1，会强制重探。
     """
-    force = request.args.get("refresh") == "1"
-    if not force and time.time() - _PUBIP["ts"] < 600:
-        cached = True
-        ip, src = _PUBIP["ip"], _PUBIP["src"]
-    else:
-        cached = False
-        ip, src = core.detect_public_ip()
-        _PUBIP.update({"ts": time.time(), "ip": ip, "src": src})
+    ip, src, cached = _pubip_get(force=request.args.get("refresh") == "1")
     return ok({"ip": ip, "source": src, "cached": cached,
                "msg": ("已识别公网 IP %s" % ip) if ip else
                       "没探测到公网 IP（内网机器或无外网出口），请手动填写公网 IP 或域名"})
@@ -1197,7 +1238,10 @@ def settings_restore_default():
 
 @app.get("/api/version")
 def version_get():
-    return ok(core.version_info())
+    d = core.version_info()
+    # 顺带报一下真正在跑的 HTTP 服务器，排查「是不是退回开发服务器了」时不用翻 journal
+    d["server"], d["threads"] = _server_desc(), THREADS
+    return ok(d)
 
 
 @app.post("/api/update/binary")
@@ -1596,9 +1640,61 @@ def main():
     print(" 数据  %s" % core.DB_PATH)
     print(" 本机编译环境: %s" % build_env_line)
     print("   （仅影响「上传源码本机编译」；缺工具请用构建机编好二进制替换，不影响现有服务）")
+    print(" 服务器 %s" % _server_desc())
     print("=" * 60)
-    # 显式单线程、关 reloader/debug：避免双进程同时全量重建 iptables 链
-    app.run(host="0.0.0.0", port=PORT, threaded=False, use_reloader=False, debug=False)
+    serve_forever()
+
+
+_SRV_CACHE = {}
+
+
+def _load_waitress():
+    """返回 (serve 函数, 版本号)；没装就返回 (None, 原因)。结果只算一次。"""
+    if _SRV_CACHE:
+        return _SRV_CACHE["serve"], _SRV_CACHE["ver"]
+    if SERVER_MODE in ("werkzeug", "dev", "flask"):
+        res = (None, "已按 OVPN_WEB_SERVER 指定用开发服务器")
+    else:
+        try:
+            from waitress import serve
+            try:
+                import importlib.metadata as _md
+                ver = _md.version("waitress")
+            except Exception:
+                ver = ""
+            res = (serve, ver)
+        except Exception as e:
+            res = (None, "未安装 waitress（%s）" % e)
+    _SRV_CACHE["serve"], _SRV_CACHE["ver"] = res
+    return res
+
+
+def _server_desc():
+    _srv, _v = _load_waitress()
+    if _srv is None:
+        return "Werkzeug 开发服务器（单线程）· %s" % _v
+    return "waitress %s（单进程 %d 线程）" % (_v or "", THREADS)
+
+
+def serve_forever():
+    """启动 HTTP 服务。
+
+    默认 waitress：单进程 + 线程池，慢请求只占一个线程，不会把整页拖住。
+    拿不到 waitress 就退回 Werkzeug（threaded=False），行为与旧版完全一致，
+    宁可慢也不能因为少个包就起不来。
+    """
+    srv, info = _load_waitress()
+    if srv is None:
+        print("[服务器] 退回 Flask 开发服务器：%s" % info)
+        # 显式单线程、关 reloader/debug：避免双进程同时全量重建 iptables 链
+        app.run(host="0.0.0.0", port=PORT, threaded=False, use_reloader=False, debug=False)
+        return
+    print("[服务器] waitress %s，%d 线程" % (info, THREADS))
+    # 线程数按「管理员 + 员工自助页」的并发量给 8 就够了；再多只会让 SQLite 写锁排队
+    srv(app, host="0.0.0.0", port=PORT, threads=THREADS,
+        ident="openvpn-web", clear_untrusted_proxy_headers=True,
+        # 备份包上传走这个口，和 Flask 的 MAX_CONTENT_LENGTH 保持一致，超了直接 413
+        max_request_body_size=80 * 1024 * 1024)
 
 
 if __name__ == "__main__":

@@ -110,7 +110,8 @@ openvpn-web/
 
 进程与权限：
 
-- systemd 只拉 `ovpnweb` 用户的一个 Web 进程：`app.run(threaded=False, use_reloader=False, debug=False)`。单线程 + 全局写锁，任何时刻只有一个执行者在改系统，杜绝规则重建竞态
+- systemd 只拉 `ovpnweb` 用户的一个 Web 进程：**waitress 单进程 8 线程**（纯 Python WSGI 服务器，离线 wheel 随包走）。线程只用来并行处理 HTTP，慢请求不会再把整页拖住；长任务另有一把全局写锁，任何时刻只有一个执行者在改系统，杜绝规则重建竞态
+- 没装 waitress（比如只替换了程序文件的老机器）会自动退回 Flask 自带的 Werkzeug 开发服务器（单线程），功能不受影响；「版本与更新」页第一行会显示当前实际在跑的服务器，`OVPN_WEB_SERVER=werkzeug` 可手动指定退回
 - 长任务（安装、更新、重启）走独立后台线程 + `task_id` 轮询 + 实时日志；HTTP 请求本身不执行几十秒的系统动作
 - Web 低权限，`sudoers` 只放行一个精确命令：`python3 worker.py <task_id>`，命令行不传自由参数，动作与参数从 `data/tasks/<id>.json` 读并做白名单
 - `data/`、`bin/` 归 `ovpnweb` 可写；`app.py`/`core.py`/`worker.py`/`index.html` 归 root 只读
@@ -564,6 +565,7 @@ Web 程序自身不提供「上传更新包」入口（日常更新就是覆盖�
 
 ## 12. 版本信息（截至 2026-11-20）
 
+- Web **1.3.21**：HTTP 服务器换成 **waitress**（单进程 8 线程，纯 Python、离线 wheel 随包安装）——以前是 Werkzeug 开发服务器且 `threaded=False`，一个慢请求（探测公网 IP、读大日志、导出 Excel）会把所有人的页面一起卡住；现在并发请求各占一个线程，SQLite 仍是单写入者，靠 WAL + `busy_timeout` 排队。为此补了三处并发安全：登录失败计数表加锁、公网 IP 探测「只让一个人真去打外网，其余等结果」、长任务 tid 改为拿到写锁后再绑定（否则后来启动的任务会把正在跑的任务 id 顶掉，结果写进别人的任务日志）。`OVPN_WEB_THREADS` 调线程数，`OVPN_WEB_SERVER=werkzeug` 一键退回；版本页显示当前实际服务器
 - Web **1.3.20**：长期运行不膨胀——服务器日志改「从文件末尾倒读」（`openvpn.log` 是 `log-append` 无轮转，以前每次开日志页都整文件读入，跑久了会卡）；`openvpn.log` 超过 20MB 启动时转存一份 `.1`；`data/tasks` 里每个任务一对文件，自动清 7 天前的（每小时最多扫一次）；台账自动备份只留最近 200 份（文件与记录一起清，且同一秒内多次变更不再互相覆盖文件名；台账备份与备份点列表各自取最近 100 条，互不挤占）；公网 IP 探测结果缓存 10 分钟（含「探不到」），手动识别按钮强制重探，超时 2.5s→1.5s，没外网时打开向导/设置页不再干等；OpenVPN 版本号按二进制 mtime 缓存，首页加载不再每次 fork 一次二进制
 - Web **1.3.19**：撤掉「改 VPN 网段自动迁移账号固定 IP」——网段变更只改服务端，账号地址恢复由管理员手工改（页面会红字列出还停在旧网段的账号，恢复备份后同样提示），不再由系统批量改写台账与 ccd；顺带修掉「只改网段却提示必须全员重发 ovpn」的误报（VPN 网段不进配置指纹），动态池越界与导入旧网段台账时的报错也给出手工修改的方向
 - Web **1.3.17**：数据文件权限收紧——`openvpn-web.db` 与 `-wal/-shm`、`web.secret`、`admin_password.txt` 一律 600，`data/backups` 700，`data/` 750（库里存的是明文密码，同机普通用户不能读）；安装脚本同步设置

@@ -13,7 +13,7 @@ vendor/
 ├── static/prefix.tar.gz 预编译静态库（glibc 2.17 基线）：libssl.a / libcrypto.a /
 │                        liblzo2.a / liblz4.a / libcap-ng.a + 头文件 + 静态 openssl 命令
 │                        → 目标机上「上传源码自动编译」只编 openvpn 本体，14 秒出结果
-├── wheels/              flask / openpyxl 及其依赖（cp312 + manylinux2014，纯离线安装）
+├── wheels/              flask / openpyxl / waitress 及其依赖（纯 Python，离线安装）
 ├── SHA256SUMS           上面所有 tar.gz 的校验值，构建时逐个校验
 └── fetch.sh             有网机器上跑一次，把缺的补齐（幂等，不重复下）
 ```
@@ -30,7 +30,7 @@ VENDOR_ONLY=1 ./build/build-offline.sh   # 严格离线：任何缺件直接报�
 | 依赖 | ① 本地 | ② 仓库快照 | ③ 联网（最后兜底） |
 |---|---|---|---|
 | Python 运行时 | 仓库根 `runtime/`（已自带，零下载） | `vendor/python/*install_only*.tar.gz` | python-build-standalone |
-| Flask / openpyxl | — | `vendor/wheels/*.whl`（`pip --no-index`） | PyPI |
+| Flask / openpyxl / waitress | — | `vendor/wheels/*.whl`（`pip --no-index`） | PyPI |
 | 静态 OpenVPN | `bin/openvpn` 已存在则直接用 | `vendor/src/*.tar.gz` | 各上游镜像，下到后**回填 vendor/src** |
 
 ## 为什么要有这层

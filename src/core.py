@@ -47,7 +47,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "1.3.20"
+WEB_VERSION = "1.3.21"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -667,7 +667,8 @@ def detect_public_ip(timeout=1.5):
     """探测本机出口公网 IP，只用来给「对外地址」做默认建议。
 
     探测不到（内网机器、没开外网、被墙）返回 ("", "")，不影响任何功能。
-    超时压到 1.5s：这是单线程服务里同步执行的，没外网的机器不该让人干等。
+    超时压到 1.5s：这是在请求线程里同步执行的，没外网的机器不该让人干等；
+    上层（app._pubip_get）还有 10 分钟缓存并做了去重，同时只会有一个人在探。
     """
     if MOCK:
         return "", ""
@@ -798,8 +799,8 @@ def read_tail_lines(path, limit=200, max_bytes=4 << 20):
     """从文件末尾倒着读最多 limit 行，不把整个文件读进内存。
 
     openvpn.log 是 log-append 追加写、没有轮转，跑上一年能到几十上百 MB。
-    以前 `f.readlines()[-limit:]` 每次开日志页都把整个文件读一遍：慢、吃内存，
-    而这个服务是单线程的，等于整个界面跟着卡住。
+    以前 `f.readlines()[-limit:]` 每次开日志页都把整个文件读一遍：慢、吃内存；
+    线程池里这么干，一个开日志页的请求就能把内存和 IO 拉满。
     """
     limit = max(1, int(limit))
     try:

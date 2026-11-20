@@ -980,6 +980,99 @@ def main():
     core.set_meta("pool_end", "10.8.1.200")
     core.write_all_config()
 
+    section("HTTP 服务器（waitress）")
+    import threading
+    import socket
+    import urllib.request
+
+    ver = c.get("/api/version").get_json()
+    check("/api/version 报告 HTTP 服务器", bool(ver.get("server")), ver.get("server"))
+    check("/api/version 报告线程数", int(ver.get("threads") or 0) >= 1, ver.get("threads"))
+
+    try:
+        from waitress import create_server
+        has_waitress = True
+    except Exception as _e:
+        has_waitress = False
+        print("  跳过并发用例：本机没装 waitress（%s）" % _e)
+
+    if not has_waitress:
+        # 没装时必须能说明自己退回了开发服务器，而不是静默变慢
+        check("缺 waitress 时版本页说明已退回开发服务器",
+              "Werkzeug" in (ver.get("server") or ""), ver.get("server"))
+    else:
+        def _serve(wsgi, threads=8):
+            srv = create_server(wsgi, host="127.0.0.1", port=0, threads=threads, ident="selftest")
+            port = int(srv.effective_port)   # 端口在 waitress 里可能是字符串，%d 会直接抛异常
+            threading.Thread(target=srv.run, daemon=True).start()
+            end = time.time() + 5
+            while time.time() < end:
+                try:
+                    socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+                    break
+                except OSError:
+                    time.sleep(0.02)
+            return srv, port
+
+        def _hit(port, path="/", out=None):
+            try:
+                with urllib.request.urlopen("http://127.0.0.1:%d%s" % (port, path), timeout=10) as r:
+                    body = r.read()
+                    if out is not None:
+                        out.append((r.status, body))
+                    return r.status
+            except Exception as e:
+                if out is not None:
+                    out.append((0, str(e).encode()))
+                return 0
+
+        # ① 线程池真的并行：8 个各 0.25s 的请求，串行要 2s 以上
+        def _slow(environ, start_response):
+            time.sleep(0.25)
+            start_response("200 OK", [("Content-Type", "text/plain")])
+            return [b"ok"]
+
+        srv1, p1 = _serve(_slow)
+        t0 = time.time()
+        _ts = [threading.Thread(target=_hit, args=(p1,)) for _ in range(8)]
+        [_t.start() for _t in _ts]
+        [_t.join(20) for _t in _ts]
+        cost = time.time() - t0
+        check("waitress 8 线程并行处理（串行需要 2s 以上）", cost < 1.2, "%.2fs" % cost)
+        srv1.close()
+
+        # ② 真拿本应用跑一遍：8 个并发请求不能有 500 / 死锁 / 串号
+        srv2, p2 = _serve(web.app)
+        got = []
+        _ts = [threading.Thread(target=_hit, args=(p2, "/api/session", got)) for _ in range(8)]
+        [_t.start() for _t in _ts]
+        [_t.join(20) for _t in _ts]
+        codes = sorted(x[0] for x in got)
+        check("并发 8 个 /api/session 全部 200", codes == [200] * 8, codes)
+        check("并发返回的会话都带 csrf",
+              all(b"csrf" in b for _, b in got), [b[:80] for _, b in got][:2])
+        srv2.close()
+
+        # ③ 并发写库不炸：SQLite 只有一个写入者，靠 WAL + busy_timeout 排队
+        errs = []
+
+        def _writer(i):
+            try:
+                for _k in range(20):
+                    core.log_audit("并发%d" % i, "selftest.concurrent", "多线程写审计")
+            except Exception as e:
+                errs.append(repr(e))
+
+        t0 = time.time()
+        _ts = [threading.Thread(target=_writer, args=(i,)) for i in range(8)]
+        [_t.start() for _t in _ts]
+        [_t.join(60) for _t in _ts]
+        check("8 线程并发写审计不报 database is locked", not errs, errs[:2])
+        con = core.db()
+        n = con.execute("SELECT COUNT(*) FROM audit WHERE action='selftest.concurrent'").fetchone()[0]
+        con.close()
+        check("并发写入条目不丢", n == 160, n)
+
     print("\n" + "=" * 62)
     print(" 通过 %d 项 / 失败 %d 项" % (len(PASS), len(FAIL)))
     if FAIL:

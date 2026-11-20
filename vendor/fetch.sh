@@ -15,7 +15,7 @@ mkdir -p "$VENDOR/src" "$VENDOR/wheels"
 echo "==> [1/3] 取源码（OpenSSL / LZO / LZ4 / OpenVPN）→ $VENDOR/src"
 FETCH_ONLY=1 VENDOR="$VENDOR" bash "$ROOT/build/build-static-openvpn.sh"
 
-echo "==> [2/3] 取 wheel（flask / openpyxl 及其依赖）→ $VENDOR/wheels"
+echo "==> [2/3] 取 wheel（flask / openpyxl / waitress 及其依赖）→ $VENDOR/wheels"
 PY="$ROOT/runtime/bin/python3"
 if [ ! -x "$PY" ]; then
     echo "    跳过: 没有可用的 $PY（构建时若 vendor/wheels 为空会去 PyPI 装）"
@@ -25,7 +25,7 @@ else
     echo "    目标运行时: python $PYV / $ABI"
     "$PY" -m pip download --disable-pip-version-check --only-binary=:all: \
         --platform manylinux2014_x86_64 --python-version "$PYV" --abi "$ABI" \
-        -d "$VENDOR/wheels" flask==3.1.3 openpyxl==3.1.5
+        -d "$VENDOR/wheels" flask==3.1.3 openpyxl==3.1.5 waitress==3.0.2
 fi
 
 echo "==> [3/3] 更新校验清单 $VENDOR/SHA256SUMS"

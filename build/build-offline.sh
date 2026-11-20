@@ -132,7 +132,7 @@ PY="$OUT/python/bin/python3"
 
 # 2) Flask / openpyxl：vendor/wheels 优先（--no-index 完全不碰 PyPI）
 echo "[2/3] 安装离线 wheel …"
-PKGS=("flask==3.1.3" "openpyxl==3.1.5")
+PKGS=("flask==3.1.3" "openpyxl==3.1.5" "waitress==3.0.2")
 if ls "$VENDOR"/wheels/*.whl >/dev/null 2>&1; then
     echo "    使用 $VENDOR/wheels（--no-index，不联网）"
     "$PY" -m pip install --no-cache-dir --disable-pip-version-check --no-index \
@@ -145,7 +145,7 @@ else
     echo "    没有本地 wheel，从 PyPI 装（建议之后执行 ./vendor/fetch.sh 把 wheel 固化下来）"
     "$PY" -m pip install --no-cache-dir --disable-pip-version-check --only-binary=:all: "${PKGS[@]}"
 fi
-"$PY" -c 'import flask, openpyxl; print("    依赖自检 OK: flask", flask.__version__ if hasattr(flask,"__version__") else "3.x", "/ openpyxl", openpyxl.__version__)'
+"$PY" -c 'import flask, openpyxl, waitress; print("    依赖自检 OK: flask", flask.__version__ if hasattr(flask,"__version__") else "3.x", "/ openpyxl", openpyxl.__version__, "/ waitress", __import__("importlib.metadata", fromlist=["version"]).version("waitress"))'
 
 # 3) 静态 OpenVPN 二进制
 if [ "$SKIP_OVPN" -eq 0 ]; then
