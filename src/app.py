@@ -522,6 +522,11 @@ def task_update(tid, **kw):
 def sudo_worker(tid, action, params=None, timeout=300):
     """特权动作：Web 只写任务文件，worker 从固定目录读，命令行不传自由参数"""
     core.ensure_dirs()
+    # 每小时最多扫一次：长期不重启的服务，任务日志也不会无限堆在 data/tasks 里
+    try:
+        core.maybe_prune_tasks()
+    except Exception:
+        pass
     with open(os.path.join(TASKS_DIR, tid + ".json"), "w", encoding="utf-8") as f:
         json.dump({"action": action, "params": params or {}}, f, ensure_ascii=False)
     if MOCK:
@@ -1075,11 +1080,26 @@ def settings_preview():
                "warnings": core.route_warnings(c)})
 
 
+_PUBIP = {"ts": 0.0, "ip": "", "src": ""}
+
+
 @app.get("/api/settings/public-ip")
 def settings_public_ip():
-    """探测本机出口公网 IP，仅用于「对外地址」留空时的默认建议"""
-    ip, src = core.detect_public_ip()
-    return ok({"ip": ip, "source": src,
+    """探测本机出口公网 IP，仅用于「对外地址」留空时的默认建议。
+
+    结果（包括「探不到」）缓存 10 分钟：这个服务是单线程的，探测要挨个请求
+    3 个外部地址（每个 1.5s 超时），没外网的机器每次打开向导/设置页都要卡几秒。
+    页面上的【自动识别】按钮带 refresh=1，会强制重探。
+    """
+    force = request.args.get("refresh") == "1"
+    if not force and time.time() - _PUBIP["ts"] < 600:
+        cached = True
+        ip, src = _PUBIP["ip"], _PUBIP["src"]
+    else:
+        cached = False
+        ip, src = core.detect_public_ip()
+        _PUBIP.update({"ts": time.time(), "ip": ip, "src": src})
+    return ok({"ip": ip, "source": src, "cached": cached,
                "msg": ("已识别公网 IP %s" % ip) if ip else
                       "没探测到公网 IP（内网机器或无外网出口），请手动填写公网 IP 或域名"})
 
@@ -1364,7 +1384,7 @@ def backups_restore():
 @app.get("/api/user-backups")
 def user_backups_list():
     """只列台账备份（每次账号变更自动生成的那份 tsv）"""
-    items = [b for b in core.list_backups() if b.get("kind") == "users"]
+    items = core.list_backups(kind="users", limit=100)
     return ok({"items": items})
 
 
@@ -1552,6 +1572,16 @@ def main():
         print("请重启服务: systemctl restart openvpn-web && systemctl restart openvpn")
         sys.exit(0)
     bootstrap_admin()
+    # 启动维护：openvpn.log 是 log-append 无轮转，超过 20MB 就留一份 .1 重开；
+    # data/tasks 里每个任务一对文件，只增不减，顺手清掉 7 天前的。
+    try:
+        if core.rotate_openvpn_log():
+            print("[启动维护] openvpn.log 超过 20MB，已转存为 openvpn.log.1 并截断原文件")
+        _n = core.prune_tasks(days=7)
+        if _n:
+            print("[启动维护] 清理了 %d 个过期任务日志" % _n)
+    except Exception as e:
+        print("[启动维护] 跳过: %s" % e)
     # 服务启动时先查一遍编译环境并落库：缺 gcc 不该等用户点开「升级」页才发现。
     # 这里只是记录能力，不会改动任何 OpenVPN 配置或二进制，服务照常起。
     try:

@@ -683,6 +683,60 @@ def main():
     check("按固定 IP 能反查账号", bool(core.list_users()) and
           (core.user_by_vpn_ip(core.list_users()[0]["vpn_ip"]) or {}).get("username")
           == core.list_users()[0]["username"])
+
+    # ---------- 长期运行的维护：日志尾读 / 任务清理 / 备份保留 ----------
+    section("长期运行不膨胀（日志尾读、任务清理、备份保留）")
+    big = os.path.join(TMP, "big.log")
+    with open(big, "w", encoding="utf-8") as f:
+        for i in range(5000):
+            f.write("line-%04d %s\n" % (i, "x" * 40))
+    tail = core.read_tail_lines(big, 50)
+    check("日志尾读只取最后 N 行", len(tail) == 50 and tail[-1].startswith("line-4999"), tail[-1:])
+    check("日志尾读从末尾倒着读（不全量加载）", os.path.getsize(big) > 8192 and len(tail[0]) > 0)
+    open(os.path.join(TMP, "one.log"), "w").write("only-line")
+    check("没有结尾换行的文件也能读", core.read_tail_lines(os.path.join(TMP, "one.log"), 5) == ["only-line"])
+    check("空文件返回空列表", core.read_tail_lines(os.path.join(TMP, "none.log"), 5) == [])
+
+    # data/tasks：过期文件清掉，最近的留着
+    _old = os.path.join(core.TASKS, "old-task.log")
+    _new = os.path.join(core.TASKS, "new-task.log")
+    for p in (_old, _new):
+        open(p, "w").write("t")
+    _t = time.time()
+    os.utime(_old, (_t - 30 * 86400, _t - 30 * 86400))
+    gone = core.prune_tasks(days=7)
+    check("过期任务日志被清理", gone >= 1 and not os.path.exists(_old), gone)
+    check("最近的任务日志保留", os.path.exists(_new))
+
+    # openvpn.log 超过上限就转存一份
+    _log = os.path.join(core.DATA, "openvpn.log")
+    with open(_log, "w", encoding="utf-8") as f:
+        f.write("y" * 4096)
+    check("日志未超限不动", core.rotate_openvpn_log(max_bytes=8192) is False)
+    check("日志超限转存为 .1 并重开",
+          core.rotate_openvpn_log(max_bytes=1024) is True
+          and os.path.exists(_log + ".1") and os.path.getsize(_log) == 0)
+    check("转存后日志页能正常读", core.get_logs("server", 10) == [])
+    os.remove(_log + ".1")
+
+    # 台账自动备份保留上限：只留最近 5 份
+    for i in range(8):
+        core.backup_users()
+    core.prune_user_backups(keep=5)
+    _ub = [b for b in core.list_backups() if b.get("kind") == "users"]
+    check("台账备份只保留最近 N 份", len(_ub) == 5, len(_ub))
+    check("超出份数的备份文件已从磁盘删除",
+          all(os.path.exists(b["path"]) for b in _ub)
+          and len([x for x in os.listdir(core.BACKUPS) if x.startswith("users-")]) == 5,
+          os.listdir(core.BACKUPS))
+
+    # 公网 IP 探测结果缓存：第二次不再重复探测，手动刷新可强制重探
+    web._PUBIP.update({"ts": 0.0, "ip": "", "src": ""})     # 清掉缓存，模拟冷启动
+    p1 = c.get("/api/settings/public-ip").get_json()
+    p2 = c.get("/api/settings/public-ip").get_json()
+    p3 = c.get("/api/settings/public-ip?refresh=1").get_json()
+    check("公网 IP 探测结果被缓存", p1.get("cached") is False and p2.get("cached") is True, (p1, p2))
+    check("手动刷新强制重探", p3.get("cached") is False, p3)
     check("公网 IP 反查不到账号", core.user_by_vpn_ip("8.8.8.8") is None)
     ag = P("/api/asset-groups", {"name": "API 资产组",
                                  "lines": "10.10.9.1 tcp 22\n10.10.9.2 tcp 22"}).get_json()

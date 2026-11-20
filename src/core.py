@@ -37,6 +37,7 @@ TASKS = os.path.join(DATA, "tasks")
 SNAPSHOTS = os.path.join(DATA, "snapshots")
 STAGING = os.path.join(DATA, "staging")
 BACKUPS = os.path.join(DATA, "backups")
+USER_BACKUP_KEEP = 200          # 台账自动备份保留份数（每次账号变更一份 xlsx）
 BIN = os.path.join(ROOT, "bin", "openvpn")
 WORKER = os.path.join(ROOT, "worker.py")
 AUTH_VERIFY = os.path.join(ROOT, "auth-verify.py")
@@ -46,7 +47,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "1.3.19"
+WEB_VERSION = "1.3.20"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -662,10 +663,11 @@ def is_public_ipv4(text):
                 or a.is_reserved or a.is_unspecified)
 
 
-def detect_public_ip(timeout=2.5):
+def detect_public_ip(timeout=1.5):
     """探测本机出口公网 IP，只用来给「对外地址」做默认建议。
 
     探测不到（内网机器、没开外网、被墙）返回 ("", "")，不影响任何功能。
+    超时压到 1.5s：这是单线程服务里同步执行的，没外网的机器不该让人干等。
     """
     if MOCK:
         return "", ""
@@ -792,6 +794,37 @@ def log_auth(username, src_ip, result, reason=""):
     con.close()
 
 
+def read_tail_lines(path, limit=200, max_bytes=4 << 20):
+    """从文件末尾倒着读最多 limit 行，不把整个文件读进内存。
+
+    openvpn.log 是 log-append 追加写、没有轮转，跑上一年能到几十上百 MB。
+    以前 `f.readlines()[-limit:]` 每次开日志页都把整个文件读一遍：慢、吃内存，
+    而这个服务是单线程的，等于整个界面跟着卡住。
+    """
+    limit = max(1, int(limit))
+    try:
+        size = os.path.getsize(path)
+        if size <= 0:
+            return []
+        with open(path, "rb") as f:
+            # 先按 8KB 块往回读，凑够 limit 行就停；最多只读 max_bytes
+            block = 8192
+            buf = b""
+            pos = size
+            while pos > 0 and buf.count(b"\n") <= limit and len(buf) < max_bytes:
+                step = min(block, pos)
+                pos -= step
+                f.seek(pos)
+                buf = f.read(step) + buf
+            lines = buf.split(b"\n")
+    except OSError:
+        return []
+    # split 后最后一项通常是空串（文件以换行结尾）
+    if lines and lines[-1] == b"":
+        lines.pop()
+    return [x.decode("utf-8", "replace").rstrip("\r") for x in lines[-limit:]]
+
+
 def get_logs(kind="audit", limit=200):
     con = db()
     if kind == "audit":
@@ -802,17 +835,13 @@ def get_logs(kind="audit", limit=200):
         p = os.path.join(DATA, "openvpn.log")
         if not os.path.exists(p):
             return []
-        with open(p, "r", errors="replace") as f:
-            lines = f.readlines()[-limit:]
-        return [{"ts": "", "detail": x.rstrip()} for x in lines]
+        return [{"ts": "", "detail": x} for x in read_tail_lines(p, limit)]
     elif kind == "deny":
         p = os.path.join(STATE, "deny.jsonl")
         if not os.path.exists(p):
             return []
-        with open(p, "r", errors="replace") as f:
-            lines = f.readlines()[-limit:]
         out = []
-        for x in lines:
+        for x in read_tail_lines(p, limit):
             try:
                 out.append(json.loads(x))
             except Exception:
@@ -822,6 +851,63 @@ def get_logs(kind="audit", limit=200):
         rows = []
     con.close()
     return [dict(r) for r in rows]
+
+
+_PRUNE_AT = {"ts": 0.0}
+
+
+def prune_tasks(days=7, now_ts=None):
+    """清掉 data/tasks 里过期的任务日志（每个 apply-rules / kick 都会留一对文件）。
+
+    以前这些文件只增不减：用上一年就是几万个碎文件躺在同一个目录里，
+    readdir 越来越慢，备份打包也跟着变重。只删超过 days 天的，最近一周的记录照留。
+    """
+    now_ts = time.time() if now_ts is None else now_ts
+    cutoff = now_ts - max(1, int(days)) * 86400
+    gone = 0
+    try:
+        for ent in os.scandir(TASKS):
+            try:
+                if ent.is_file() and ent.stat().st_mtime < cutoff:
+                    os.remove(ent.path)
+                    gone += 1
+            except OSError:
+                continue
+    except OSError:
+        return 0
+    return gone
+
+
+def maybe_prune_tasks(days=7, min_gap=3600):
+    """启动或建任务时顺手清理，一小时最多扫一次目录"""
+    if time.time() - _PRUNE_AT["ts"] < min_gap:
+        return 0
+    _PRUNE_AT["ts"] = time.time()
+    return prune_tasks(days)
+
+
+def rotate_openvpn_log(max_bytes=20 << 20):
+    """openvpn.log 是 log-append 追加写、没人轮转，超过上限就留一份 .1 再把原文件截断。
+
+    用 copytruncate 而不是 rename：OpenVPN 是独立进程、此刻仍握着这个文件的 fd，
+    rename 之后它会继续写进 .1，日志页反而看不到新内容；而 log-append 是 O_APPEND 打开的，
+    原地截断后下一次写入会自然回到文件开头，不需要重启 OpenVPN。
+    """
+    p = os.path.join(DATA, "openvpn.log")
+    try:
+        if not os.path.exists(p) or os.path.getsize(p) <= max_bytes:
+            return False
+        old = p + ".1"
+        try:
+            os.remove(old)
+        except OSError:
+            pass
+        shutil.copyfile(p, old)
+        with open(p, "w"):
+            pass
+        return True
+    except OSError:
+        return False
 
 
 # --------------------------------------------------------------------------- 用户台账
@@ -1047,7 +1133,14 @@ def backup_users(actor="web"):
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     # 备份不做「空密码拒绝」：宁可把空密码如实写进去，也不能让删账号这类操作卡在备份上
     name, data, _ = users_file(users_rows(strict=False), "xlsx", "users-%s" % ts)
+    # 同一秒内连着改几个账号时文件名会撞：加 -2/-3 后缀，别让后一次静默覆盖前一次的备份
     path = os.path.join(BACKUPS, name)
+    _stem, _ext = os.path.splitext(name)
+    _i = 1
+    while os.path.exists(path):
+        _i += 1
+        name = "%s-%d%s" % (_stem, _i, _ext)
+        path = os.path.join(BACKUPS, name)
     with open(path, "wb") as f:
         f.write(data)
     try:
@@ -1059,7 +1152,36 @@ def backup_users(actor="web"):
                 (now(), "users", path, "账号变更自动备份（Excel，含密码）"))
     con.commit()
     con.close()
+    prune_user_backups(keep=USER_BACKUP_KEEP)
     return path
+
+
+def prune_user_backups(keep=None):
+    """只留最近 keep 份台账备份（文件 + backups 表记录），默认 200 份。
+
+    每次账号变更都会生成一份 xlsx；不设上限的话，一年下来磁盘上几千个文件、
+    表里几千行，备份页翻起来也没意义——真正要回退的永远是最近的几次。
+    """
+    keep = USER_BACKUP_KEEP if keep is None else int(keep)
+    if keep <= 0:
+        return 0
+    con = db()
+    try:
+        rows = con.execute(
+            "SELECT id,path FROM backups WHERE kind='users' ORDER BY id DESC").fetchall()
+        old = rows[keep:]
+        for r in old:
+            p = str(r["path"] or "")
+            if p and os.path.dirname(os.path.realpath(p)) == os.path.realpath(BACKUPS):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+            con.execute("DELETE FROM backups WHERE id=?", (r["id"],))
+        con.commit()
+    finally:
+        con.close()
+    return len(old)
 
 
 def user_backup_path(path):
@@ -2382,26 +2504,49 @@ def restore_snapshot(path):
     return fullbackup.restore(rp, audit=False, protect=False)
 
 
-def list_backups():
+def list_backups(kind=None, limit=100):
+    """备份记录列表。kind 指定时按类型过滤——台账自动备份会积累很多，
+    不过滤的话「备份点」列表会被它们挤出前 100 条。"""
     con = db()
-    rows = con.execute("SELECT * FROM backups ORDER BY id DESC LIMIT 100").fetchall()
-    con.close()
+    try:
+        if kind:
+            rows = con.execute("SELECT * FROM backups WHERE kind=? ORDER BY id DESC LIMIT ?",
+                               (kind, int(limit))).fetchall()
+        else:
+            rows = con.execute("SELECT * FROM backups ORDER BY id DESC LIMIT ?",
+                               (int(limit),)).fetchall()
+    finally:
+        con.close()
     return [dict(r) for r in rows]
 
 
 # --------------------------------------------------------------------------- 版本 / 二进制校验
+
+_BVER = {}          # (path, mtime_ns, size) -> (version, branch)
 
 def binary_version(path=BIN):
     if MOCK and not os.path.exists(path):
         return get_meta("openvpn_version") or "2.6.23", "2.6"
     if not os.path.exists(path):
         return "", ""
+    # 首页每次加载都要读版本，而读版本要 fork 一次二进制（静态包 20~50ms）；
+    # 按 (路径, mtime, 大小) 缓存，换过二进制自然失效。
+    try:
+        st = os.stat(path)
+        key = (path, st.st_mtime_ns, st.st_size)
+    except OSError:
+        return "", ""
+    hit = _BVER.get(key)
+    if hit is not None:
+        return hit
     try:
         out = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=10).stdout
         m = re.search(r"OpenVPN\s+(\d+\.\d+\.\d+)", out)
         if m:
             v = m.group(1)
-            return v, ".".join(v.split(".")[:2])
+            _BVER.clear()
+            _BVER[key] = (v, ".".join(v.split(".")[:2]))
+            return _BVER[key]
     except Exception:
         pass
     return "", ""
