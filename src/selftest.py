@@ -1435,6 +1435,60 @@ def main():
         _bo_ok = None      # 装机目录没有 build/，这条只在仓库里适用
     check("打包脚本把源码包一起带上（否则目标机想编也没料）", _bo_ok)
 
+    # ---- 1.3.29：一键安装 / 跨发行版预检 / 强制随包 Python ----
+    check("install.sh 强制只用随包 Python，不再退回目标机系统 python3",
+          "强制随包便携版" in _inst and "不会退回系统 python3" in _inst
+          and "command -v python3" not in _inst)
+    _pc_call = _inst.find('"$PY" "$DEST/precheck.py"')
+    check("install.sh 在动 /etc 与运行账号之前先跑环境预检",
+          _pc_call > 0 and _pc_call < _inst.find('cat > "$SUDOERS"'))
+    check("install.sh 预检有硬错误就中止（不留半套环境）",
+          "PRECHECK_RC" in _inst and "安装前预检未通过" in _inst)
+    check("install.sh 重装场景端口占用只警告，首装才硬检查",
+          "--reinstall" in _inst and "data/admin_password.txt" in _inst)
+    check("install.sh 装完自动跑包内 selftest（交付即验收）",
+          '"$DEST/selftest.py"' in _inst and "SELFTEST_STATE" in _inst)
+    check("安装完成信息里报告预检/自检结果与运行时来源",
+          "环境预检:" in _inst and "装完自检:" in _inst and "运行时:" in _inst)
+
+    _pc_p = os.path.join(CODE, "precheck.py")
+    check("precheck.py 随包分发", os.path.isfile(_pc_p))
+    if os.path.isfile(_pc_p):
+        _pc = open(_pc_p, encoding="utf-8").read()
+        check("预检覆盖 TUN/glibc/端口/磁盘/时钟/防火墙 + 交付包完整性",
+              all(k in _pc for k in ('"tun"', '"glibc"', '"ports"', '"disk"', '"clock"',
+                                    '"firewall"', '"runtime"', '"init"', '"wheels"', '"binary"')))
+        _imp = [ln.strip() for ln in _pc.splitlines()
+                if ln.startswith("import ") or ln.startswith("from ")]
+        _std = ("argparse", "glob", "os", "platform", "shutil", "socket",
+                "subprocess", "sys", "time", "re")
+        check("预检只用标准库（不引入目标机可能没有的第三方包）",
+              bool(_imp) and all(
+                  any(ln.startswith("import " + m) or ln.startswith("from " + m) for m in _std)
+                  for ln in _imp))
+        check("预检只探测不改系统：时钟只警告、不校准",
+              "自动校准" in _pc and "date -s" not in _pc and "hwclock -w" not in _pc)
+        check("预检直接试跑包内 ELF，glibc/架构不匹配当场发现",
+              '"--version"' in _pc and "无法执行" in _pc)
+        import importlib.util
+        _spec = importlib.util.spec_from_file_location("ovpn_precheck", _pc_p)
+        _pcmod = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_pcmod)
+        try:
+            _fs = _pcmod.collect(CODE, 8800, 1194, False)
+            _fok = isinstance(_fs, list) and len(_fs) >= 10
+        except Exception as e:
+            _fok = False
+            print("     precheck.collect 抛异常: %r" % (e,))
+        check("precheck.collect() 在任意平台上都能安全执行（无需 Linux 环境）", _fok)
+        check("预检硬错误会让 main 返回非 0，警告只放行",
+              'return 1 if any(f["level"] == "error"' in _pc)
+    _bop_py = os.path.join(CODE, "..", "build", "build-offline.py")
+    if os.path.isfile(_bop_py):
+        _bop_src = open(_bop_py, encoding="utf-8").read()
+        check("Windows 打包通配复制 src/*.py，precheck.py 自动进交付包",
+              '("py", "html", "sh")' in _bop_src)
+
     # Windows 上打包：不执行包内 Linux Python，只搬运 + 按规则写 tar
     _py_p = os.path.join(CODE, "..", "build", "build-offline.py")
     if os.path.isfile(_py_p):

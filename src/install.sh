@@ -200,16 +200,18 @@ chmod +x "$DEST"/*.sh "$DEST"/*.py 2>/dev/null || true
 [ -f "$DEST/bin/openssl" ] && chmod 755 "$DEST/bin/openssl" || true
 
 # ---------------------------------------------------------------- 2) 解释器
-step "[2/9] 选择 Python 运行时"
+# 交付约定：只用随包携带的离线 Python，绝不退回目标机的系统 python3。
+# 系统 Python 版本/依赖千差万别（CentOS 7 只有 3.6、最小化系统压根没装），
+# 一旦用它，「拷过去就能用」就变成看环境脸色；包里全部备齐才有确定性。
+step "[2/9] 选择 Python 运行时（强制随包便携版）"
 if [ -x "$DEST/python/bin/python3" ] && "$DEST/python/bin/python3" -V >/dev/null 2>&1; then
     PY="$DEST/python/bin/python3"
     say "      使用包内离线运行时：$("$PY" -V 2>&1)"
-elif command -v python3 >/dev/null 2>&1 && python3 -c 'import flask' >/dev/null 2>&1; then
-    PY="$(command -v python3)"
-    say "      使用系统 python3：$PY（包内 python/ 缺失或不可用）"
+    say "      不使用目标机 python3（避免版本/依赖差异导致装完用不了）"
 else
-    say "错误: 包内 python/bin/python3 不可用，系统 python3 也没有 flask。"
-    say "      请在构建机执行 ./build-offline.sh 生成完整离线目录。"
+    say "错误: 包内 python/bin/python3 不可用（缺失、软链未还原、可执行位丢失或 ABI 不符）。"
+    say "      本交付包强制使用随包 Python，不会退回系统 python3。"
+    say "      请重新解包（Windows/网盘传输容易把软链变成存根），或重新下载完整交付包。"
     exit 1
 fi
 
@@ -247,6 +249,28 @@ fi
 # waitress 是 HTTP 服务器（单进程多线程）；缺了不会起不来，只是退回 Flask 自带的开发服务器
 "$PY" -c 'import waitress' >/dev/null 2>&1 || \
     say "      提示: 没有 waitress，将使用 Flask 自带开发服务器（单线程，慢请求会互相挡）"
+
+# ---------------------------------------------------------------- 2.5) 开局预检
+# 在动 /etc、运行账号、systemd 之前，一次报齐所有环境问题：缺 TUN、glibc 太老、
+# 端口被占、磁盘不足、时钟异常、没有 systemd，以及最关键的——交付包本身是否完整。
+# 预检只探测、不修改系统；有硬错误直接停手，别装到一半留下半套环境。
+say ""
+say "==> 安装前环境预检（只探测、不改系统）"
+PRECHECK_STATE="未通过"
+# 重装时端口多半是本服务自己占着（后面会 restart），只警告不拦；首装才硬检查。
+if [ -s "$DEST/data/admin_password.txt" ]; then
+    PRECHECK_RC=0
+    "$PY" "$DEST/precheck.py" --root "$DEST" --port "$PORT" --reinstall || PRECHECK_RC=$?
+else
+    PRECHECK_RC=0
+    "$PY" "$DEST/precheck.py" --root "$DEST" --port "$PORT" || PRECHECK_RC=$?
+fi
+if [ "$PRECHECK_RC" != 0 ]; then
+    say "错误: 安装前预检未通过，已中止（上面一次列齐了所有问题，修完直接重跑本脚本）"
+    exit 1
+fi
+PRECHECK_STATE="通过（详见上方预检明细）"
+say ""
 
 # ---------------------------------------------------------------- 3) 用户与权限
 step "[3/9] 创建运行账号与目录权限"
@@ -400,6 +424,23 @@ for _ in $(seq 1 20); do
 done
 [ "$ok" = 1 ] || { say "错误: Web 未响应，执行 journalctl -u openvpn-web -n 50 查看原因"; exit 1; }
 
+# 交付即验收：包里自带 selftest.py，装完立刻跑一遍，结果直接打给装机的人。
+# 它自己把 OVPN_WEB_ROOT 指到临时目录并开 MOCK，不会碰生产 data/。
+say ""
+say "==> 装完自检（包内 selftest.py，只用临时目录，不碰生产数据）"
+SELFTEST_RC=0
+SELFTEST_OUT="$("$PY" "$DEST/selftest.py" 2>&1)" || SELFTEST_RC=$?
+printf '%s\n' "$SELFTEST_OUT" | tail -6
+if [ "$SELFTEST_RC" = 0 ]; then
+    SELFTEST_STATE="全部通过"
+    say "      装完自检全部通过"
+else
+    SELFTEST_STATE="有失败项（见上方输出）"
+    say "      警告: 自检有失败项；服务已在运行，请把上面的输出发给维护者"
+    say "      完整输出可重跑：$PY $DEST/selftest.py"
+fi
+say ""
+
 # 安装尾声：本机能否源码编译 OpenVPN，提前查一遍并落库，避免日后到「升级」页才发现缺 gcc。
 # 这只是能力探测，不改任何配置或二进制；Web 启动时也会复查并写同样的缓存。
 BUILD_ENV="$("$PY" - <<'PYEOF' 2>/dev/null || true
@@ -475,6 +516,9 @@ cat <<EOF
  服务端配置: $DEST/data/server.conf
  日志:       journalctl -u openvpn-web -f   /   tail -f $DEST/data/openvpn.log
  规则重放:   systemctl status openvpn-web-replay.timer（firewalld reload / 重启后自动补规则）
+ 环境预检:   ${PRECHECK_STATE}
+ 装完自检:   ${SELFTEST_STATE}
+ 运行时:     随包离线 Python（不依赖目标机 python3）
 ------------------------------------------------------------
  下一步: 1) 浏览器登录，在「账号」里加人（或安装时加 --user 名字:密码）
          2) 把 company.ovpn 发给成员，用 OpenVPN 客户端导入

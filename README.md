@@ -238,12 +238,12 @@ cd /opt/openvpn-web-x86_64 && ./install.sh
 ./install.sh --with-build-tools                 # 顺手装 gcc/make/perl/pkgconfig，以后能在本机编 openvpn
 ```
 
-`install.sh` 做 9 件事（全程幂等，重跑不会签第二套 CA）：
+`install.sh` 做 9 件事（全程幂等，重跑不会签第二套 CA），**首尾各加一道检查**：动系统之前跑 `precheck.py` 环境预检（一次报齐所有不满足的条件，硬错误直接中止，不会装到一半留半套环境），装完自动跑 `selftest.py` 并把结果打印在「安装完成」里。
 
 | 步骤 | 内容 |
 |---|---|
 | 1 | 释放程序文件（`tar` 管道，不依赖 rsync；`data/` 不覆盖） |
-| 2 | 选解释器：包内 `python/` 优先，其次系统 python3 |
+| 2 | 选解释器：**强制只用包内 `python/` 便携版**，绝不退回目标机系统 python3；包内运行时不可用即判「交付包不完整」并退出 |
 | 3 | 建 `ovpnweb` 用户、目录权限（`data/` 归它可写，**`bin/` 归 root 只可执行**；`install-code.sh` 700 root）；**修复被 Windows/网盘拍平的 python 软链与可执行位** |
 | 4 | sudoers 白名单（只放行 `python3 worker.py *`）+ 建 `/etc/openvpn-web`（700 root） |
 | 5 | systemd unit（保守语法，兼容 CentOS 7 的 systemd 219） |
@@ -590,11 +590,13 @@ Web 程序自身不提供「上传更新包」入口（日常更新就是覆盖�
 2. 静态 openvpn 二进制与离线 Python 运行时**未在本环境实际编译/下载**（需要联网构建机），由 `build/build-offline.sh` / `build/Dockerfile.build` 复现；也可在目标机就地编译，或在「升级」页上传二进制（要安装码）
 3. 是功能与操作逻辑对齐爱快风格，**不是像素级复刻**，未使用其任何界面素材
 4. 单机部署，不做高可用、集群、SSO/MFA、多管理员 RBAC、自动 HTTPS
+5. 目标机限定 **x86_64 + glibc ≥ 2.17 + systemd + 可用的 `/dev/net/tun`**：Alpine（musl）、ARM、无 init 系统的容器暂不支持，预检会明确拦住并说明原因；不做无 systemd 的 cron 降级，也不出「依赖系统 python3」的薄包——交付包自带全部运行时，就是为了不因环境差异报错
 
 ---
 
 ## 12. 版本信息（截至 2026-11-20）
 
+- Web **1.3.29**：**「拷过去跑一下就好」补齐环境侧**。三处改动：① **强制只用随包便携版 Python**——删掉 `install.sh` 里「系统 python3 有 flask 就用系统的」兜底分支，包内运行时不可用就直接报「交付包不完整」并退出；目标机 Python 版本/依赖千差万别（CentOS 7 只有 3.6、最小化系统压根没装），不碰它才有确定性。② 新增 `precheck.py`（纯标准库，随包分发），在动 `/etc`、运行账号、systemd **之前**一次报齐：CPU 架构、glibc 版本、TUN 设备、init 系统、随包 Python 可执行性、Web 依赖/离线 wheel、**直接试跑包内 openvpn ELF**（glibc/架构不匹配当场发现，不等装完报 `GLIBC_2.xx not found`）、8800/1194 端口、磁盘、**系统时钟**、防火墙/SELinux。硬错误整批中止，警告只提示；时钟只做「RTC 与系统时间差 8 小时」「没开 NTP」这类诊断，**绝不自动改系统时间**（离线机器没有可信基准）。无 systemd 的系统会明确拦住并说明原因（本版不做 cron 降级）。③ 装完自动跑包内 `selftest.py` 并把结果打在「安装完成」里，交付即验收；它自己把数据目录指到临时目录并开 MOCK，不碰生产 `data/`。重装场景端口占用只警告（后面会 restart），首装才硬检查。新增 14 条回归断言（含「安装包不再引用系统 python3」「预检必须在写 sudoers 之前」「precheck.collect() 在 Windows 上也能安全执行」）。
 - Web **1.3.28**：**堵住两条「改配置 / 恢复备份就能拿到 root」的注入路径**（安全审查发现）。① `tls_min` 是 `validate_cfg` 的盲区——绕过前端直接打 `/api/settings`，一个带换行的字符串被原样写进以 root 运行的 `server.conf`（`tls-version-min` 行），即可注入 `up`/`plugin` 等任意指令，`settings_save` 随即重启 OpenVPN = root 命令执行；现加白名单（只认 1.2 / 1.3），渲染前再 fail-closed 拦一次。② 全备份恢复会整库覆盖 meta 并重新渲染配置，而 manifest 哈希只证明「包自洽」不证明「包没被改过」——改库重算哈希就能借「恢复」把脏值送进 root 执行的 `rules.sh`（`dns`/`ntp` 未加引号直接拼进 iptables 行）；现在恢复前先复核包内配置，不合法**整包拒绝**（在任何生产文件被覆盖之前）。同一次加固把渲染面全部收口：`rules.sh` 里网段取规范化 IPv4Network、账号 IP/资产网段/端口/协议渲染时再校验（脏值宁可让 apply-rules 失败也不生成脚本）、ccd 生成前校验账号固定 IP；带副作用的 `GET /api/logs?kind=deny` 与 `GET /api/selfcheck` 纳入 CSRF（防跨站 `<img>` 白嫖触发 root worker）。新增 13 条回归断言（含「篡改 meta + 重算哈希 → 恢复必须拒绝」）。
 - Web **1.3.27**：**堵住一个能绕过安装码的提权洞**。1.3.23 给「上传即 root」加了安装码闸门，但闸门判断写成了 `if act in GATED and not MOCK`，而 `install.sh` 的 sudoers 又用 `env_keep` 保留了 `OVPN_WEB_MOCK`——任何能调面板 API 的人都能在自己进程里设这个变量、经 sudo 传进 worker，跳过安装码把任意 ELF 装成 root 服务（测试机实测确认：无码时 `replace-binary` 被拦，带 `MOCK=1` 则直接进动作）。现在闸门改看**专用自检开关 `OVPN_WEB_SELFTEST`**（只有直接跑 worker.py 的自检进程才有；sudoers 加 `env_reset` 且只保留 `OVPN_WEB_ROOT`，该开关经 sudo 必被清空），`OVPN_WEB_MOCK` 退回到只管「是否碰真实系统」的职责，并加了 3 条回归断言钉死。顺带修：界面上「24 小时有效」文案与实际 15 分钟/2 小时不符；`install.sh` 探活只靠 curl（最小化系统没有 curl 会误报 Web 没起来，改成优先用包内 python 的 urllib，curl/wget 兜底）。
 - Web **1.3.26**：**Windows 上也能打包**。之前只能在 Linux 构建机跑 `build-offline.sh`——它要用包内的 Linux `python` 执行 `pip install`，Windows 上根本跑不了。新增 `build/build-offline.py`：只做「分层 → 平铺」的搬运，不执行任何包内程序，Windows 的 Git Bash 里一条 `python build/build-offline.py` 就出包。代价是运行时的 `site-packages` 是干净的，所以 `install.sh` 第 2 步改成「缺依赖就从 `vendor/wheels` 离线补」（先 `pip --no-index --find-links`，pip 不可用就直接把 wheel 当 zip 解开）。同时把三个 Windows 坑堵在打包环节：软链存根在 tar 里写成真符号链接（实测 745 个）、权限按路径规则写死（仓库里 `bin/openvpn` 记的是 644）、`os.symlink` 失败时回退存根。实测：Windows 打出 134.6MB 包，Linux 上解包 `python3 -V` 正常、依赖补装成功、包内自检 394 项全过。
