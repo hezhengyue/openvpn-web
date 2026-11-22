@@ -1,0 +1,22 @@
+# requirements-standalone.txt —— 裸机便携模式（STANDALONE=True）
+# 面向便携 Python 3.12：不装 psycopg / django-redis，不需要 Postgres / Redis / Nginx。
+# Celery 库保留（代码里有 @shared_task），但 broker 走 memory:// 且任务同步执行。
+
+Django==5.2.19
+django-environ==0.14.0
+colorlog==6.12.0
+python-json-logger==4.2.0
+
+celery==5.7.0
+
+django-import-export==4.4.6
+django-auditlog==3.4.2
+django-ipware==8.0.0
+django-axes==9.0.0
+django-simpleui==2026.1.13
+
+whitenoise==6.12.0
+waitress==3.0.2
+
+# OpenVPN 业务逻辑（core.py）读写 Excel 台账所需
+openpyxl==3.1.5

@@ -14,13 +14,14 @@ USER="ovpnweb"
 [ -n "$PY" ] || { echo "找不到 Python，请在 $DEST 下手动执行 python3 app.py --reset-admin" >&2; exit 1; }
 
 echo "== 重置 OpenVPN Web 管理凭据 =="
-# app.py 会写 data/ 下的数据库与凭据文件，必须以 ovpnweb 身份跑，避免属主变成 root
+export DJANGO_SETTINGS_MODULE=config.settings
+# Django management command 会写 data/ 下的数据库与凭据文件，必须以 ovpnweb 身份跑，避免属主变成 root
 if id "$USER" >/dev/null 2>&1 && command -v runuser >/dev/null 2>&1; then
-    cd "$DEST" && runuser -u "$USER" -- "$PY" "$DEST/app.py" --reset-admin
+    cd "$DEST" && runuser -u "$USER" -- "$PY" "$DEST/manage.py" ovpn_cli reset-admin
 elif id "$USER" >/dev/null 2>&1; then
-    cd "$DEST" && su -s /bin/sh "$USER" -c "cd '$DEST' && '$PY' '$DEST/app.py' --reset-admin"
+    cd "$DEST" && su -s /bin/sh "$USER" -c "cd '$DEST' && '$PY' '$DEST/manage.py' ovpn_cli reset-admin"
 else
-    cd "$DEST" && "$PY" "$DEST/app.py" --reset-admin
+    cd "$DEST" && "$PY" "$DEST/manage.py" ovpn_cli reset-admin
 fi
 
 echo

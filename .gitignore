@@ -2,6 +2,13 @@
 runtime/
 dist/
 tests/node_modules/
+staticfiles/
+
+# 本地环境配置（可能含密钥；交付包只带 .env.example）
+.env
+
+# 运行日志
+logs/
 
 # 运行期数据（证书私钥、台账、日志、快照都在里面，绝不入库）
 data/

@@ -67,6 +67,8 @@ def copy_tree(src_root, dst_root):
     """搬运一棵树；软链存根优先建成真软链，建不了就写回存根（tar 阶段会补成软链）"""
     n = 0
     for dirpath, dirnames, filenames in os.walk(src_root):
+        # 不打包 Python 缓存、SQLite 运行时库（Django 代码目录不该有，防御性排除）
+        dirnames[:] = [d for d in dirnames if d not in ("__pycache__", ".pytest_cache")]
         rel = os.path.relpath(dirpath, src_root)
         out_dir = dst_root if rel == "." else os.path.join(dst_root, rel)
         os.makedirs(out_dir, exist_ok=True)
@@ -203,7 +205,18 @@ def main():
         if os.path.isfile(p) and fn.rsplit(".", 1)[-1] in ("py", "html", "sh"):
             copy_file(p, os.path.join(out_dir, fn))
             n += 1
-    say("[1/5] 程序文件 %d 个" % n)
+    # Django 项目：根级文件 + 子应用目录（config/ovpn/accounts/common/jobs/templates/static）
+    for fn in ("manage.py", "requirements-standalone.txt", "requirements.txt", ".env.example"):
+        p = os.path.join(ROOT, fn)
+        if os.path.isfile(p):
+            copy_file(p, os.path.join(out_dir, fn))
+            n += 1
+    django_dirs = ("config", "ovpn", "accounts", "common", "jobs", "templates", "static")
+    for d in django_dirs:
+        p = os.path.join(ROOT, d)
+        if os.path.isdir(p):
+            n += copy_tree(p, os.path.join(out_dir, d))
+    say("[1/5] 程序文件 + Django 项目 %d 个" % n)
 
     # 2) 二进制
     for fn in sorted(os.listdir(bin_)):

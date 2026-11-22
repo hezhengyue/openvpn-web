@@ -2,7 +2,48 @@
 
 一个目录、一个 systemd 服务、单进程。把「装 OpenVPN 服务端、账号密码、固定 IP、按人限制能访问哪些服务器、可开关的无 NAT 溯源、客户端互访 P2P、Excel 台账、版本与更新」全部收进浏览器，机房断网也能装。
 
-> 交付定稿：x86_64 离线静态二进制、Flask 自带 Web server（不上 gunicorn / Nginx / 数据库服务）、SQLite、账号密码认证、全员一个 `company.ovpn`、ACL 默认拒绝 + 观察模式起步、**网络模式默认 NAT（无 NAT 溯源默认关闭、可一键开启）**、客户端互访走内核 FORWARD、手动上传更新。
+> 交付定稿：x86_64 离线静态二进制、**Django 5.2 裸机便携模式（Waitress WSGI + SQLite WAL + WhiteNoise，零 Docker / 零外部服务）**、账号密码认证、全员一个 `company.ovpn`、ACL 默认拒绝 + 观察模式起步、**网络模式默认 NAT（无 NAT 溯源默认关闭、可一键开启）**、客户端互访走内核 FORWARD、手动上传更新。
+
+---
+
+## 0. 技术底座：Django 双模式底座（standalone）
+
+本项目以 `django-web-base` 为底座重构，Web 框架从 Flask 迁移到 **Django 5.2**，沿用底座的安全基线与运维体系：
+
+| 层 | 实现 |
+| --- | --- |
+| Web / HTTP | Django WSGI + Waitress（单进程多线程），无 Nginx / gunicorn |
+| 数据库 | SQLite(WAL) + `busy_timeout=20000`；Django 用户库与 core 业务库都在 `data/` |
+| 后台登录 | **Django Auth + django-axes**（失败 5 次锁 10 分钟），SimpleUI 后台在 `/admin/` |
+| 审计 | django-auditlog（Django 侧）+ core 自有审计（业务侧），双轨并存 |
+| 静态文件 | WhiteNoise 托管，`collectstatic` 后离线可用 |
+| 业务核心 | 原 `core.py` / `fullbackup.py` **零改动**，`worker.py` root 提权 + 安装码闸门全部保留 |
+| 前端 | `index.html` 单页应用**零改动**，所有 REST API 路径与响应结构保持兼容 |
+
+关键文件：
+
+```
+manage.py           Django 管理入口（migrate / ovpn_init / ovpn_cli / shell）
+serve.py            systemd 入口：migrate + 建管理员 + waitress 跑 config.wsgi
+config/             settings / urls / wsgi / celery（STANDALONE 模式）
+ovpn/               Flask→Django 桥接：views / urls / auth / middleware / bridge
+  views.py          原 app.py 的全部 REST 路由（业务逻辑调 core.py）
+  auth.py           管理登录改用 Django Auth + Axes，自助改密仍走 core
+  middleware.py     白名单 / 登录 / CSRF（X-CSRF-Token）/ 安全头 / 错误 JSON 化
+  bridge.py         core 加载 + 长任务线程 + sudo worker + 响应封装
+accounts/           Django Auth 用户模型（底座 core app 改名，避开业务 core.py）
+common/ jobs/       底座公共模块与任务中心
+selftest_django.py  selftest 的 Flask→Django 兼容层（424 项自检原样运行）
+```
+
+命令行救场（SSH 到服务器）：
+
+```bash
+python3 manage.py ovpn_cli allow 10.20.30.0/24     # 白名单加网段
+python3 manage.py ovpn_cli allow-reset              # 重置白名单为本机网卡网段
+python3 manage.py ovpn_cli reset-admin              # 重置管理凭据（等同 reset-admin.sh）
+python3 manage.py ovpn_cli restore-full <备份包>    # 全备份回滚（CLI 允许连二进制一起）
+```
 
 ---
 

@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>修改 VPN 密码</title>
+<style>
+:root{--pri:#2d8cf0;--ok:#19be6b;--warn:#f90;--err:#ed4014;--txt:#303133;--muted:#8a94a6;--line:#e4e8ee}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+color:var(--txt);background:linear-gradient(135deg,#1f2d3d,#2d8cf0);display:flex;align-items:center;justify-content:center;padding:20px}
+.box{background:#fff;border-radius:10px;box-shadow:0 12px 40px rgba(0,0,0,.25);width:400px;max-width:100%;padding:28px 26px}
+h1{font-size:18px;margin:0 0 4px}
+.sub{color:var(--muted);font-size:12px;margin:0 0 20px}
+label{display:block;font-size:13px;margin-bottom:14px}
+label span{display:block;color:#606266;margin-bottom:5px}
+input{width:100%;border:1px solid var(--line);border-radius:5px;padding:9px 11px;font-size:14px;font-family:inherit;outline:none;background:#fff}
+input:focus{border-color:var(--pri);box-shadow:0 0 0 2px rgba(45,140,240,.12)}
+button{width:100%;border:0;border-radius:5px;background:var(--pri);color:#fff;padding:10px;font-size:15px;cursor:pointer;font-family:inherit}
+button:hover{opacity:.9}button:disabled{opacity:.55;cursor:not-allowed}
+.msg{margin-top:14px;padding:9px 12px;border-radius:5px;font-size:13px;display:none}
+.msg.ok{display:block;background:#e8f8f0;color:#0f9b56;border-left:3px solid var(--ok)}
+.msg.err{display:block;background:#fdf0ee;color:#c92a0c;border-left:3px solid var(--err)}
+.who{background:#eef6ff;border-left:3px solid var(--pri);border-radius:5px;padding:10px 12px;font-size:13px;margin-bottom:16px;line-height:1.8}
+.who b{color:#1d63b8}
+.who.bad{background:#fdf0ee;border-left-color:var(--err);color:#a02c14}
+.who.bad b{color:#c92a0c}
+.tip{margin-top:18px;padding-top:14px;border-top:1px solid var(--line);color:var(--muted);font-size:12px;line-height:1.7}
+.tip b{color:#606266;font-weight:600}
+</style>
+</head>
+<body>
+<form class="box" id="f" autocomplete="off">
+  <h1>修改 VPN 密码</h1>
+  <p class="sub">连上 VPN 后打开本页，系统会自动认出你，只需填密码。</p>
+  <div class="who" id="who">正在识别你的账号…</div>
+  <label><span>当前密码</span><input id="old" type="password" autocomplete="current-password" disabled></label>
+  <label><span>新密码（至少 8 位）</span><input id="new" type="password" autocomplete="new-password" disabled></label>
+  <label><span>再输一次新密码</span><input id="new2" type="password" autocomplete="new-password" disabled></label>
+  <button id="btn" type="submit" disabled>确认修改</button>
+  <div class="msg" id="msg"></div>
+  <div class="tip">
+    <b>不用填 IP：</b>你拨上 VPN 之后，来源地址就是台账里分配给你的固定 IP，系统按它认人。反过来，没连 VPN 就打不开这个页面 —— 这是故意的，避免有人拿它试别人的密码。<br>
+    <b>改完要做什么：</b>下次拨号用新密码即可，客户端配置（company.ovpn）不用重下。<br>
+    <b>连续错 5 次</b>会锁 10 分钟，这是为了防止有人拿它试密码。
+  </div>
+</form>
+<script>
+var $ = function (s) { return document.querySelector(s); };
+var CSRF = "";
+function say(text, ok) { var m = $("#msg"); m.className = "msg " + (ok ? "ok" : "err"); m.textContent = text; }
+function lockAll(on) {
+  ["old", "new", "new2", "btn"].forEach(function (id) { $("#" + id).disabled = !!on; });
+}
+(async function () {
+  try {
+    var r = await fetch("/api/session", { credentials: "same-origin" });
+    var j = await r.json();
+    CSRF = j.csrf || "";
+  } catch (e) { say("无法连接服务端，请确认已连上公司网络", false); return; }
+  // 认人只依赖来源地址，前端没有任何可填的 IP
+  try {
+    var r2 = await fetch("/api/self/whoami", { credentials: "same-origin" });
+    var w = await r2.json();
+    var box = $("#who");
+    if (w.ok && w.identified) {
+      box.className = "who";
+      // 姓名 / 部门 / 账号名都来自台账（Excel 导入），一律 textContent 落进去，
+      // 绝不用 innerHTML 拼——否则一个叫 `<img onerror=...>` 的姓名就能在这页执行脚本。
+      box.textContent = "";
+      var add = function (tag, text) {
+        var el = document.createElement(tag);
+        el.textContent = text;
+        box.appendChild(el);
+        return el;
+      };
+      box.appendChild(document.createTextNode("已识别："));
+      add("b", w.real_name || w.username);
+      if (w.dept) box.appendChild(document.createTextNode("（" + w.dept + "）"));
+      box.appendChild(document.createTextNode(" · 账号 "));
+      add("b", w.username);
+      box.appendChild(document.createTextNode(" · 固定 IP "));
+      add("b", w.vpn_ip);
+      if (!w.enabled) {
+        box.appendChild(document.createElement("br"));
+        var sp = add("span", "该账号已停用，改密码也连不上，请联系管理员");
+        sp.style.color = "#c92a0c";
+      }
+      if (w.enabled) { lockAll(false); $("#old").focus(); }
+    } else {
+      box.className = "who bad";
+      box.innerHTML = "<b>没认出你的账号</b><br>本页按来源 IP 认人，请先<b>连上 VPN</b>，再用浏览器打开本页。<br>"
+        + "已经连着 VPN 还是这样，说明台账里没有分配给你的固定 IP（或不对），请联系管理员。";
+      lockAll(true);
+    }
+  } catch (e) {
+    $("#who").className = "who bad";
+    $("#who").textContent = "识别账号失败，请刷新重试。";
+    lockAll(true);
+  }
+})();
+$("#f").addEventListener("submit", async function (ev) {
+  ev.preventDefault();
+  var old = $("#old").value, np = $("#new").value, np2 = $("#new2").value;
+  if (!old || !np) { say("请把当前密码和新密码填完", false); return; }
+  if (np.length < 8) { say("新密码至少 8 位", false); return; }
+  if (np !== np2) { say("两次输入的新密码不一致", false); return; }
+  lockAll(true);
+  try {
+    var r = await fetch("/api/self/password", {
+      method: "POST", credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": CSRF },
+      // 不传 vpn_ip：由服务端按来源地址认人，前端无法指定别人的账号
+      body: JSON.stringify({ old: old, new: np })
+    });
+    var j = await r.json();
+    if (j.ok) {
+      say("修改成功（账号 " + (j.username || "") + "）。下次拨号请使用新密码。", true);
+      $("#old").value = ""; $("#new").value = ""; $("#new2").value = "";
+      lockAll(false);
+    } else {
+      say(j.msg || "修改失败", false);
+      if (j.msg && j.msg.indexOf("过期") >= 0) location.reload();
+      lockAll(false);
+    }
+  } catch (e) { say("请求失败：" + e, false); lockAll(false); }
+});
+</script>
+</body>
+</html>

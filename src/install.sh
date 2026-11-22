@@ -217,38 +217,50 @@ fi
 
 # 依赖：包可能是「干净运行时」（在 Windows 上打的包没法执行 Linux 的 pip），
 # 依赖全在 vendor/wheels 里，这里离线补齐。目标机不用联网，也不用装 pip 包。
-if ! "$PY" -c 'import flask, openpyxl, waitress' >/dev/null 2>&1; then
+if ! "$PY" -c 'import django, axes, auditlog, import_export, simpleui, whitenoise, waitress, environ, openpyxl' >/dev/null 2>&1; then
     say "      包内运行时缺依赖，从 vendor/wheels 离线补装…"
-    if ls "$DEST"/vendor/wheels/*.whl >/dev/null 2>&1; then
+    if ls "$DEST"/vendor/wheels/*.whl "$DEST"/vendor/wheels/*.tar.gz >/dev/null 2>&1; then
         "$PY" -m pip install --no-index --no-cache-dir --disable-pip-version-check \
-              --find-links "$DEST/vendor/wheels" \
-              "flask==3.1.3" "openpyxl==3.1.5" "waitress==3.0.2" >/dev/null 2>&1 || true
+              --find-links "$DEST/vendor/wheels" -r "$DEST/requirements-standalone.txt" >/dev/null 2>&1 || true
     fi
-    if ! "$PY" -c 'import flask, openpyxl, waitress' >/dev/null 2>&1; then
+    if ! "$PY" -c 'import django, axes, auditlog, import_export, simpleui, whitenoise, waitress, environ, openpyxl' >/dev/null 2>&1; then
         # pip 不可用或解析失败：wheel 本身就是 zip，直接解开也能 import
         _pysp="$("$PY" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])' 2>/dev/null)"
         [ -n "$_pysp" ] || _pysp="$DEST/python/lib/python3.12/site-packages"
         "$PY" - "$DEST/vendor/wheels" "$_pysp" <<'PYEOF'
-import glob, os, sys, zipfile
+import glob, os, sys, zipfile, tarfile, tempfile, shutil
 wheels, sp = sys.argv[1], sys.argv[2]
 os.makedirs(sp, exist_ok=True)
 n = 0
+# wheel 本质是 zip，直接解到 site-packages
 for w in sorted(glob.glob(os.path.join(wheels, "*.whl"))):
     with zipfile.ZipFile(w) as z:
         z.extractall(sp)
     n += 1
-print("      直接解包 %d 个 wheel 到 site-packages" % n)
+# sdist（simpleui 只有源码包）：解开后把顶层纯 Python 包目录搬到 site-packages
+for w in sorted(glob.glob(os.path.join(wheels, "*.tar.gz"))):
+    with tempfile.TemporaryDirectory() as td:
+        with tarfile.open(w, "r:gz") as t:
+            t.extractall(td)
+        for root in os.listdir(td):
+            src = os.path.join(td, root)
+            if not os.path.isdir(src):
+                continue
+            # 找到含 simpleui/__init__.py 的那一层
+            candidate = os.path.join(src, "simpleui")
+            if os.path.isdir(candidate):
+                shutil.copytree(candidate, os.path.join(sp, "simpleui"), dirs_exist_ok=True)
+                n += 1
+                break
+print("      直接解包 %d 个依赖到 site-packages" % n)
 PYEOF
     fi
-    if "$PY" -c 'import flask, openpyxl, waitress' >/dev/null 2>&1; then
+    if "$PY" -c 'import django, axes, auditlog, import_export, simpleui, whitenoise, waitress, environ, openpyxl' >/dev/null 2>&1; then
         say "      依赖已就位"
     else
         say "      警告: 依赖仍不完整，Web 可能起不来（检查包内 vendor/wheels）"
     fi
 fi
-# waitress 是 HTTP 服务器（单进程多线程）；缺了不会起不来，只是退回 Flask 自带的开发服务器
-"$PY" -c 'import waitress' >/dev/null 2>&1 || \
-    say "      提示: 没有 waitress，将使用 Flask 自带开发服务器（单线程，慢请求会互相挡）"
 
 # ---------------------------------------------------------------- 2.5) 开局预检
 # 在动 /etc、运行账号、systemd 之前，一次报齐所有环境问题：缺 TUN、glibc 太老、
@@ -287,6 +299,14 @@ chmod 755 "$DEST/bin"/* 2>/dev/null || true
 chown root:root "$DEST" "$DEST"/*.py "$DEST"/*.html "$DEST"/*.sh 2>/dev/null || true
 chmod 644 "$DEST"/*.py "$DEST"/*.html 2>/dev/null || true
 chmod 755 "$DEST"/*.sh 2>/dev/null || true
+# Django 项目代码（config/ovpn/accounts/common/jobs/templates/static）同样 root 所有、Web 不可写；
+# 只有 data/ 归服务用户。任何「下次会以 root 执行」的代码都不能被 Web 进程改。
+for d in config ovpn accounts common jobs templates static scripts; do
+    [ -d "$DEST/$d" ] || continue
+    chown -R root:root "$DEST/$d" 2>/dev/null || true
+    find "$DEST/$d" -type f -name '*.py' -exec chmod 644 {} + 2>/dev/null || true
+    find "$DEST/$d" -type d -exec chmod 755 {} + 2>/dev/null || true
+done
 # 安装码脚本是「装外部代码」的唯一人工闸门，只能 root 执行
 if [ -f "$DEST/install-code.sh" ]; then
     chown root:root "$DEST/install-code.sh" && chmod 700 "$DEST/install-code.sh"
@@ -327,7 +347,8 @@ Group=$USER
 WorkingDirectory=$DEST
 Environment=OVPN_WEB_ROOT=$DEST
 Environment=OVPN_WEB_PORT=$PORT
-ExecStart=$PY $DEST/app.py
+Environment=DJANGO_SETTINGS_MODULE=config.settings
+ExecStart=$PY $DEST/serve.py
 Restart=always
 RestartSec=3
 LimitNOFILE=65535
@@ -351,7 +372,8 @@ fi
 chown "$USER:$USER" "$DEST/data/admin_password.txt"
 chmod 600 "$DEST/data/admin_password.txt"
 # 台账存的是明文密码，库和备份目录只给服务用户自己
-for f in "$DEST"/data/openvpn-web.db "$DEST"/data/openvpn-web.db-wal "$DEST"/data/openvpn-web.db-shm "$DEST"/data/web.secret; do
+for f in "$DEST"/data/openvpn-web.db "$DEST"/data/openvpn-web.db-wal "$DEST"/data/openvpn-web.db-shm "$DEST"/data/web.secret \
+         "$DEST"/data/db.sqlite3 "$DEST"/data/db.sqlite3-wal "$DEST"/data/db.sqlite3-shm; do
     [ -e "$f" ] && { chown "$USER:$USER" "$f" && chmod 600 "$f"; } || true
 done
 [ -d "$DEST/data/backups" ] && { chown -R "$USER:$USER" "$DEST/data/backups" && chmod 700 "$DEST/data/backups"; } || true

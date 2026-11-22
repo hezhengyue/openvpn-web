@@ -26,7 +26,7 @@ sys.path.insert(0, CODE)
 
 import core          # noqa: E402
 import fullbackup    # noqa: E402
-import app as web    # noqa: E402
+import selftest_django as web    # noqa: E402  （Django 版兼容层；原为 import app as web）
 
 PASS, FAIL = [], []
 # 闸门/版本号这类用例要真的执行一个 shell 脚本，Windows 上跑不了（目标环境是 Linux）
@@ -791,7 +791,13 @@ def main():
     check("非法账户名被拒", P("/api/admin-user", {"username": "a b"}).status_code == 400)
     check("Web 已不再暴露重置凭据接口", P("/api/admin-reset", {}).status_code == 404)
     check("重置后不触发首登强改", core.admin_must_change() is False)
-    _reset = core.admin_reset_credentials()   # 直接取明文用于登录断言
+    # Django 版：重置凭据走 ovpn_cli reset-admin（同步 Django User + core meta）
+    from django.contrib.auth import get_user_model as _GUM
+    _reset = core.admin_reset_credentials()   # 取 core 生成的明文用于登录断言
+    _U = _GUM().objects.filter(is_staff=True, is_superuser=True).order_by("id").first()
+    if _U:
+        _U.username = _reset["username"]; _U.set_password(_reset["password"]); _U.save()
+    core.set_meta("admin_user", _reset["username"])
     check("重置返回新账户名", _reset.get("username", "").startswith("admin-"), _reset)
     check("重置返回新密码", len(_reset.get("password", "")) >= 12, _reset)
     check("旧账户名+旧密码失效", c.post("/api/login",
