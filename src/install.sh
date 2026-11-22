@@ -11,7 +11,7 @@
 # 它把「Web + OpenVPN 服务端 + CA + 证书 + ACL/NAT + systemd」一次装完，
 # 结束时浏览器打开就能用，不需要再点安装向导。
 #
-# 需要联网吗：不需要。python 运行时、flask/openpyxl wheel、静态 openvpn 全在包内。
+# 需要联网吗：不需要。python 运行时、Django/openpyxl wheel、静态 openvpn 全在包内。
 set -euo pipefail
 
 DEST="/opt/openvpn-web"
@@ -307,6 +307,22 @@ for d in config ovpn accounts common jobs templates static scripts; do
     find "$DEST/$d" -type f -name '*.py' -exec chmod 644 {} + 2>/dev/null || true
     find "$DEST/$d" -type d -exec chmod 755 {} + 2>/dev/null || true
 done
+# Django 运行期目录：config/settings.py 在 import 时会尝试 mkdir(STATIC_ROOT/MEDIA_ROOT/static)。
+# 项目根必须保持 root 所有（Web 不能改下次会以 root 执行的代码），所以这里预先建好这些
+# 子目录并交给服务用户，mkdir(exist_ok=True) 就不会因父目录不可写而 PermissionError。
+for d in logs staticfiles media; do
+    if command -v install >/dev/null 2>&1; then
+        install -d -o "$USER" -g "$USER" -m 750 "$DEST/$d" 2>/dev/null || true
+    fi
+    [ -d "$DEST/$d" ] || mkdir -p "$DEST/$d"
+    chown "$USER:$USER" "$DEST/$d" 2>/dev/null || true
+    chmod 750 "$DEST/$d" 2>/dev/null || true
+done
+# WhiteNoise 从 STATIC_ROOT 提供资源，安装时以 root 收集一次；Web 只需读。
+if [ -f "$DEST/manage.py" ]; then
+    "$PY" "$DEST/manage.py" collectstatic --noinput >/dev/null 2>&1 || \
+        say "      警告: collectstatic 失败，静态资源可能不可用"
+fi
 # 安装码脚本是「装外部代码」的唯一人工闸门，只能 root 执行
 if [ -f "$DEST/install-code.sh" ]; then
     chown root:root "$DEST/install-code.sh" && chmod 700 "$DEST/install-code.sh"

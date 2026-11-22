@@ -1,8 +1,13 @@
 # 运行时与产物（不进版本库）
-runtime/
+# 源码副本的便携 Python 解压到 runtime/；交付包里统一叫 python/（由打包脚本生成）
+runtime/*
+!runtime/README.md
 dist/
 tests/node_modules/
 staticfiles/
+
+# 离线 wheel 仓库（由 ./start.sh wheel:download 生成）
+wheelhouse/
 
 # 本地环境配置（可能含密钥；交付包只带 .env.example）
 .env

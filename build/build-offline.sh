@@ -7,11 +7,11 @@
 #
 # 依赖「本地优先」：三样东西都先看本地，缺了才联网，联网下到的会回填 vendor/，下次不用再下。
 #   1. Python 运行时   仓库自带 runtime/        → vendor/python/*.tar.gz → python-build-standalone
-#   2. Flask/openpyxl/waitress  vendor/wheels/*.whl → PyPI
+#   2. Django 全家桶/openpyxl   vendor/wheels/*.whl → PyPI
 #   3. 静态 OpenVPN    vendor/src/*.tar.gz      → 各上游镜像（见 build-static-openvpn.sh）
 #
 # 仓库布局（源码树是分层的，打出来的包是平铺的）：
-#   src/      运行时代码 → 包根（install.sh 依赖「app.py 与 install.sh 同级」）
+#   src/      运行时代码 → 包根（install.sh 依赖 core.py/serve.py 与 install.sh 同级）
 #   bin/      预编译静态二进制 → 包 bin/
 #   runtime/  离线 Python → 包 python/
 #   vendor/   构建期三方件 → 包 vendor/{static,src,wheels}
@@ -44,7 +44,7 @@ rm -rf "$OUT"; mkdir -p "$OUT"/{bin,data}
 # 从 Windows/zip 中转过来的文件会丢可执行位，先补回来，否则会被误判成"没有二进制"而去重编
 [ -d "$ROOT/bin" ] && chmod +x "$ROOT"/bin/* 2>/dev/null || true
 chmod +x "$ROOT"/build/*.sh "$SRC"/*.sh 2>/dev/null || true
-# 运行时代码平铺到包根：install.sh 与 app.py 必须同级（install.sh 里写死了 $DEST/app.py）
+# 运行时代码平铺到包根：install.sh 与 core.py/serve.py 必须同级（脚本里写死了 $DEST/…）
 cp -f "$SRC"/*.py "$SRC"/*.html "$SRC"/*.sh "$OUT"/ 2>/dev/null || true
 cp -f "$ROOT/README.md" "$OUT"/ 2>/dev/null || true
 # 目标机「上传源码自动编译」要用这个脚本，worker.py 是按 ROOT/build-static-openvpn.sh 找的

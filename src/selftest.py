@@ -1273,7 +1273,12 @@ def main():
     # 让 GATED 动作在没有安装码的情况下照样执行 —— 这是能直接提权的洞。
     _wsrc = open(os.path.join(CODE, "worker.py"), encoding="utf-8").read()
     _isrc = open(os.path.join(CODE, "install.sh"), encoding="utf-8").read()
-    _asrc0 = open(os.path.join(CODE, "app.py"), encoding="utf-8").read()
+    # Django 版：原 app.py 里的 env 透传搬到了 ovpn/bridge.py，GET CSRF 名单搬到 ovpn/middleware.py。
+    # 源码布局 selftest 在 src/（ovpn 在上一级）；交付平铺布局 selftest 与 ovpn/ 同级。
+    _code_root = CODE if os.path.isdir(os.path.join(CODE, "ovpn")) else os.path.dirname(CODE)
+    _ovpn_dir = os.path.join(_code_root, "ovpn")
+    _bsrc = open(os.path.join(_ovpn_dir, "bridge.py"), encoding="utf-8").read()
+    _msrc = open(os.path.join(_ovpn_dir, "middleware.py"), encoding="utf-8").read()
     check("worker 闸门不再因 MOCK 环境变量而放行（防提权）",
           "if act in GATED and not SELFTEST:" in _wsrc
           and "GATED and not MOCK" not in _wsrc)
@@ -1283,11 +1288,11 @@ def main():
           and any('env_keep += "OVPN_WEB_ROOT"' in ln for ln in _keep_lines)
           and not any(("OVPN_WEB_MOCK" in ln or "OVPN_WEB_SELFTEST" in ln)
                       for ln in _keep_lines))
-    check("app.py 把 MOCK/SELFTEST 都随 MOCK 标志设置（生产路径经 sudo 由 env_reset 清空）",
-          'OVPN_WEB_MOCK="1" if MOCK else "0"' in _asrc0
-          and 'OVPN_WEB_SELFTEST="1" if MOCK else "0"' in _asrc0)
+    check("bridge 把 MOCK/SELFTEST 都随 MOCK 标志设置（生产路径经 sudo 由 env_reset 清空）",
+          'OVPN_WEB_MOCK="1" if MOCK else "0"' in _bsrc
+          and 'OVPN_WEB_SELFTEST="1" if MOCK else "0"' in _bsrc)
     check("带副作用的 GET（logs/selfcheck）也纳入 CSRF 校验",
-          'request.path in ("/api/logs", "/api/selfcheck")' in _asrc0)
+          'CSRF_GET_PATHS = ("/api/logs", "/api/selfcheck")' in _msrc)
 
     # 回归：tls_min 曾是 validate_cfg 的盲区——带换行的字符串被原样写进以 root
     # 运行的 server.conf（tls-version-min 行），可注入 up/plugin 等任意指令，等于 root RCE。
@@ -1514,9 +1519,9 @@ def main():
     _html = open(os.path.join(CODE, "index.html"), encoding="utf-8").read()
     check("向导第 2 步与升级页都有安装码输入框",
           'id="wcode"' in _html and 'id="upcode"' in _html)
-    _appsrc = open(os.path.join(CODE, "app.py"), encoding="utf-8").read()
+    _viewsrc = open(os.path.join(_code_root, "ovpn", "views.py"), encoding="utf-8").read()
     check("三个上传接口都把安装码透传给 worker",
-          _appsrc.count('"install_code"') >= 3, _appsrc.count('"install_code"'))
+          _viewsrc.count('"install_code"') >= 3, _viewsrc.count('"install_code"'))
 
     if POSIX:
         import worker as wk

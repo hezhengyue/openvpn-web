@@ -151,9 +151,9 @@ def collect(root, port=8800, vpn_port=1194, reinstall=False):
     wheels = glob.glob(os.path.join(root, "vendor", "wheels", "*.whl"))
     deps_ok = False
     if py_ok:
-        deps_ok = _ok([py, "-c", "import flask, openpyxl, waitress"])
+        deps_ok = _ok([py, "-c", "import django, axes, auditlog, import_export, simpleui, whitenoise, waitress, environ, openpyxl"])
         if deps_ok:
-            add("ok", "deps", "Web 依赖", "flask / openpyxl / waitress 已就位")
+            add("ok", "deps", "Web 依赖", "Django 全家桶 / openpyxl / waitress 已就位")
         elif wheels:
             add("warn", "deps", "Web 依赖",
                 "包内运行时缺依赖，但带齐 %d 个 wheel，安装时会离线补装" % len(wheels))

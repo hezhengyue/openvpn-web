@@ -172,6 +172,14 @@ case "${1:-help}" in
         check_standalone
         ;;
 
+    wheel:download)
+        # 构建机操作，不强制创建/改写 .env；有则读取其中的 WHEEL_* 覆盖项
+        if [[ -f "$BASE_DIR/.env" ]]; then
+            load_env
+        fi
+        download_standalone_wheels
+        ;;
+
     # =========================================================
     # Django Commands
     # =========================================================

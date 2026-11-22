@@ -36,6 +36,12 @@ common/ jobs/       底座公共模块与任务中心
 selftest_django.py  selftest 的 Flask→Django 兼容层（424 项自检原样运行）
 ```
 
+运行时与离线依赖（跟随底座模板 v1.1.0）：
+
+- `start.sh` 按 `PYTHON_BIN` → `runtime/python/bin/python3.1x`（底座新约定）→ `python/bin/python3.1x`（本包交付目录）→ `runtime/bin/python3.1x`（源码开发）→ `django/python3.12`（旧路径）的顺序找解释器；只看文件存在、不依赖执行位，执行前会校验并提示 `chmod`。
+- `./start.sh wheel:download` 在联网构建机上按目标平台下载 wheel（sdist-only 的 `django-simpleui` 会自动构建成 wheel）；`./start.sh standalone:install` 检测到 `WHEEL_DIR` 下的 `*.whl` 就走 `--no-index` 离线安装，pip 缺失时用 `ensurepip` 恢复。本项目 `.env.example` 把 `WHEEL_DIR` 设为 `vendor/wheels`，与交付包自带的 wheel 仓库共用。
+- `STANDALONE=True` 时 `standalone:*` 命令强制使用本地解释器，不会误进 Docker 容器。
+
 命令行救场（SSH 到服务器）：
 
 ```bash
@@ -100,7 +106,8 @@ ip route-static 10.8.0.0 24 <VPN服务器内网IP>         # H3C / 华为
 ```
 openvpn-web/
 ├── src/                      运行时代码（打包后会被平铺到安装目录根）
-│   ├── app.py                Flask 主程序（路由 / 登录 / CSRF / 长任务调度）
+│   ├── serve.py              systemd 入口（Django 初始化 + Waitress 启动）
+│   ├── manage.py             Django 管理入口（migrate / ovpn_init / ovpn_cli）
 │   ├── core.py               核心逻辑（DB / 配置渲染 / ACL / 证书 / Excel / 指纹 / 备份）
 ├── fullbackup.py         备份与恢复（openvpn/ + web/ 两块，带 SHA-256 校验）
 │   ├── worker.py             特权执行器，sudo 白名单调用，动作白名单
@@ -111,15 +118,21 @@ openvpn-web/
 │   ├── prepare-openvpn.sh    确保 openvpn 二进制就位（包内 → 就地编译），装完不许半成品
 │   ├── install-code.sh       生成「装外部代码」用的一次性安装码（只能 root 执行，700）
 │   ├── reset-admin.sh        忘记管理凭据时用 root 一键重置账户名 + 密码并重启服务
-│   └── selftest.py           全链路自检（MOCK 模式，386 项）
+│   ├── selftest.py           全链路自检（MOCK 模式，424 项）
+│   ├── selftest_django.py    selftest 的 Flask→Django test client 兼容层
+│   ├── config/               Django settings / urls / wsgi（STANDALONE 模式）
+│   ├── ovpn/                 Flask 路由迁移层（views / urls / auth / middleware / bridge）
+│   ├── accounts/             Django Auth 用户模型（避开业务 core.py 同名）
+│   ├── common/ jobs/         底座公共模块与任务中心
+│   └── requirements*.txt     standalone 离线依赖清单
 ├── bin/                      预编译静态二进制
 │   ├── openvpn               OpenVPN 2.6.23，第三方库全静态，只依赖 glibc（最低 GLIBC_2.17）
 │   └── openssl               静态 openssl 3.0.16 命令行（签证书用，最小化系统没有 openssl 也能装）
-├── runtime/                  离线 Python 3.12（glibc 2.17 基线，含 Flask + openpyxl）
+├── runtime/                  离线 Python 3.12（glibc 2.17 基线，含 Django 全家桶 + openpyxl）
 ├── vendor/                   三方件快照（离线构建用）
 │   ├── src/                  源码包（openssl / lzo / lz4 / libcap-ng / openvpn）
 │   ├── static/prefix.tar.gz  预编译静态库，目标机「上传源码自编译」靠它 14 秒出结果
-│   ├── wheels/               flask / openpyxl 及其依赖的 cp312 wheel
+│   ├── wheels/               Django 全家桶 / openpyxl 及其依赖的 cp312 wheel
 │   ├── SHA256SUMS            逐包校验值
 │   └── fetch.sh              有网机器上跑一次补齐 vendor/
 ├── build/                    构建与打包（不进安装包）
@@ -136,16 +149,20 @@ openvpn-web/
 └── README.md
 ```
 
-**为什么源码分层、包内平铺**：`install.sh` 里写死了 `$DEST/app.py` / `$DEST/worker.py`，`worker.py` 又按 `ROOT/build-static-openvpn.sh` 找编译脚本，所以安装目录必须平铺。分层只存在于仓库里，`build/build-offline.sh` 负责把 `src/*` 拍平到包根。
+**为什么源码分层、包内平铺**：`install.sh` 里写死了 `$DEST/core.py` / `$DEST/worker.py` / `$DEST/serve.py`，`worker.py` 又按 `ROOT/build-static-openvpn.sh` 找编译脚本，所以安装目录必须平铺。分层只存在于仓库里，`build/build-offline.py`（Windows）与 `build/build-offline.sh`（Linux）负责把 `src/*` 拍平到包根。
 
 ### 3.2 装机后（/opt/openvpn-web）
 
 ```
 /opt/openvpn-web/
-├── python/           离线解释器 + Flask + openpyxl（glibc 2.17 即可）
+├── python/           离线解释器 + Django 全家桶 + openpyxl（glibc 2.17 即可）
 ├── bin/openvpn       静态 OpenVPN（第三方库全静态）
 ├── bin/openssl       静态 openssl 命令行
-├── app.py  core.py  worker.py  setup.py  auth-verify.py  index.html
+├── serve.py          systemd 入口（Django + Waitress）
+├── manage.py         Django 管理入口
+├── core.py  fullbackup.py  worker.py  setup.py  auth-verify.py  index.html
+├── config/ ovpn/ accounts/ common/ jobs/   Django 项目与应用
+├── selftest.py selftest_django.py          全链路自检与兼容层
 ├── install.sh        一键安装
 ├── build-static-openvpn.sh  + vendor/static/   「上传源码自动编译」用
 ├── README.md
@@ -155,12 +172,12 @@ openvpn-web/
 进程与权限：
 
 - systemd 只拉 `ovpnweb` 用户的一个 Web 进程：**waitress 单进程 8 线程**（纯 Python WSGI 服务器，离线 wheel 随包走）。线程只用来并行处理 HTTP，慢请求不会再把整页拖住；长任务另有一把全局写锁，任何时刻只有一个执行者在改系统，杜绝规则重建竞态
-- 没装 waitress（比如只替换了程序文件的老机器）会自动退回 Flask 自带的 Werkzeug 开发服务器（单线程），功能不受影响；「版本与更新」页第一行会显示当前实际在跑的服务器，`OVPN_WEB_SERVER=werkzeug` 可手动指定退回
+- 生产入口固定是 `serve.py` → Waitress（单进程多线程）；依赖缺失时安装脚本会从 `vendor/wheels` 离线补齐，不再退回开发服务器。调试时才用 `./start.sh standalone:dev` 跑 Django `runserver`
 - 长任务（安装、更新、重启）走独立后台线程 + `task_id` 轮询 + 实时日志；HTTP 请求本身不执行几十秒的系统动作。任务在跑时，其它写接口直接 409 拒绝
 - **三层锁各管一段**：进程内 `core.SYS_LOCK`（同一进程别同时写配置、别同时起两个 worker）→ `worker.py` 的 `flock`（跨进程别同时改系统，定时重放也算）→ 生成的 `rules.sh` 自己也 `flock`（重放与手工重建串行）。iptables 一律带 `-w 5` 等 xtables 锁
 - Web 低权限，`sudoers` 只放行一个精确命令：`python3 worker.py <task_id>`，命令行不传自由参数，动作与参数从 `data/tasks/<id>.json` 读并做白名单
 - **装外部代码要人工放行**：替换 openvpn 二进制、本机编译源码、更新 Web 自身这三个动作，worker 额外要求一个**一次性安装码**——只能在本机 `sudo /opt/openvpn-web/install-code.sh` 生成（8 位，默认 15 分钟，一码一次，填错 5 次作废），令牌 600 `root:root` 存在 `/etc/openvpn-web/install.token`，Web 进程既造不出也读不到。装完系统会把首装码（2 小时）印在「安装完成」里；日常改配置、建号、启停服务都不需要它
-- `data/` 归 `ovpnweb` 可写；**`bin/` 归 `root:root 755`**（只能执行、不能改），`app.py`/`core.py`/`worker.py`/`index.html`/`install-code.sh` 归 root 且低权用户只读
+- `data/` 归 `ovpnweb` 可写；**`bin/` 归 `root:root 755`**（只能执行、不能改），`serve.py`/`core.py`/`worker.py`/`index.html`/`install-code.sh` 与 Django 项目目录归 root 且低权用户只读
 - 因此**备份恢复不碰 `bin/openvpn`**（包里的二进制会跳过并提示），要换二进制只有两条带安装码的路：上传替换、本机编译
 - 安装时 mask 掉发行版自带的 `openvpn@.service`，避免包管理器拉起第二个实例抢 1194
 
@@ -197,7 +214,7 @@ chroot /opt/c7 /bin/bash -lc 'VENDOR_ONLY=1 PREFIX_OUT=/out/prefix.tar.gz \
 | 依赖 | ① 本地 | ② 仓库快照 | ③ 联网（最后兜底） |
 |---|---|---|---|
 | Python 运行时 | 仓库根 `runtime/`（已自带，零下载） | `vendor/python/*.tar.gz` | python-build-standalone |
-| Flask / openpyxl | — | `vendor/wheels/*.whl`（`pip --no-index`） | PyPI |
+| Django 全家桶 / openpyxl | — | `vendor/wheels/*.whl`（`pip --no-index`） | PyPI |
 | 静态 OpenVPN | `bin/openvpn` 已存在则直接用 | `vendor/src/*.tar.gz`（带 sha256 校验） | 各上游镜像按序回退，下到后**回填 vendor/src** |
 
 所以日常路径是：**仓库自带 `python/` + `vendor/` 里 18M 源码和 wheel → 构建机连网线都不用插**。
@@ -243,7 +260,7 @@ docker run --rm -v "$PWD/dist:/out" ovpn-build cp -r /build/dist/openvpn-web-x86
 
 构建脚本做三件事：
 
-1. 准备 python 运行时（优先复用仓库自带 `python/`），并用 `vendor/wheels` 离线装 `flask==3.1.3`、`openpyxl==3.1.5`
+1. 准备 python 运行时（优先复用仓库自带 `runtime/` → 包内 `python/`），并用 `vendor/wheels` 离线装 `requirements-standalone.txt`（Django 全家桶 + openpyxl）
 2. 在 manylinux2014（glibc 2.17 ABI）里编译 **OpenVPN 2.6.23 + OpenSSL 3 + LZO/LZ4/libcap-ng 全部静态链接**（`--disable-dco`、关掉 PAM / down-root / systemd / pkcs11 全部插件，我们只用脚本认证）
 3. 打包并校验 `ldd bin/openvpn` 只出现 glibc 一家
 
@@ -405,7 +422,7 @@ cd /opt/openvpn-web-x86_64 && ./install.sh
 - 失败不区分「IP 不存在 / 账号停用 / 密码错」，防止被拿来枚举台账
 - 来源 IP 连续错 5 次锁 10 分钟
 - 改完只影响下次拨号，`company.ovpn` 不用重下
-- 页面模板内联在 `app.py` 的 `SELF_PAGE` 里（不再依赖独立的 `self.html`），这样 Web 热更新也能覆盖到它
+- 页面模板在 `ovpn/self_page.html`（原 `app.py` 内联的 `SELF_PAGE` 已提取，内容保持一致），Web 热更新同样能覆盖到它
 
 ### 操作日志与操作者（审计直接记管理员账户）
 
@@ -414,8 +431,8 @@ cd /opt/openvpn-web-x86_64 && ./install.sh
 - **新装默认 `admin` / `admin`**，首次登录必须改密：改密页不提供旧密码输入（会话已验证过默认口令），只收「新密码 + 重复新密码」；未改完之前，后端拦住除改密 / 会话 / 退出以外的所有接口。
 - **改账户名不用验证密码**——忘了密码时也能改（首登强改阶段除外）。
 - **改密码要填两遍**（新密码 + 重复新密码），两次不一致直接拒绝，避免手滑输错把自己锁在外面。改完后 `data/admin_password.txt` 只留说明、不再留明文口令。
-- **忘了凭据只能走服务器脚本**：Web 界面不再提供【一键重置 / 重新生成账户与密码】入口；在服务器上用 root 执行 **`bash /opt/openvpn-web/reset-admin.sh`**（等价于 `python3 app.py --reset-admin`，会自动写好 `data/admin_password.txt` 并重启服务），登录页也只提示这条命令。
-- 命令行救场：`python3 app.py --reset-admin` 直接打印新凭据。
+- **忘了凭据只能走服务器脚本**：Web 界面不再提供【一键重置 / 重新生成账户与密码】入口；在服务器上用 root 执行 **`bash /opt/openvpn-web/reset-admin.sh`**（等价于 `python3 manage.py ovpn_cli reset-admin`，会自动写好 `data/admin_password.txt` 并重启服务），登录页也只提示这条命令。
+- 命令行救场：`python3 manage.py ovpn_cli reset-admin` 直接打印新凭据。
 
 老库升级时自动补 `admin` 账户名与强改标记默认值 `0`，原有密码继续可用、不会被迫改密。
 
@@ -426,7 +443,7 @@ cd /opt/openvpn-web-x86_64 && ./install.sh
 | 日志 | 操作者 | IP 从哪来 |
 |---|---|---|
 | 后台里的操作（改配置、加账号、改授权……） | 管理员登录账户名 | 请求来源地址（只信任本机反代的 `X-Forwarded-For`） |
-| 命令行 / 定时任务（`app.py --allow`、worker 动作） | `root` 执行的记为空，账号变更记 `web` | 无（显示 `—`），这类操作本来就没有 HTTP 来源 |
+| 命令行 / 定时任务（`manage.py ovpn_cli allow`、worker 动作） | `root` 执行的记为空，账号变更记 `web` | 无（显示 `—`），这类操作本来就没有 HTTP 来源 |
 | VPN 拨号认证 | 账号名 | 客户端来源公网 IP（`untrusted_ip`） |
 
 ### 资产与授权（ACL）
@@ -499,7 +516,7 @@ cd /opt/openvpn-web-x86_64 && ./install.sh
 - 编译环境（gcc / make / pkg-config）在**安装尾声和每次服务启动时自动检查一遍**，结果连同检查时间记进数据库，版本页直接展示；补装工具后点【重新检测】即可刷新，不用重启。缺工具时用中性文案说明——**不影响当前 VPN 服务和客户端**，只是不能在本机从源码编译新版本（版本页因此不会让人误以为出了故障）。
 - 本机编译产物只保证不低于本机 glibc；要发给更老的机器（如 CentOS 7），在构建机用 `build/build-static-openvpn.sh` 编好，直接替换安装目录的 `bin/openvpn` 后重启服务（`POST /api/update/binary` 也能走这条，界面上不暴露）
 
-Web 程序自身不提供「上传更新包」入口（日常更新就是覆盖文件 / 重跑 `install.sh`）。后端 `/api/update/web` 接口仍保留，仅作为「改错代码把页面搞崩」时的远程救场通道：进程还活着就能 POST 一个 zip 换回 `app.py` / `core.py` / `index.html`（**不允许替换 root 执行的 `worker.py`**），`data/` 与 `bin/` 不受影响。
+Web 程序自身不提供「上传更新包」入口（日常更新就是覆盖文件 / 重跑 `install.sh`）。后端 `/api/update/web` 接口仍保留，仅作为「改错代码把页面搞崩」时的远程救场通道：进程还活着就能 POST 一个 zip 换回 Django 项目文件 / `core.py` / `index.html`（**不允许替换 root 执行的 `worker.py`**），`data/` 与 `bin/` 不受影响。
 
 ### 备份与恢复（回滚 · 下载 · 迁移，同一套）
 
@@ -524,7 +541,7 @@ Web 程序自身不提供「上传更新包」入口（日常更新就是覆盖�
 2. **从本地文件恢复（迁移包）**：「恢复」卡片里选本地 `.tar.gz` → 【检查本地备份包】→ 看摘要 → 点【确认恢复】。
 3. **新机器迁移（推荐）**：先跑 `install.sh` 装好同版本 Web，把包 scp 上去，然后
    ```bash
-   python3 app.py --restore-full /path/to/openvpn-web-full-xxx.tar.gz
+   python3 manage.py ovpn_cli restore-full /path/to/openvpn-web-full-xxx.tar.gz
    systemctl restart openvpn-web
    ```
    恢复程序按目标机的目录重新生成 `server.conf` / `company.ovpn`，所以换目录也不用手改；在线用户可以继续用原来的 ovpn（CA 与 ta.key 一起恢复了）。
@@ -548,7 +565,7 @@ Web 程序自身不提供「上传更新包」入口（日常更新就是覆盖�
 
 ## 9. 安全边界与纪律
 
-- 纯 HTTP 内网页，**默认只放行本机网卡所在网段 + 127.0.0.1**（升级时自动从「所有私网」收紧）；VPN 拨号用户只放行自助改密页 `/self`，进不了后台。名单可在「管理密码与安全 → 管理端访问白名单」里改，保存时会校验「你当前 IP 还在名单里」，防止把自己关在门外；配错了 SSH 上去 `python3 app.py --allow 10.20.30.0/24`（`--allow-reset` 恢复本机网段）。管理账户 + 密码（PBKDF2）、签名 Cookie（HttpOnly / 8h）、CSRF、失败 5 次锁来源 IP 10 分钟、全操作审计（含操作者 IP）。**别直接暴露公网**，远程管理请走 HTTPS 反代或堡垒机
+- 纯 HTTP 内网页，**默认只放行本机网卡所在网段 + 127.0.0.1**（升级时自动从「所有私网」收紧）；VPN 拨号用户只放行自助改密页 `/self`，进不了后台。名单可在「管理密码与安全 → 管理端访问白名单」里改，保存时会校验「你当前 IP 还在名单里」，防止把自己关在门外；配错了 SSH 上去 `python3 manage.py ovpn_cli allow 10.20.30.0/24`（`allow-reset` 恢复本机网段）。管理账户 + 密码（PBKDF2）、签名 Cookie（HttpOnly / 8h）、CSRF、失败 5 次锁来源 IP 10 分钟、全操作审计（含操作者 IP）。**别直接暴露公网**，远程管理请走 HTTPS 反代或堡垒机
 - `X-Forwarded-For` 只在「本机反代」时才采信（`remote_addr` 是 127.0.0.1），否则任何人加个头就能伪装成白名单地址
 
 - 认证脚本任何异常一律 `exit 1`（fail-closed）；密码走 `/dev/shm` 临时文件，不进环境变量/命令行；同一「账号+来源IP」10 分钟失败 5 次锁定
@@ -608,7 +625,7 @@ Web 程序自身不提供「上传更新包」入口（日常更新就是覆盖�
 | ACL 没生效 | 是否还在观察模式；授权是否过期；目标是否被 LB/NAT 改了源 IP |
 | 客户端之间互访不通 | 是否加了互访授权（默认全拒）、是否还在观察模式、双方账号是否启用；自检页看 IPv4 转发是否开启 |
 | 时间串不起来 | 所有机器的 NTP |
-| Web 打不开 | 先看是不是**白名单拦的**：页面会直接告诉你「来源 IP x.x.x.x 不在管理端白名单内」。SSH 上去 `python3 app.py --allow <你的网段>`，或 `--allow-reset` 恢复成「127.0.0.1 + 本机网卡网段」；再看 `journalctl -u openvpn-web -n 50`、`systemctl status openvpn-web` |
+| Web 打不开 | 先看是不是**白名单拦的**：页面会直接告诉你「来源 IP x.x.x.x 不在管理端白名单内」。SSH 上去 `python3 manage.py ovpn_cli allow <你的网段>`，或 `allow-reset` 恢复成「127.0.0.1 + 本机网卡网段」；再看 `journalctl -u openvpn-web -n 50`、`systemctl status openvpn-web` |
 | 特权动作失败 | `journalctl` + 任务日志 `data/tasks/<id>.log`；确认 sudoers 里的解释器路径与 `core.PY` 一致 |
 | 上传二进制/源码提示「需要安装码」 | 这是设计如此：这三个动作会把外部代码装成 root 服务，必须有人在机器上按一下。`sudo /opt/openvpn-web/install-code.sh` 拿一个（8 位、15 分钟、只能用一次、填错 5 次作废） |
 | 「升级」页说本机不能编译 | 缺 `gcc/make/pkconfig`。装一次：`yum install -y gcc make perl pkgconfig`（Debian/Ubuntu 用 `apt-get install -y gcc make perl pkg-config`），或在安装目录跑 `./install.sh --with-build-tools`。CentOS 7 已 EOL，官方源失效时把 `CentOS-Base.repo` 的 `baseurl` 指到 `mirrors.aliyun.com/centos-vault/7.9.2009/` |
@@ -621,7 +638,7 @@ Web 程序自身不提供「上传更新包」入口（日常更新就是覆盖�
 - 前端在 jsdom 里逐页真跑（`tests/smoke.js`），另有 `tests/shots.js` 用无头 Edge 截图肉眼核对版式
 - **真实环境实测（2026-11-18，Anolis 8.10 / OpenVPN 2.6.23 / TCP）**：建中文账号 `张三` → 服务端生成 `ccd/张三` → 客户端用中文账号认证通过 → `PUSH_REPLY ... ifconfig 10.8.0.2` 拿到台账固定 IP；白名单按来源判定：隧道内 IP 访问 `/api/state` = 403、`/self` = 200，白名单内网段可进后台，公网 IP 全 403
 
-- 真实 Flask HTTP 服务启动验证：首页、会话、登录、CSRF、state、向导自检、账号、版本、导出均 200
+- 真实 Django HTTP 服务启动验证：首页、会话、登录、CSRF、state、向导自检、账号、版本、导出均 200；测试机 10.255.114.15 上 `install.sh` 完整跑通，装完自检 426 项全过，OpenVPN 与 Web 双进程在跑
 - 前端 JS 通过 `node --check`
 - 所有 `.py` 通过 `py_compile`，所有 `.sh` 通过 `bash -n`
 
@@ -635,8 +652,9 @@ Web 程序自身不提供「上传更新包」入口（日常更新就是覆盖�
 
 ---
 
-## 12. 版本信息（截至 2026-11-20）
+## 12. 版本信息（截至 2026-11-23）
 
+- Web **1.3.30**：**Web 框架整体迁到 Django 裸机底座，并同步底座 v1.1.0 的运行时/离线 wheel 能力**。Web 由 Flask 换成 **Django 5.2 standalone**（Waitress + SQLite WAL + WhiteNoise），**不用 Docker**；`core.py` / `fullbackup.py` 与 `index.html` 前端零改动，60+ REST 路径与 `X-CSRF-Token` 契约不变。管理登录改为 **Django Auth + django-axes**（失败 5 次锁 10 分钟、锁定返回 JSON 403），底座 `core` app 改名 `accounts` 以避开业务 `core.py`；启动入口改为 `serve.py`（自动 migrate / 建管理员 / 生成 `data/web.secret` / 收集 HOSTS），救场命令改为 `manage.py ovpn_cli {allow|allow-add|allow-reset|reset-admin|restore-full}`。同步底座 v1.1.0：解释器探测同时兼容 `runtime/python/`、`python/`（交付包）、`runtime/`（源码开发）与旧 `django/python3.12/`；新增 `./start.sh wheel:download` 与 `standalone:install` 的 `--no-index` 离线安装（pip 缺失走 `ensurepip`），`STANDALONE=True` 时 `standalone:*` 不再误进容器。selftest 经兼容层用 Django `Client` 跑原 424 项，全通过；新增 `.gitignore` 对 `.env` / `logs/` / `staticfiles/` / `wheelhouse/` 的忽略。
 - Web **1.3.29**：**「拷过去跑一下就好」补齐环境侧**。三处改动：① **强制只用随包便携版 Python**——删掉 `install.sh` 里「系统 python3 有 flask 就用系统的」兜底分支，包内运行时不可用就直接报「交付包不完整」并退出；目标机 Python 版本/依赖千差万别（CentOS 7 只有 3.6、最小化系统压根没装），不碰它才有确定性。② 新增 `precheck.py`（纯标准库，随包分发），在动 `/etc`、运行账号、systemd **之前**一次报齐：CPU 架构、glibc 版本、TUN 设备、init 系统、随包 Python 可执行性、Web 依赖/离线 wheel、**直接试跑包内 openvpn ELF**（glibc/架构不匹配当场发现，不等装完报 `GLIBC_2.xx not found`）、8800/1194 端口、磁盘、**系统时钟**、防火墙/SELinux。硬错误整批中止，警告只提示；时钟只做「RTC 与系统时间差 8 小时」「没开 NTP」这类诊断，**绝不自动改系统时间**（离线机器没有可信基准）。无 systemd 的系统会明确拦住并说明原因（本版不做 cron 降级）。③ 装完自动跑包内 `selftest.py` 并把结果打在「安装完成」里，交付即验收；它自己把数据目录指到临时目录并开 MOCK，不碰生产 `data/`。重装场景端口占用只警告（后面会 restart），首装才硬检查。新增 14 条回归断言（含「安装包不再引用系统 python3」「预检必须在写 sudoers 之前」「precheck.collect() 在 Windows 上也能安全执行」）。
 - Web **1.3.28**：**堵住两条「改配置 / 恢复备份就能拿到 root」的注入路径**（安全审查发现）。① `tls_min` 是 `validate_cfg` 的盲区——绕过前端直接打 `/api/settings`，一个带换行的字符串被原样写进以 root 运行的 `server.conf`（`tls-version-min` 行），即可注入 `up`/`plugin` 等任意指令，`settings_save` 随即重启 OpenVPN = root 命令执行；现加白名单（只认 1.2 / 1.3），渲染前再 fail-closed 拦一次。② 全备份恢复会整库覆盖 meta 并重新渲染配置，而 manifest 哈希只证明「包自洽」不证明「包没被改过」——改库重算哈希就能借「恢复」把脏值送进 root 执行的 `rules.sh`（`dns`/`ntp` 未加引号直接拼进 iptables 行）；现在恢复前先复核包内配置，不合法**整包拒绝**（在任何生产文件被覆盖之前）。同一次加固把渲染面全部收口：`rules.sh` 里网段取规范化 IPv4Network、账号 IP/资产网段/端口/协议渲染时再校验（脏值宁可让 apply-rules 失败也不生成脚本）、ccd 生成前校验账号固定 IP；带副作用的 `GET /api/logs?kind=deny` 与 `GET /api/selfcheck` 纳入 CSRF（防跨站 `<img>` 白嫖触发 root worker）。新增 13 条回归断言（含「篡改 meta + 重算哈希 → 恢复必须拒绝」）。
 - Web **1.3.27**：**堵住一个能绕过安装码的提权洞**。1.3.23 给「上传即 root」加了安装码闸门，但闸门判断写成了 `if act in GATED and not MOCK`，而 `install.sh` 的 sudoers 又用 `env_keep` 保留了 `OVPN_WEB_MOCK`——任何能调面板 API 的人都能在自己进程里设这个变量、经 sudo 传进 worker，跳过安装码把任意 ELF 装成 root 服务（测试机实测确认：无码时 `replace-binary` 被拦，带 `MOCK=1` 则直接进动作）。现在闸门改看**专用自检开关 `OVPN_WEB_SELFTEST`**（只有直接跑 worker.py 的自检进程才有；sudoers 加 `env_reset` 且只保留 `OVPN_WEB_ROOT`，该开关经 sudo 必被清空），`OVPN_WEB_MOCK` 退回到只管「是否碰真实系统」的职责，并加了 3 条回归断言钉死。顺带修：界面上「24 小时有效」文案与实际 15 分钟/2 小时不符；`install.sh` 探活只靠 curl（最小化系统没有 curl 会误报 Web 没起来，改成优先用包内 python 的 urllib，curl/wget 兜底）。

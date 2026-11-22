@@ -22,9 +22,9 @@
 set -euo pipefail
 
 # 本脚本有两种活法：① 在仓库的 build/ 下（源码树分层）；② 被拷到安装目录根平铺（worker.py 调它）。
-# 用「同级有没有 src/app.py」来区分，避免把 VENDOR 指到 /opt/vendor 这种不存在的地方去。
+# 用「同级有没有 src/core.py」来区分，避免把 VENDOR 指到 /opt/vendor 这种不存在的地方去。
 HERE="$(cd "$(dirname "$0")" && pwd)"
-if [ -f "$HERE/../src/app.py" ]; then
+if [ -f "$HERE/../src/core.py" ]; then
     ROOT="$(cd "$HERE/.." && pwd)"
 else
     ROOT="$HERE"

@@ -22,15 +22,17 @@ container_running() {
     $COMPOSE ps "$1" 2>/dev/null | grep -q "Up"
 }
 
-# 每次动态判断：web 容器在跑才算 Docker 模式
+# 每次动态判断：STANDALONE 显式开启时永远用本地解释器，
+# 否则 web 容器在跑才算 Docker 模式（避免 standalone:* 误进容器执行）。
 is_docker_mode() {
+    is_true "${STANDALONE:-false}" && return 1
     container_running web
 }
 
 # 解释器优先级：显式 PYTHON_BIN > 便携 Python > .venv > python3
 python_bin() {
     if [[ -n "${PYTHON_BIN:-}" ]]; then
-        # MANAGE/CELERY 会切到 django/ 子目录，相对路径必须先绝对化
+        # 相对路径必须先绝对化（脚本可能切到项目根之外的子目录）
         local _candidate="$PYTHON_BIN"
         local _root="${BASE_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
         if [[ "$_candidate" != /* && ! -e "$_candidate" && -e "$_root/$_candidate" ]]; then
@@ -51,15 +53,67 @@ python_bin() {
 
     # 便携包里的 bin/python 与 bin/python3 只是无 shebang 的占位文本，
     # 真正可执行文件是 bin/python3.12（ELF），必须直接用它。
-    if [[ -x "$base/django/python3.12/bin/python3.12" ]]; then
-        echo "$base/django/python3.12/bin/python3.12"
-    elif [[ -x "$base/django/.venv/bin/python" ]]; then
+    # 只看 -f，不依赖执行位：从 Windows 拷贝到 Linux 可能丢失 755，
+    # 真正执行前由 require_python_bin 给出明确 chmod 提示。
+    # 本项目的平铺交付包用 python/；源码开发用 runtime/；兼容底座的
+    # runtime/python/ 与旧路径 django/python3.12/。
+    local candidate
+    for candidate in \
+        "$base/runtime/python/bin/python3.12" \
+        "$base/runtime/python/bin/python3.13" \
+        "$base/runtime/python/bin/python3.11" \
+        "$base/python/bin/python3.12" \
+        "$base/python/bin/python3.13" \
+        "$base/python/bin/python3.11" \
+        "$base/runtime/bin/python3.12" \
+        "$base/runtime/bin/python3.13" \
+        "$base/runtime/bin/python3.11" \
+        "$base/django/python3.12/bin/python3.12"; do
+        if [[ -f "$candidate" ]]; then
+            echo "$candidate"
+            return
+        fi
+    done
+
+    if [[ -f "$base/.venv/bin/python" ]]; then
+        echo "$base/.venv/bin/python"
+    elif [[ -f "$base/django/.venv/bin/python" ]]; then
         echo "$base/django/.venv/bin/python"
     elif command -v python3 &>/dev/null; then
         echo python3
     else
         echo python
     fi
+}
+
+# wheel:download 是“构建机”操作：目标 runtime 可能是另一平台（如 Windows
+# 上下载 Linux wheel），因此优先用宿主机 Python，而不是 runtime/python。
+host_python_bin() {
+    if [[ -n "${PYTHON_BIN:-}" ]]; then
+        python_bin
+        return
+    fi
+    if command -v python3 &>/dev/null && python3 -V &>/dev/null; then
+        echo python3
+        return
+    fi
+    if command -v python &>/dev/null && python -V &>/dev/null; then
+        echo python
+        return
+    fi
+    python_bin
+}
+
+# 取解释器并确认真的能执行；失败时提示执行位问题（Windows→Linux 拷贝常见）
+require_python_bin() {
+    local py
+    py="$(python_bin)"
+    if ! "$py" -V >/dev/null 2>&1; then
+        log_error "解释器无法执行：$py" >&2
+        log_warn "若从 Windows 拷贝到 Linux，执行位数可能丢失，请运行：chmod +x \"$py\"" >&2
+        exit 1
+    fi
+    printf '%s\n' "$py"
 }
 
 PYTHON() {
@@ -85,7 +139,7 @@ CELERY() {
         local base="${BASE_DIR:-$PWD}"
         local py
         py="$(python_bin)"
-        (cd "$base/django" && "$py" -m celery "$@")
+        (cd "$base" && "$py" -m celery "$@")
     fi
 }
 
@@ -96,7 +150,7 @@ MANAGE() {
         local base="${BASE_DIR:-$PWD}"
         local py
         py="$(python_bin)"
-        (cd "$base/django" && "$py" manage.py "$@")
+        (cd "$base" && "$py" manage.py "$@")
     fi
 }
 

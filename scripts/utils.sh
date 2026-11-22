@@ -45,11 +45,12 @@ Docker 模式:
   dev / dev:up / dev:down / dev:logs / dev:sync
 
 裸机便携模式:
-  standalone:install   用便携 Python 安装 requirements-standalone.txt
+  standalone:install   安装 requirements-standalone.txt（检测到 wheelhouse 自动离线安装）
   standalone:init      安装依赖 + 迁移 + collectstatic + 管理员
   standalone:up        Waitress 启动（默认 0.0.0.0:8800）
   standalone:dev       Django runserver 便于调试
   standalone:check     执行 Django system check
+  wheel:download       下载裸机依赖 wheel 到 wheelhouse/（供离线机器安装）
 
 Django 常用:
   migrate / makemigrations / shell / superuser

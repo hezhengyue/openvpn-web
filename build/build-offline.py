@@ -195,7 +195,7 @@ def main():
     say(" 模式: %s" % ("只出 tar.gz" if a.tar_only else "目录 + tar.gz"))
     say("=" * 60)
 
-    # 1) 程序文件平铺到根（install.sh 要求与 app.py 同级）
+    # 1) 程序文件平铺到根（install.sh 要求 core.py / serve.py 与它同级）
     if os.path.isdir(out_dir):
         shutil.rmtree(out_dir)
     os.makedirs(os.path.join(out_dir, "bin"), exist_ok=True)
