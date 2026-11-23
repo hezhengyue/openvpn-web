@@ -386,7 +386,8 @@ def check_external_boundaries(root: Path, marker: dict, tier: int) -> list[str]:
         if isinstance(path, str) and path.strip():
             normalized = path.replace("\\", "/")
             parts = Path(normalized).parts
-            if Path(path).is_absolute():
+            # Windows 下 Path('/etc/passwd').is_absolute() 为 False，补前导斜杠兜底
+            if Path(path).is_absolute() or normalized.startswith('/'):
                 problems.append(f"external_boundaries[{idx}].path 必须是相对路径：{path}")
             if ".." in parts:
                 problems.append(f"external_boundaries[{idx}].path 不得包含 ..：{path}")

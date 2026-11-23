@@ -78,6 +78,9 @@ USE_HTTPS = env.bool('USE_HTTPS', default=not DEBUG)
 # 裸机默认按无 TLS 处理：直接调用 manage.py 时也生效，避免复用 Docker .env
 # 导致 Secure Cookie / CSRF origin 在 HTTP 下失效。前置了 TLS 终止时显式开启。
 STANDALONE_USE_HTTPS = env.bool('STANDALONE_USE_HTTPS', default=False)
+# 裸机前置本机反代（Caddy/Nginx 做 TLS 终止）时置 True：仅信任来自
+# 127.0.0.1/::1 的转发头，公网直连仍按 REMOTE_ADDR 处理。
+TRUST_LOCAL_PROXY = env.bool('TRUST_LOCAL_PROXY', default=STANDALONE_USE_HTTPS)
 if STANDALONE and USE_HTTPS and not STANDALONE_USE_HTTPS:
     USE_HTTPS = False
     warnings.warn(
@@ -109,19 +112,28 @@ CSRF_TRUSTED_ORIGINS = [
 ]
 CSRF_COOKIE_SECURE = USE_HTTPS
 SESSION_COOKIE_SECURE = USE_HTTPS
+# Django 默认 X_FRAME_OPTIONS=DENY，裸机没有 Nginx 时 SimpleUI 的菜单 iframe 会被拦截。
+# 默认 SAMEORIGIN 兼顾安全与后台可用；个别业务页需要更严策略时在视图/中间件单独覆盖。
+X_FRAME_OPTIONS = env('X_FRAME_OPTIONS', default='SAMEORIGIN')
 # 前端沿用 Flask 版的 `X-CSRF-Token` 头。Django 默认读的是 `X-CSRFToken`
 # （META 里是 HTTP_X_CSRFTOKEN，没有中间连字符），不同名会被当成没带 token。
 # 这里对齐既有的前端契约，前端一行都不用改。
-CSRF_HEADER_NAME = 'HTTP_X_CSRF_TOKEN'
+CSRF_HEADER_NAME = env('CSRF_HEADER_NAME', default='HTTP_X_CSRF_TOKEN')
 CSRF_COOKIE_NAME = 'csrftoken'
 CSRF_COOKIE_HTTPONLY = False      # 前端从 /api/session 的 JSON 取 token，不读 cookie，但保留可读便于排障
 CSRF_USE_SESSIONS = False         # token 走 cookie，未登录也能拿到（登录页就要发写请求）
-# 裸机直连时 REMOTE_ADDR 就是真实 IP，绝不读取 X-Forwarded-For
-SECURE_PROXY_SSL_HEADER = None if STANDALONE else ('HTTP_X_FORWARDED_PROTO', 'https')
+# Docker(Nginx) 或裸机 + 本机反代时信任 X-Forwarded-Proto；
+# 裸机直连不信任任何代理头，避免伪造 https 标记与 IP。
+SECURE_PROXY_SSL_HEADER = (
+    ('HTTP_X_FORWARDED_PROTO', 'https')
+    if (not STANDALONE or TRUST_LOCAL_PROXY)
+    else None
+)
 
 # 真实 IP 解析策略：
 #   Docker：Nginx 覆盖 X-Forwarded-For 为单个 $remote_addr，链中没有代理条目 → proxy_count=0
-#   裸机  ：只信 REMOTE_ADDR
+#   裸机  ：RealIPMiddleware 在 TRUST_LOCAL_PROXY 时从本机反代头解析并写回 REMOTE_ADDR，
+#           其余情况只信 REMOTE_ADDR，因此这里始终按 REMOTE_ADDR 读取归一化结果。
 IPWARE_HEADER_ORDER = ('REMOTE_ADDR',) if STANDALONE else ('HTTP_X_FORWARDED_FOR', 'REMOTE_ADDR')
 IPWARE_PROXY_COUNT = 0
 AXES_IPWARE_META_PRECEDENCE_ORDER = list(IPWARE_HEADER_ORDER)
@@ -168,8 +180,9 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
-    # OpenVPN：安全头 + 白名单/登录/CSRF 闸门（沿用前端 X-CSRF-Token 契约，
-    # 因此关闭 Django 自带 CsrfViewMiddleware，避免两套 CSRF 相互干扰）
+    # OpenVPN：安全头 + 白名单/登录/首登改密闸门。
+    # CSRF 由上面的 CsrfViewMiddleware 负责（CSRF_HEADER_NAME 已对齐
+    # 前端的 X-CSRF-Token），这里只补「带副作用 GET」的兜底校验。
     'ovpn.middleware.SecurityHeadersMiddleware',
     'ovpn.middleware.BootstrapMiddleware',
     'ovpn.middleware.OvpnGuardMiddleware',
@@ -223,7 +236,7 @@ if STANDALONE:
         }
     }
 else:
-    POSTGRES_HOST = 'db' if IN_DOCKER else 'localhost'
+    POSTGRES_HOST = env('POSTGRES_HOST', default='db' if IN_DOCKER else 'localhost')
     POSTGRES_PORT = env.int('POSTGRES_PORT', default=5432)
     POSTGRES_USER = env('POSTGRES_USER', default='postgres')
     POSTGRES_PASSWORD = env('POSTGRES_PASSWORD', default='Postgres1234')
@@ -264,7 +277,7 @@ if STANDALONE:
     CELERY_TASK_ALWAYS_EAGER = True
     CELERY_TASK_EAGER_PROPAGATES = False
 else:
-    REDIS_HOST = 'redis' if IN_DOCKER else 'localhost'
+    REDIS_HOST = env('REDIS_HOST', default='redis' if IN_DOCKER else 'localhost')
     REDIS_PORT = env.int('REDIS_PORT', default=6379)
     REDIS_PASSWORD = env('REDIS_PASSWORD', default='Redis1234')
     REDIS_DB = 0
@@ -292,7 +305,7 @@ CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_TIME_LIMIT = 300
-SESSION_COOKIE_AGE = 1200
+SESSION_COOKIE_AGE = env.int('SESSION_COOKIE_AGE', default=1200)
 
 
 # ===================== 🔐 密码校验 & Axes 防爆破 =====================
@@ -319,8 +332,8 @@ AXES_ENABLE_ADMIN = True
 AXES_HTTP_RESPONSE_CODE = 403
 AXES_CACHE = 'default'
 AXES_IPWARE_PROXY_COUNT = IPWARE_PROXY_COUNT
-# 锁定响应返回 JSON（前端 api() 统一解析 j.msg），不要再抛 Django 的 HTML 403
-AXES_LOCKOUT_CALLABLE = 'ovpn.auth.axes_locked'
+# 锁定响应同时兼容 admin 表单登录与前端 JSON API（见 common/utils/axes.py）
+AXES_LOCKOUT_CALLABLE = 'common.utils.axes.axes_lockout_response'
 IMPORT_EXPORT_USE_TRANSACTIONS = True
 IMPORT_EXPORT_SKIP_ADMIN_CONFIRM = False
 
@@ -345,8 +358,9 @@ STORAGES = {
 for _p in (STATIC_ROOT, MEDIA_ROOT, BASE_DIR / 'static'):
     _ensure_dir(_p, str(_p))
 
-DATA_UPLOAD_MAX_MEMORY_SIZE = 50 * 1024 * 1024
-FILE_UPLOAD_MAX_MEMORY_SIZE = 50 * 1024 * 1024
+MAX_UPLOAD_MB = env.int('MAX_UPLOAD_MB', default=50)
+DATA_UPLOAD_MAX_MEMORY_SIZE = MAX_UPLOAD_MB * 1024 * 1024
+FILE_UPLOAD_MAX_MEMORY_SIZE = MAX_UPLOAD_MB * 1024 * 1024
 
 
 # ===================== 📝 日志 =====================

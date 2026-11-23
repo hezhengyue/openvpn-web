@@ -23,11 +23,6 @@ from .bridge import core, ok, jerr, jbody, client_ip, actor, admin_user
 User = get_user_model()
 
 
-def axes_locked(request, *args, **kwargs):
-    """Axes 锁定时的响应：返回前端约定的 JSON，而不是 Django 的 HTML 403。"""
-    return jerr("失败次数过多，请 10 分钟后再试", 403)
-
-
 def _csrf(request):
     """CSRF token 统一交给 Django 管理。
 

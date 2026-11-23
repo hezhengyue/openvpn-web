@@ -19,6 +19,7 @@ import os
 import uuid
 import threading
 
+from django.conf import settings
 from django.contrib.auth import logout as auth_logout
 from django.middleware.csrf import (
     InvalidTokenFormat, _check_token_format, _does_token_match,
@@ -109,6 +110,13 @@ class OvpnGuardMiddleware:
         if _is_public(path):
             return self.get_response(request)
 
+        # Django 原生页面（后台 /admin/、任务中心 /jobs/）：IP 白名单之后，
+        # 登录与权限完全交给 Django 自己——admin 会跳 /admin/login/，
+        # staff_member_required 会 302。若在这里返回 JSON 401，后台登录页
+        # 也会被挡死，管理员根本进不去（base 的单测就是抓这个）。
+        if path.startswith("/admin/") or path.startswith("/jobs/"):
+            return self.get_response(request)
+
         # 登录校验：Django Auth
         if not getattr(request, "user", None) or not request.user.is_authenticated:
             return bridge.jerr("未登录", 401, need_login=True)
@@ -120,12 +128,8 @@ class OvpnGuardMiddleware:
         # CSRF：写请求与两个带副作用的 GET 都要过。
         # 生产环境 CsrfViewMiddleware 已校验过一次；这里对 ovpn 自己的 API 再校验
         # 一次，原因是 Django 的 test client 默认关闭 CSRF，只靠外层中间件无法在
-        # 自检里证明防护真的生效。/admin/ 与 /jobs/ 是 Django 原生页面，走标准
-        # 表单 token，不在这里重复校验。
-        needs_csrf = path in CSRF_GET_PATHS or (
-            request.method in ("POST", "PUT", "DELETE", "PATCH")
-            and not (path.startswith("/admin/") or path.startswith("/jobs/"))
-        )
+        # 自检里证明防护真的生效。/admin/ 与 /jobs/ 已在上面交还 Django，不走这里。
+        needs_csrf = path in CSRF_GET_PATHS or request.method in ("POST", "PUT", "DELETE", "PATCH")
         if needs_csrf:
             token = (request.META.get("HTTP_X_CSRF_TOKEN")
                      or (bridge.jbody(request) or {}).get("csrf"))
@@ -161,7 +165,9 @@ class SecurityHeadersMiddleware:
     def __call__(self, request):
         resp = self.get_response(request)
         resp.setdefault("X-Content-Type-Options", "nosniff")
-        resp.setdefault("X-Frame-Options", "DENY")
+        # 与 settings.X_FRAME_OPTIONS 保持一致：SimpleUI 后台用 iframe 打开菜单，
+        # 写死 DENY 会把后台页面自己框死（Django 默认也是 SAMEORIGIN 才好用）。
+        resp.setdefault("X-Frame-Options", getattr(settings, "X_FRAME_OPTIONS", "DENY"))
         resp.setdefault("Referrer-Policy", "no-referrer")
         resp.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
         resp.setdefault(
@@ -169,7 +175,7 @@ class SecurityHeadersMiddleware:
             "default-src 'self'; script-src 'self' 'unsafe-inline'; "
             "style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; "
             "connect-src 'self'; object-src 'none'; base-uri 'self'; "
-            "form-action 'self'; frame-ancestors 'none'")
+            "form-action 'self'; frame-ancestors 'self'")
         if request.is_secure or (request.META.get("HTTP_X_FORWARDED_PROTO") or "").lower() == "https":
             resp.setdefault("Strict-Transport-Security", "max-age=31536000")
         ctype = resp.get("Content-Type", "")

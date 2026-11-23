@@ -185,11 +185,13 @@ def main():
     check("会话接口返回 csrf", bool(j["csrf"]))
     check("未登录不回管理账户名", j.get("admin_user") == "", j.get("admin_user"))
     _h0 = c.get("/")
-    check("安全响应头齐全（nosniff / 禁止嵌套 / CSP / no-referrer）",
+    # 禁止嵌套：SimpleUI 后台用同源 iframe 打开菜单，所以是 SAMEORIGIN +
+    # frame-ancestors 'self'（等价于「只允许自己被嵌」，跨站嵌套仍然禁止）。
+    check("安全响应头齐全（nosniff / 同源嵌套 / CSP / no-referrer）",
           _h0.headers.get("X-Content-Type-Options") == "nosniff"
-          and _h0.headers.get("X-Frame-Options") == "DENY"
+          and _h0.headers.get("X-Frame-Options") == "SAMEORIGIN"
           and _h0.headers.get("Referrer-Policy") == "no-referrer"
-          and "frame-ancestors 'none'" in (_h0.headers.get("Content-Security-Policy") or ""),
+          and "frame-ancestors 'self'" in (_h0.headers.get("Content-Security-Policy") or ""),
           dict(_h0.headers))
     check("未登录访问 state 被拒", c.get("/api/state").status_code == 401)
     lr = c.post("/api/login", json={"username": "admin", "password": "wrong"})

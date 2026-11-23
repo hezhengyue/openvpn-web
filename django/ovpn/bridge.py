@@ -108,13 +108,14 @@ def jbody(request):
 
 
 def client_ip(request):
-    """真实来源 IP：只有本机反代才信 X-Forwarded-For。"""
-    ra = (request.META.get("REMOTE_ADDR") or "").strip()
-    if ra in ("127.0.0.1", "::1", "localhost"):
-        xff = (request.META.get("HTTP_X_FORWARDED_FOR") or "").split(",")[0].strip()
-        if xff:
-            return xff
-    return ra
+    """真实来源 IP：统一走底座 RealIPMiddleware 归一化后的结果。
+
+    RealIPMiddleware 已在链首把可信来源的 X-Forwarded-For 写回 REMOTE_ADDR
+    并剥离其余代理头，所以这里直接用 common.utils.ip.get_client_ip，
+    不再自己做「回环才信 XFF」的判断（否则两套规则会打架）。
+    """
+    from common.utils.ip import get_client_ip
+    return get_client_ip(request)
 
 
 def actor(request):
