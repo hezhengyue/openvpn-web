@@ -10,7 +10,7 @@
 """
 from datetime import datetime, timedelta
 
-from django.test import TestCase
+from django.test import Client, TestCase
 
 from .services import core
 from .models import (
@@ -202,3 +202,16 @@ class LogTest(TestCase):
         self.assertEqual(row["status"], "done")
         self.assertEqual(row["progress"], 100)
         self.assertIsNone(core.task_get("nope"))
+
+
+class CsrfFailureTest(TestCase):
+    """CSRF 失败必须回 JSON：前端 api() 统一按 JSON 解析，HTML 403 会让它抛解析错。"""
+
+    def test_api_post_without_token_returns_json(self):
+        client = Client(enforce_csrf_checks=True)
+        resp = client.post(
+            "/api/login", data="{}", content_type="application/json"
+        )
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.json()["ok"], False)
+        self.assertTrue(resp.json()["msg"])

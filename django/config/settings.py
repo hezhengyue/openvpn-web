@@ -119,6 +119,8 @@ X_FRAME_OPTIONS = env('X_FRAME_OPTIONS', default='SAMEORIGIN')
 # （META 里是 HTTP_X_CSRFTOKEN，没有中间连字符），不同名会被当成没带 token。
 # 这里对齐既有的前端契约，前端一行都不用改。
 CSRF_HEADER_NAME = env('CSRF_HEADER_NAME', default='HTTP_X_CSRF_TOKEN')
+# 前端按 JSON 解析所有响应：CSRF 失败也要回 JSON，不能给 Django 的 HTML 403
+CSRF_FAILURE_VIEW = 'ovpn.csrf.csrf_failure'
 CSRF_COOKIE_NAME = 'csrftoken'
 CSRF_COOKIE_HTTPONLY = False      # 前端从 /api/session 的 JSON 取 token，不读 cookie，但保留可读便于排障
 CSRF_USE_SESSIONS = False         # token 走 cookie，未登录也能拿到（登录页就要发写请求）

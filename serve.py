@@ -19,8 +19,7 @@ import sys
 _HERE = os.path.dirname(os.path.abspath(__file__))
 # serve.py 恒在安装根（与 bin/、system/、vendor/、data/ 同级）。
 ROOT = _HERE
-# Django 项目根：源码布局是 ROOT/django；交付包里 install.sh 把 django/ 的内容
-# 平铺到 ROOT，此时两者重合。两种布局都兼容。
+# Django 项目根：ROOT/django（源码与交付包同一套布局，不再平铺）。
 DJANGO_DIR = ROOT
 if os.path.isdir(os.path.join(ROOT, "django", "config")):
     DJANGO_DIR = os.path.join(ROOT, "django")
@@ -90,6 +89,52 @@ if not os.environ.get("HOSTS"):
         pass
     os.environ["HOSTS"] = ",".join(h + ":" + str(PORT) for h in hosts)
 
+def _relabel_legacy_auth_app():
+    """老版本的 Auth app 叫 accounts，后来改名 core（db_table 一直是 core_user）。
+
+    升级时 django_migrations 里留着 `accounts.0001_initial`，新代码却按 `core`
+    找迁移，于是报「admin.0001 先于 core.0001 应用」的历史不一致。表结构没变，
+    把迁移记录与 content type 的 app_label 改成新名字即可，不重建任何表。
+    """
+    from django.db import connection
+    with connection.cursor() as cur:
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='django_migrations'")
+        if not cur.fetchone():
+            return False
+        cur.execute("SELECT 1 FROM django_migrations WHERE app='accounts'")
+        if not cur.fetchone():
+            return False
+        cur.execute("UPDATE django_migrations SET app='core' WHERE app='accounts'")
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='django_content_type'")
+        if cur.fetchone():
+            cur.execute("UPDATE django_content_type SET app_label='core' WHERE app_label='accounts'")
+    return True
+
+
+def _migrate():
+    """迁移，并兼容两种历史库：
+
+    1) 老库把 Auth app 记成 accounts（现名 core）→ 历史不一致；
+    2) 老库的业务表是 core.py 用裸 SQL 建的，ORM 首次迁移会撞「表已存在」。
+       这种正是 --fake-initial 的用途：只把初始迁移标记为已应用，不重建表。
+    """
+    from django.core.management import call_command
+    try:
+        call_command("migrate", "--noinput", verbosity=0)
+    except Exception as exc:
+        name = type(exc).__name__
+        msg = str(exc)
+        if name == "InconsistentMigrationHistory" and _relabel_legacy_auth_app():
+            print("[serve] 检测到旧版 accounts 迁移记录，已改名 core 后重试")
+            call_command("migrate", "--noinput", verbosity=0)
+            return
+        if "already exists" in msg:
+            print("[serve] 业务表已存在（旧版裸 SQL 建的），改用 --fake-initial 对齐")
+            call_command("migrate", "--fake-initial", "--noinput", verbosity=0)
+            return
+        raise
+
+
 def main():
     try:
         sys.stdout.reconfigure(line_buffering=True)
@@ -99,7 +144,7 @@ def main():
     import django
     django.setup()
     from django.core.management import call_command
-    call_command("migrate", "--noinput", verbosity=0)
+    _migrate()
     call_command("ovpn_init", verbosity=0)
 
     from config.wsgi import application

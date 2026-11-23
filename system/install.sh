@@ -29,6 +29,12 @@ while [ $# -gt 0 ]; do
 done
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
+# 双位置兼容：包根的 ./install.sh 与 system/install.sh 是同一份内容，
+# 但「安装源」必须是含 django/ 与 python/ 的那一层。脚本万一被从 system/
+# 里直接调用，就自动上跳一级，避免把 system/ 当成整个包来铺。
+if [ ! -d "$SRC/django" ] && [ -d "$SRC/../django" ]; then
+    SRC="$(cd "$SRC/.." && pwd)"
+fi
 UNIT="/etc/systemd/system/openvpn-web.service"
 SUDOERS="/etc/sudoers.d/openvpn-web"
 USER="ovpnweb"
@@ -322,10 +328,26 @@ for d in logs staticfiles media; do
     chmod 750 "$DEST/$d" 2>/dev/null || true
 done
 # WhiteNoise 从 STATIC_ROOT 提供资源，安装时以 root 收集一次；Web 只需读。
+# settings 在生产模式要求非空 SECRET_KEY，这里直接复用 serve.py 会用的同一个文件，
+# 没有就先生成一份（与 serve.py 规则一致，之后重启沿用同一把，会话不会失效）。
 if [ -f "$DEST/django/manage.py" ]; then
-    "$PY" "$DEST/django/manage.py" collectstatic --noinput >/dev/null 2>&1 || \
-        say "      警告: collectstatic 失败，静态资源可能不可用"
+    SKF="$DEST/data/web.secret"
+    if [ ! -s "$SKF" ]; then
+        "$PY" -c "import secrets,sys;open(sys.argv[1],'w').write(secrets.token_urlsafe(48))" "$SKF" || true
+        chown "$USER:$USER" "$SKF" 2>/dev/null || true
+        chmod 600 "$SKF" 2>/dev/null || true
+    fi
+    if ! SECRET_KEY="$(tr -d '\r\n' < "$SKF")" OVPN_WEB_ROOT="$DEST" \
+         STANDALONE=True HOSTS="localhost,127.0.0.1" \
+         "$PY" "$DEST/django/manage.py" collectstatic --noinput \
+         >/dev/null 2>"$DEST/logs/collectstatic.err"; then
+        say "      警告: collectstatic 失败，见 $DEST/logs/collectstatic.err"
+        tail -3 "$DEST/logs/collectstatic.err" 2>/dev/null | sed 's/^/        /' || true
+    fi
 fi
+# 上面两步 manage.py 是以 root 跑的，会在 logs/ 下生成 root 所有的日志文件；
+# 服务是以 ovpnweb 跑的，不交还属主就会 PermissionError（表现为接口 500）。
+chown -R "$USER:$USER" "$DEST/logs" "$DEST/staticfiles" "$DEST/media" 2>/dev/null || true
 # 安装码脚本是「装外部代码」的唯一人工闸门，只能 root 执行
 if [ -f "$DEST/system/install-code.sh" ]; then
     chown root:root "$DEST/system/install-code.sh" && chmod 700 "$DEST/system/install-code.sh"
@@ -443,6 +465,19 @@ fi
 
 # ---------------------------------------------------------------- 8) 起 Web
 step "[9/9] 启动 Web 服务"
+# 迁移放在起服务之前：这样「迁移失败」会当场报出来，而不是变成 systemd 无限重启。
+# --fake-initial 用于接管「旧版 core.py 用裸 SQL 建过表」的库：只标记初始迁移，
+# 不重建表、不动数据；全新库上它的行为与普通 migrate 完全一致。
+if [ -f "$DEST/django/manage.py" ]; then
+    if ! SECRET_KEY="$(tr -d '\r\n' < "$DEST/data/web.secret" 2>/dev/null || echo)" \
+         OVPN_WEB_ROOT="$DEST" STANDALONE=True HOSTS="localhost,127.0.0.1" \
+         "$PY" "$DEST/django/manage.py" migrate --fake-initial --noinput \
+         >/dev/null 2>"$DEST/logs/migrate.err"; then
+        say "      错误: 数据库迁移失败，见 $DEST/logs/migrate.err"
+        tail -5 "$DEST/logs/migrate.err" 2>/dev/null | sed 's/^/        /' || true
+    fi
+fi
+chown -R "$USER:$USER" "$DEST/logs" 2>/dev/null || true
 systemctl restart openvpn-web
 # 探活不能只靠 curl：最小化系统常连 curl 都没有，那会误报「Web 没起来」。
 # 优先用刚选好的包内 python（urllib 是标准库），没有才退回 curl / wget。
@@ -519,7 +554,7 @@ fi
 CLIENT_IP="$("$PY" - "$DEST" <<'PYEOF' 2>/dev/null || true
 import os, sys, json, sqlite3
 root = sys.argv[1]
-db = os.path.join(root, "data", "openvpn-web.db")
+db = os.path.join(root, "data", "db.sqlite3")
 try:
     con = sqlite3.connect(db)
     row = con.execute("SELECT v FROM meta WHERE k='public_addr'").fetchone()
@@ -532,7 +567,7 @@ PYEOF
 VPID="$("$PY" - "$DEST" <<'PYEOF' 2>/dev/null || true
 import os, sys
 sys.path.insert(0, sys.argv[1])
-import core
+from system import core          # 业务模块在 system/，与 Django 的 core app 分开
 print("yes" if core._vpn_alive() else "no")
 PYEOF
 )"

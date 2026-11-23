@@ -58,12 +58,34 @@ def link_target(path):
     return txt
 
 
-def copy_file(src, dst):
+# 仓库在 Windows 上 core.autocrlf=true，工作区里的 .sh/.py 是 CRLF。
+# 直接搬进交付包会让 Linux 报「bad interpreter: /bin/bash^M」，
+# 所以程序文本统一转成 LF；运行时/vendor 是 Linux 原生内容，原样搬运不动。
+EOL_TEXT_EXT = (
+    ".sh", ".py", ".html", ".htm", ".txt", ".md", ".json",
+    ".conf", ".cfg", ".cnf", ".ini", ".example", ".service", ".yml", ".yaml",
+)
+
+
+def _to_lf(src, dst):
+    """按二进制读、把 CRLF 统一成 LF 后写出；无 CR 时等价于直接复制。"""
+    with open(src, "rb") as f:
+        data = f.read()
+    if b"\r\n" in data:
+        data = data.replace(b"\r\n", b"\n")
+    with open(dst, "wb") as f:
+        f.write(data)
+
+
+def copy_file(src, dst, eol_lf=False):
     os.makedirs(os.path.dirname(dst), exist_ok=True)
-    shutil.copyfile(src, dst)
+    if eol_lf and os.path.basename(dst).lower().endswith(EOL_TEXT_EXT):
+        _to_lf(src, dst)
+    else:
+        shutil.copyfile(src, dst)
 
 
-def copy_tree(src_root, dst_root):
+def copy_tree(src_root, dst_root, eol_lf=False):
     """搬运一棵树；软链存根优先建成真软链，建不了就写回存根（tar 阶段会补成软链）"""
     n = 0
     for dirpath, dirnames, filenames in os.walk(src_root):
@@ -85,7 +107,7 @@ def copy_tree(src_root, dst_root):
                     with open(d, "wb") as f:      # Windows 无建链权限
                         f.write(tgt.encode())
             else:
-                copy_file(s, d)
+                copy_file(s, d, eol_lf=eol_lf)
             n += 1
     return n
 
@@ -105,7 +127,20 @@ def mode_for(arc):
     return 0o644
 
 
+# 云同步盘（BaiduSyncdisk / OneDrive）会在目录里反复生成 .baiduyun.uploading.cfg
+# 之类的瞬时文件，打包时「刚 walk 到、转眼就没了」会直接让 getsize 抛错。
+# 这类文件不属于交付内容，跳过即可。
+TRANSIENT_HINTS = (".baiduyun.", ".dropbox.", "~$", ".tmp")
+
+
+def _is_transient(name):
+    low = name.lower()
+    return any(h in low for h in TRANSIENT_HINTS)
+
+
 def add_entry(tf, src, arc):
+    if _is_transient(os.path.basename(src)):
+        return "skip"
     tgt = os.readlink(src) if os.path.islink(src) else link_target(src)
     if tgt:
         ti = tarfile.TarInfo(arc)
@@ -116,16 +151,20 @@ def add_entry(tf, src, arc):
         tf.addfile(ti)
         return "link"
     ti = tarfile.TarInfo(arc)
-    ti.size = os.path.getsize(src)
     ti.mode = mode_for(arc)
     ti.mtime = MTIME
-    with open(src, "rb") as f:
-        tf.addfile(ti, f)
+    try:
+        ti.size = os.path.getsize(src)
+        with open(src, "rb") as f:
+            tf.addfile(ti, f)
+    except (FileNotFoundError, PermissionError):
+        # 同步盘/杀软在打包瞬间删改文件：跳过，不让整包构建失败
+        return "skip"
     return "file"
 
 
 def pack(out_dir, tar_path):
-    counts = {"file": 0, "link": 0, "dir": 0}
+    counts = {"file": 0, "link": 0, "dir": 0, "skip": 0}
     with tarfile.open(tar_path, "w:gz", compresslevel=6) as tf:
         for dirpath, dirnames, filenames in os.walk(out_dir):
             dirnames.sort()
@@ -205,15 +244,21 @@ def main():
     for fn in ("serve.py", "README.md"):
         p = os.path.join(src, fn)
         if os.path.isfile(p):
-            copy_file(p, os.path.join(out_dir, fn))
+            copy_file(p, os.path.join(out_dir, fn), eol_lf=True)
             n += 1
-    n += copy_tree(os.path.join(src, "django"), os.path.join(out_dir, "django"))
-    n += copy_tree(os.path.join(src, "system"), os.path.join(out_dir, "system"))
+    n += copy_tree(os.path.join(src, "django"), os.path.join(out_dir, "django"), eol_lf=True)
+    n += copy_tree(os.path.join(src, "system"), os.path.join(out_dir, "system"), eol_lf=True)
+    # install.sh 的正身在 system/，但「解包后直接 ./install.sh」是既有使用习惯，
+    # 包根再放一份同内容副本；脚本自身会向上找到含 django/ 的那一层作为安装源。
+    inst = os.path.join(src, "system", "install.sh")
+    if os.path.isfile(inst):
+        copy_file(inst, os.path.join(out_dir, "install.sh"), eol_lf=True)
+        n += 1
     os.makedirs(os.path.join(out_dir, "tests"), exist_ok=True)
     for fn in ("selftest.py", "selftest_django.py"):
         p = os.path.join(src, "tests", fn)
         if os.path.isfile(p):
-            copy_file(p, os.path.join(out_dir, "tests", fn))
+            copy_file(p, os.path.join(out_dir, "tests", fn), eol_lf=True)
             n += 1
     say("[1/5] 程序文件 + django/ + system/ %d 个" % n)
 
@@ -239,10 +284,10 @@ def main():
     for fn in ("build-static-openvpn.sh",):
         p = os.path.join(build, fn)
         if os.path.isfile(p):
-            copy_file(p, os.path.join(out_dir, "system", fn))
+            copy_file(p, os.path.join(out_dir, "system", fn), eol_lf=True)
     rd = os.path.join(ROOT, "README.md")
     if os.path.isfile(rd):
-        copy_file(rd, os.path.join(out_dir, "README.md"))
+        copy_file(rd, os.path.join(out_dir, "README.md"), eol_lf=True)
     say("[5/5] 编译脚本与说明就位")
 
     # version.txt（不执行二进制，从文件内容里读）
@@ -276,6 +321,32 @@ def main():
             if os.path.islink(p) or link_target(p):
                 stub_links += 1
     say("      软链 %d 个（tar 内会写成符号链接）" % stub_links)
+
+    # 自检：程序文本必须是 LF。Windows 工作区（core.autocrlf=true）里是 CRLF，
+    # 一旦漏转，目标机上 ./install.sh 会直接报 "/bin/bash^M: bad interpreter"。
+    crlf = []
+    for sub in ("", "django", "system", "tests"):
+        base = os.path.join(out_dir, sub) if sub else out_dir
+        for dirpath, _, filenames in os.walk(base):
+            if os.path.relpath(dirpath, out_dir).split(os.sep)[0] in ("python", "vendor", "bin"):
+                continue
+            for fn in filenames:
+                if not fn.lower().endswith((".sh", ".py")):
+                    continue
+                p = os.path.join(dirpath, fn)
+                try:
+                    with open(p, "rb") as f:
+                        if b"\r\n" in f.read(65536):
+                            crlf.append(os.path.relpath(p, out_dir))
+                except OSError:
+                    continue
+    if crlf:
+        say("")
+        say(" 错误: 以下程序文件仍是 CRLF，Linux 上无法执行：")
+        for x in crlf[:10]:
+            say("   - " + x)
+        raise SystemExit(1)
+    say("      换行统一为 LF（确认无 CRLF）")
 
     # 打包
     if a.tar_only:

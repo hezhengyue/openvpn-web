@@ -57,7 +57,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "2.1.1"
+WEB_VERSION = "2.1.3"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -223,8 +223,9 @@ def init_db():
     con.commit()
     for k, v in DEFAULT_CFG.items():
         con.execute("INSERT OR IGNORE INTO meta(k,v) VALUES(?,?)", (k, json.dumps(v, ensure_ascii=False)))
-    for k, v in (("initialized", 0), ("wizard_step", 0), ("admin_hash", ""),
-                 ("admin_salt", ""), ("config_fingerprint", ""), ("openvpn_version", ""),
+    # 管理凭据只存在 Django 的 auth 表里；这里不再有 admin_hash/admin_salt
+    for k, v in (("initialized", 0), ("wizard_step", 0),
+                 ("config_fingerprint", ""), ("openvpn_version", ""),
                  ("last_update", ""), ("csrf", ""), ("schema_v2", 0),
                  ("admin_user", "admin"), ("allow_init_v2", 0),
                  ("admin_must_change", 0)):

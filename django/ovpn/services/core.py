@@ -922,18 +922,6 @@ def task_get(tid):
 
 # --------------------------------------------------------------------------- 管理账户（Django Auth 接管）
 
-def admin_login(*args, **kwargs):
-    raise RuntimeError("管理登录已改由 Django Auth + Axes 承担，不再有独立的 admin_hash 校验")
-
-
-def admin_verify(*args, **kwargs):
-    raise RuntimeError("管理密码校验已改由 Django Auth 承担")
-
-
-def admin_set_password(*args, **kwargs):
-    raise RuntimeError("请在 Django 后台修改管理密码")
-
-
 def admin_reset_credentials(*args, **kwargs):
     """重新生成一组管理凭据（账户名 + 一次性明文密码）。
 

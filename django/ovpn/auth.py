@@ -98,8 +98,6 @@ def api_password(request):
         return jerr("；".join(e.messages))
     request.user.set_password(new)
     request.user.save()
-    # 同步 core 凭据体系（审计/旧脚本仍会读 admin_hash），保持两套一致
-    core.set_meta("admin_hash", core.hash_password(new))
     core._write_admin_password_note("# 管理密码已修改，明文不再保存（Django Auth）。\n")
     # Django 改密后会轮换 session key，重新登录以保住会话（update_session_auth_hash 等价物）
     from django.contrib.auth import update_session_auth_hash
