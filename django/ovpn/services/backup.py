@@ -8,7 +8,7 @@
 
 下一步要把 `web/` 部分改成「导出 ovpn 业务模型的 JSON」（web/ovpn-data.json），
 恢复时在 transaction.atomic() 内回灌，且不覆盖 core_user / django_session /
-auditlog / jobs。届时本模块只保留 openvpn/ 目录与 manifest 的处理。
+审计 / jobs。届时本模块只保留 openvpn/ 目录与 manifest 的处理。
 """
 from system import fullbackup as _impl  # noqa: E402
 

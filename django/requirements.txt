@@ -22,11 +22,8 @@ celery[redis]==5.7.0
 django-celery-beat==2.9.0
 
 # ===================== 后台能力 =====================
-django-import-export==4.4.6
-django-auditlog==3.4.2
 django-ipware==8.0.0
 django-axes==9.0.0
-django-simpleui==2026.1.13
 
 # ===================== 无 Nginx 托管静态文件 =====================
 whitenoise==6.12.0

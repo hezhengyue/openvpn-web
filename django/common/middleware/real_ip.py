@@ -31,7 +31,7 @@ def _last_forwarded_for(value):
 
     本机反代用 $proxy_add_x_forwarded_for 时，真实客户端 IP 是反代追加的
     最后一段；左侧各段是客户端可伪造的值，必须从右往左取。
-    仍做合法性校验，避免畸形值写回 REMOTE_ADDR 污染 Axes / auditlog。
+    仍做合法性校验，避免畸形值写回 REMOTE_ADDR 污染 Axes / 审计记录。
     """
     for candidate in reversed((value or '').split(',')):
         candidate = candidate.strip()

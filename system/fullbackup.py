@@ -202,7 +202,9 @@ PROTECTED_TABLES = (
     "django_session", "django_migrations", "django_content_type",
     "core_user", "auth_group", "auth_permission",
     "auth_group_permissions", "core_user_groups", "core_user_user_permissions",
-    "auditlog_logentry",
+    # 审计表必须保护：恢复备份只回滚业务数据，不能把审计历史一起回滚，
+    # 否则「恢复一份旧备份」就成了合法的抹除审计记录的手段。
+    "audit_auditlog",
     "jobs_job", "jobs_joblog",
     "axes_accessattempt", "axes_accesslog", "axes_accessfailurelog",
 )
@@ -349,16 +351,12 @@ def _restore(path, audit=True, protect=True, with_bin=False):
                 shutil.copy2(os.path.join(srcccd, fn), os.path.join(core.CCD, fn))
 
         # ---- 恢复 web/：只回灌业务表，底座自己的表一律不覆盖 ----
-        # 备份包里带的是整库文件，但 core_user / django_session / auditlog / jobs
-        # 属于「底座运行态」，被旧包覆盖会导致：当前登录会话失效、审计断档、
+        # 备份包里带的是整库文件，但 core_user / django_session / audit_auditlog /
+        # jobs 属于「底座运行态」，被旧包覆盖会导致：当前登录会话失效、审计断档、
         # 迁移记录回退。所以先读出这些表的现有内容，覆盖后再写回去。
         web = os.path.join(tmp, "web")
         dbfile = os.path.join(web, "openvpn-web.db")
         if os.path.isfile(dbfile):
-            con = core.db()
-            audit_rows = [tuple(r) for r in con.execute(
-                "SELECT id,ts,actor,action,detail,ip FROM audit")]
-            con.close()
             src = sqlite3.connect(dbfile)
             tgt = core.db()
             try:
@@ -366,8 +364,6 @@ def _restore(path, audit=True, protect=True, with_bin=False):
                 with tgt:
                     src.backup(tgt)
                 _put_tables(tgt, keep)
-                tgt.executemany("INSERT OR REPLACE INTO audit(id,ts,actor,action,detail,ip)"
-                                " VALUES(?,?,?,?,?,?)", audit_rows)
                 tgt.commit()
             finally:
                 src.close()

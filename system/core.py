@@ -57,7 +57,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "2.2.0"
+WEB_VERSION = "2.3.0"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -190,9 +190,6 @@ CREATE TABLE IF NOT EXISTS auth_attempts (k TEXT NOT NULL, ts REAL NOT NULL, ok 
 CREATE TABLE IF NOT EXISTS auth_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, username TEXT, src_ip TEXT,
   result TEXT, reason TEXT);
-CREATE TABLE IF NOT EXISTS audit (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, actor TEXT, action TEXT, detail TEXT,
-  ip TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY, kind TEXT, status TEXT, progress INTEGER, msg TEXT,
   created_at TEXT, finished_at TEXT, actor TEXT);
@@ -333,10 +330,8 @@ def _migrate(con):
     for col in ("real_name", "dept"):
         if col not in cols:
             con.execute("ALTER TABLE users ADD COLUMN %s TEXT DEFAULT ''" % col)
-    # 2) audit 补「操作者来源 IP」（老库里没有这一列，升级后新记录才有值）
-    acols = {r[1] for r in con.execute("PRAGMA table_info(audit)")}
-    if "ip" not in acols:
-        con.execute("ALTER TABLE audit ADD COLUMN ip TEXT DEFAULT ''")
+    # 2) 审计已迁到独立 audit app（audit_auditlog）+ 特权侧 JSONL，
+    #    旧 audit 表由 ovpn.0003 迁移删除，这里不再做列升级。
     # 3) 明文密码 + 账号有效期。老库只有哈希，明文反推不出来：
     #    给这些账号换一张新密码并写 600 清单，保证「所有账号都有明文可看、导出不报空」。
     #    只跑一次，之后新建/改密都会同步维护 password_plain。
@@ -831,17 +826,27 @@ def audit_ctx_get():
 
 
 def log_audit(actor, action, detail, ip=None):
+    """原子操作审计（特权侧）：追加到 data/state/ops-audit.jsonl。
+
+    这里不能写 Django 库，原因有两个：
+      * 安装阶段 setup.py 早于 `manage.py migrate`，audit_auditlog 还不存在；
+      * root 子进程（worker / fullbackup CLI）不加载 Django 应用栈。
+    每行一个 JSON，Web 侧 get_logs('audit') 读尾部并与 audit_auditlog 合并展示，
+    所以「谁在哪个环节动了系统」在同一个日志页里可查。
+
+    O_APPEND 写入单行（通常 < 4KB），多进程并发追加不会互相覆盖。
+    """
     _a, _i = audit_ctx_get()
     # 没登录时的兜底 actor（"admin"/"web"）换成当前管理员账户名
     if actor in (None, "", "admin", "web") and _a:
         actor = _a
     if ip is None:
         ip = _i or ""
-    con = db()
-    con.execute("INSERT INTO audit(ts,actor,action,detail,ip) VALUES(?,?,?,?,?)",
-                (now(), actor, action, detail, ip))
-    con.commit()
-    con.close()
+    ensure_dirs()
+    rec = {"ts": now(), "actor": actor or "", "action": action or "",
+           "detail": detail or "", "ip": ip or ""}
+    with open(os.path.join(STATE, "ops-audit.jsonl"), "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
 def log_auth(username, src_ip, result, reason=""):
@@ -884,17 +889,25 @@ def read_tail_lines(path, limit=200, max_bytes=4 << 20):
 
 
 def get_logs(kind="audit", limit=200):
-    con = db()
     if kind == "audit":
-        rows = con.execute("SELECT * FROM audit ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
-    elif kind == "auth":
-        rows = con.execute("SELECT * FROM auth_log ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
-    elif kind == "server":
+        # 特权侧审计只落 JSONL（见 log_audit 的注释）；Web 侧会再合并
+        # audit_auditlog 的记录，这里只负责把本地这份读出来。
+        p = os.path.join(STATE, "ops-audit.jsonl")
+        if not os.path.exists(p):
+            return []
+        out = []
+        for x in read_tail_lines(p, limit):
+            try:
+                out.append(json.loads(x))
+            except Exception:
+                pass
+        return list(reversed(out))
+    if kind == "server":
         p = os.path.join(DATA, "openvpn.log")
         if not os.path.exists(p):
             return []
         return [{"ts": "", "detail": x} for x in read_tail_lines(p, limit)]
-    elif kind == "deny":
+    if kind == "deny":
         p = os.path.join(STATE, "deny.jsonl")
         if not os.path.exists(p):
             return []
@@ -905,9 +918,15 @@ def get_logs(kind="audit", limit=200):
             except Exception:
                 pass
         return list(reversed(out))
-    else:
-        rows = []
-    con.close()
+    con = db()
+    try:
+        if kind == "auth":
+            rows = con.execute("SELECT * FROM auth_log ORDER BY id DESC LIMIT ?",
+                               (limit,)).fetchall()
+        else:
+            rows = []
+    finally:
+        con.close()
     return [dict(r) for r in rows]
 
 
@@ -2587,14 +2606,13 @@ def _restore_legacy_snapshot(path):
     """恢复老版本 data/snapshots/<时间戳>/ 目录快照，新版不再生成，仅兼容读取"""
     if not os.path.isdir(path) or os.path.realpath(path).startswith(os.path.realpath(SNAPSHOTS)) is False:
         raise ValueError("快照路径非法")
-    # 任务进度与操作审计不属于「业务状态」，回滚时保留，否则前端轮询会断、审计会丢
-    keep = {"tasks": [], "audit": []}
+    # 任务进度不属于「业务状态」，回滚时保留，否则前端轮询会断。
+    # 审计已迁到 audit_auditlog（由 fullbackup 的保护表机制保留），这里不再处理。
+    keep = {"tasks": []}
     try:
         con = db()
         keep["tasks"] = [tuple(r) for r in con.execute(
             "SELECT id,kind,status,progress,msg,created_at,finished_at,actor FROM tasks")]
-        keep["audit"] = [tuple(r) for r in con.execute(
-            "SELECT id,ts,actor,action,detail FROM audit")]
         con.close()
     except Exception:
         pass
@@ -2621,13 +2639,11 @@ def _restore_legacy_snapshot(path):
         for f in os.listdir(ccdsrc):
             shutil.copy2(os.path.join(ccdsrc, f), CCD)
     init_db()
-    if keep["tasks"] or keep["audit"]:
+    if keep["tasks"]:
         con = db()
         con.executemany("INSERT OR REPLACE INTO tasks"
                         "(id,kind,status,progress,msg,created_at,finished_at,actor)"
                         " VALUES(?,?,?,?,?,?,?,?)", keep["tasks"])
-        con.executemany("INSERT OR IGNORE INTO audit(id,ts,actor,action,detail)"
-                        " VALUES(?,?,?,?,?)", keep["audit"])
         con.commit(); con.close()
     meta_p = os.path.join(path, "meta.json")
     if os.path.exists(meta_p):

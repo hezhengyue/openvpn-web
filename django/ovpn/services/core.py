@@ -22,6 +22,7 @@ from datetime import datetime
 from django.conf import settings
 from django.core.cache import cache
 from django.db import transaction
+from django.utils import timezone
 
 # 纯逻辑层：安装根下的 system 包（交付包与源码布局都成立）
 _ROOT = str(getattr(settings, 'PROJECT_ROOT', '') or '')
@@ -32,8 +33,11 @@ from system import core as _base  # noqa: E402
 
 from ..models import (  # noqa: E402
     SystemSetting, VpnUser, AssetGroup, AssetItem, UserGroup, UserGroupMember,
-    AclGrant, PeerGrant, AuditRecord, AuthLog, OvpnTask, BackupRecord,
+    AclGrant, PeerGrant, AuthLog, OvpnTask, BackupRecord,
 )
+
+from audit.models import AuditEventType, AuditLog  # noqa: E402
+from audit.services import audit_log as _audit_write  # noqa: E402
 
 # --------------------------------------------------------------------------- 继承纯逻辑
 # 常量（ROOT/DATA/BIN/DEFAULT_CFG/WEB_VERSION…）、纯函数（hash_password、vpn_network、
@@ -91,14 +95,56 @@ def cfg():
 
 # --------------------------------------------------------------------------- 审计 / 日志
 
+# 动作码前缀 → 模块名。审计后台按模块筛选，前端日志页显示原始动作码。
+_AUDIT_MODULES = {
+    'user': 'VPN 账号', 'users': 'VPN 账号',
+    'assetgroup': '资产组', 'assetitem': '资产条目',
+    'usergroup': '用户组', 'grant': 'ACL 授权', 'peer': '互联授权',
+    'security': '安全策略', 'settings': '系统设置', 'wizard': '初始化向导',
+    'update': '版本更新', 'backup': '备份恢复', 'user_backup': '账号备份',
+    'password': '密码', 'ca': '证书', 'rules': '防火墙规则',
+    'service': '服务', 'network': '网络', 'ovpn': '客户端配置',
+    'login': '登录', 'logout': '退出', 'import': '批量导入',
+    'setup': '安装', 'unit': '自检', 'admin': '管理账号',
+}
+
+# 这些动作归 security，其余归 business。分级是为了在后台按「安全事件」快速筛。
+_SECURITY_ACTIONS = frozenset({
+    'login', 'logout', 'login.fail', 'password.change',
+    'security.allow', 'ca.reinit', 'admin.reset',
+})
+
+
+def _audit_module(action):
+    prefix = (action or '').split('.')[0]
+    return _AUDIT_MODULES.get(prefix, prefix)[:100]
+
+
 def log_audit(actor, action, detail, ip=None):
+    """统一审计写入口（薄壳）。
+
+    **签名不许改**：views/auth 共 50 处调用点、前端动作码、selftest 都挂在
+    (actor, action, detail, ip) 这组参数上。内部转调 audit.services.audit_log()，
+    操作人一律以字符串快照落 actor_name，不建外键、不依赖调用方是 User 实例。
+
+    线程内的兜底上下文（system.core.audit_ctx_set）仍然有效：后台任务线程用
+    它把「谁发起的」带进来，Web 请求则由 AuditContextMiddleware 提供 request。
+    """
     _a, _i = audit_ctx_get()
     if actor in (None, "", "admin", "web") and _a:
         actor = _a
     if ip is None:
         ip = _i or ""
-    AuditRecord.objects.create(ts=now(), actor=actor or "", action=action or "",
-                               detail=detail or "", ip=ip or "")
+    action = action or ""
+    _audit_write(
+        action=action,
+        actor_name=str(actor or ""),
+        remote_addr=str(ip or ""),
+        message=detail or "",
+        module=_audit_module(action),
+        event_type=(AuditEventType.SECURITY if action in _SECURITY_ACTIONS
+                    else AuditEventType.BUSINESS),
+    )
 
 
 def log_auth(username, src_ip, result, reason=""):
@@ -118,10 +164,60 @@ def recent_auth(limit=8):
     return list(AuthLog.objects.order_by('-id')[:int(limit)].values())
 
 
+AUDIT_JSONL = "ops-audit.jsonl"
+
+
+def _audit_rows_from_db(limit):
+    """统一审计表 → 前端契约字段（ts/actor/action/detail/ip）。"""
+    rows = []
+    for r in AuditLog.objects.order_by('-created_at')[:limit]:
+        rows.append({
+            "id": str(r.pk),
+            "ts": timezone.localtime(r.created_at).strftime("%Y-%m-%d %H:%M:%S"),
+            "actor": r.actor_name,
+            "action": r.action,
+            "detail": r.message,
+            "ip": r.remote_addr,
+        })
+    return rows
+
+
+def _audit_rows_from_jsonl(limit):
+    """特权脚本（root）追加写的审计：安装、备份恢复、升级等。
+
+    root 侧不连 Django 数据库（此时可能还没 migrate），只往 data/state/
+    ops-audit.jsonl 追加一行 JSON；这里读尾部并合并进同一个列表，
+    保证「谁在哪个环节动了系统」在同一个日志页里看得到。
+    """
+    p = os.path.join(STATE, AUDIT_JSONL)
+    if not os.path.exists(p):
+        return []
+    rows = []
+    for line in read_tail_lines(p, limit):
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(d, dict):
+            continue
+        rows.append({
+            "id": "ops-%s" % (d.get("ts") or ""),
+            "ts": d.get("ts", ""),
+            "actor": d.get("actor", ""),
+            "action": d.get("action", ""),
+            "detail": d.get("detail", ""),
+            "ip": d.get("ip", ""),
+        })
+    return rows
+
+
 def get_logs(kind="audit", limit=200):
     limit = int(limit)
     if kind == "audit":
-        return list(AuditRecord.objects.order_by('-id')[:limit].values())
+        rows = _audit_rows_from_db(limit) + _audit_rows_from_jsonl(limit)
+        # 两个来源按时间合并；时间串格式一致（%Y-%m-%d %H:%M:%S），可直接比较
+        rows.sort(key=lambda r: (r.get("ts") or ""), reverse=True)
+        return rows[:limit]
     if kind == "auth":
         # 两个来源：Web 自助改密写 ORM(AuthLog)；OpenVPN 拨号认证由 root 的
         # system/auth-verify.py 追加写 data/state/auth.jsonl（不反向写主库）。

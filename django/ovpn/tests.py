@@ -218,11 +218,10 @@ class CsrfFailureTest(TestCase):
 
 
 class SecurityHeadersTest(TestCase):
-    """CSP 要分路径：业务页收紧（不许 eval），后台放宽（SimpleUI 需要 eval）。
+    """CSP 全站收紧：移除 SimpleUI 后后台是 Django 原生模板，不需要 'unsafe-eval'。
 
-    后台登录页是 new Vue({el:'.login-main'})，Vue 运行时编译器用 new Function
-    生成渲染函数；CSP 里没有 'unsafe-eval' 就会被拒，挂载点被替换成空注释节点，
-    表现就是「页面一片空白」。这条用例就是防它再退化。
+    这条用例防的是「有人为了图方便把 unsafe-eval 加回来」——之前 SimpleUI 的
+    Vue 运行时编译必须它，代价是任何注入点都能 new Function，等于关掉一半 CSP。
     """
 
     def test_business_page_csp_has_no_unsafe_eval(self):
@@ -231,10 +230,15 @@ class SecurityHeadersTest(TestCase):
         self.assertIn("script-src 'self' 'unsafe-inline'", csp)
         self.assertNotIn("unsafe-eval", csp)
 
-    def test_admin_page_csp_allows_eval(self):
+    def test_admin_page_csp_has_no_unsafe_eval(self):
         resp = Client().get("/admin/login/")
         self.assertEqual(resp.status_code, 200)
-        self.assertIn("'unsafe-eval'", resp["Content-Security-Policy"])
+        self.assertNotIn("unsafe-eval", resp["Content-Security-Policy"])
+
+    def test_admin_page_not_framable(self):
+        resp = Client().get("/admin/login/")
+        self.assertEqual(resp["X-Frame-Options"], "DENY")
+        self.assertIn("frame-ancestors 'none'", resp["Content-Security-Policy"])
 
 
 class IndexPageTest(TestCase):
@@ -257,9 +261,19 @@ class AdminRegistrationTest(TestCase):
 
         for name in ("VpnUser", "AssetGroup", "AssetItem", "UserGroup",
                      "UserGroupMember", "AclGrant", "PeerGrant",
-                     "SystemSetting", "AuditRecord", "AuthLog",
+                     "SystemSetting", "AuthLog",
                      "OvpnTask", "BackupRecord"):
             self.assertIn(getattr(models, name), dj_admin.site._registry)
+
+    def test_audit_log_registered_by_audit_app(self):
+        from audit.models import AuditLog
+        from django.contrib import admin as dj_admin
+
+        self.assertIn(AuditLog, dj_admin.site._registry)
+        ma = dj_admin.site._registry[AuditLog]
+        self.assertFalse(ma.has_add_permission(None))
+        self.assertFalse(ma.has_change_permission(None))
+        self.assertFalse(ma.has_delete_permission(None))
 
     def test_password_columns_never_rendered(self):
         from django.contrib import admin as dj_admin
@@ -297,26 +311,81 @@ class AdminRegistrationTest(TestCase):
         self.assertFalse(ma.has_change_permission(request))
         self.assertFalse(ma.has_delete_permission(request))
 
-    def test_auditlog_records_business_change(self):
-        from auditlog.models import LogEntry
+class AuditIntegrationTest(TestCase):
+    """业务门面 core.log_audit → 统一审计表的契约（50 个调用点全靠它）。"""
 
-        VpnUser.objects.create(username="audit_probe", vpn_ip="10.8.0.99",
-                               password_hash="x", note="")
-        row = VpnUser.objects.get(username="audit_probe")
-        row.note = "改备注"
-        row.save()
-        self.assertTrue(LogEntry.objects.filter(
-            content_type__model="vpnuser", object_pk="audit_probe").exists())
+    def test_log_audit_writes_unified_record(self):
+        from audit.models import AuditEventType, AuditLog
 
-    def test_auditlog_registered_for_business_models_only(self):
-        from auditlog.registry import auditlog
-        from . import models
+        core.log_audit("alice", "user.add", "新建账号 bob", ip="10.9.9.9")
+        row = AuditLog.objects.filter(action="user.add").first()
+        self.assertIsNotNone(row)
+        self.assertEqual(row.actor_name, "alice")
+        self.assertIsNone(row.actor)          # 字符串操作人不建外键
+        self.assertEqual(row.remote_addr, "10.9.9.9")
+        self.assertEqual(row.message, "新建账号 bob")
+        self.assertEqual(row.module, "VPN 账号")
+        self.assertEqual(row.event_type, AuditEventType.BUSINESS)
 
-        registered = set(auditlog.get_models())
-        for name in ("VpnUser", "AssetGroup", "AssetItem", "UserGroup",
-                     "UserGroupMember", "AclGrant", "PeerGrant"):
-            self.assertIn(getattr(models, name), registered, name)
-        # 日志/高频表不该登记，否则 auditlog 会被自己的写入刷满
-        for name in ("SystemSetting", "AuditRecord", "AuthLog",
-                     "OvpnTask", "BackupRecord"):
-            self.assertNotIn(getattr(models, name), registered, name)
+    def test_login_like_action_is_security_event(self):
+        from audit.models import AuditEventType, AuditLog
+
+        core.log_audit("admin", "login.fail", "密码错误", ip="10.0.0.1")
+        row = AuditLog.objects.filter(action="login.fail").first()
+        self.assertEqual(row.event_type, AuditEventType.SECURITY)
+        self.assertEqual(row.module, "登录")
+
+    def test_get_logs_maps_back_to_legacy_contract(self):
+        core.log_audit("bob", "settings.save", "改了监听端口", ip="1.2.3.4")
+        rows = [r for r in core.get_logs("audit", 200) if r["action"] == "settings.save"]
+        self.assertTrue(rows)
+        row = rows[0]
+        # 前端只用这 5 个键，字段名必须与 Flask 版一致
+        self.assertEqual(row["actor"], "bob")
+        self.assertEqual(row["ip"], "1.2.3.4")
+        self.assertEqual(row["detail"], "改了监听端口")
+        self.assertRegex(row["ts"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+
+    def test_audit_records_are_append_only(self):
+        from audit.models import AuditLog, AuditLogImmutable
+
+        core.log_audit("bob", "user.delete", "删了账号")
+        row = AuditLog.objects.filter(action="user.delete").first()
+        row.message = "篡改"
+        with self.assertRaises(AuditLogImmutable):
+            row.save()
+        with self.assertRaises(AuditLogImmutable):
+            AuditLog.objects.filter(pk=row.pk).delete()
+
+
+class RawAuditSinkTest(TestCase):
+    """特权脚本（root）写 JSONL，Web 侧合并展示，不能丢也不能重复算。"""
+
+    def setUp(self):
+        import os
+        self.path = os.path.join(core.STATE, core.AUDIT_JSONL)
+        self.existed = os.path.exists(self.path)
+        if self.existed:
+            self.backup = open(self.path, "r", encoding="utf-8").read()
+
+    def tearDown(self):
+        import os
+        if self.existed:
+            with open(self.path, "w", encoding="utf-8") as f:
+                f.write(self.backup)
+        elif os.path.exists(self.path):
+            os.remove(self.path)
+
+    def test_jsonl_rows_merged_into_logs(self):
+        import json
+        import os
+
+        os.makedirs(core.STATE, exist_ok=True)
+        with open(self.path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": "2026-01-02 03:04:05", "actor": "installer",
+                                "action": "setup.auto", "detail": "安装完成",
+                                "ip": "10.1.1.1"}, ensure_ascii=False) + "\n")
+        rows = [r for r in core.get_logs("audit", 200) if r["action"] == "setup.auto"]
+        self.assertTrue(rows)
+        self.assertEqual(rows[0]["actor"], "installer")
+        self.assertEqual(rows[0]["ts"], "2026-01-02 03:04:05")

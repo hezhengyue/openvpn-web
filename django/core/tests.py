@@ -176,27 +176,25 @@ class MediaDownloadTest(TestCase):
 
 
 class ContractCheckTest(SimpleTestCase):
-    """接入契约 v2 检查器：纯 AST 判定，不 import settings、不依赖数据库。"""
+    """接入契约 v2.3 检查器：纯 AST 判定，不 import settings、不依赖数据库。"""
 
     SETTINGS = """\
 SECRET_KEY = env('SECRET_KEY', default='')
 LOGIN_URL = '/admin/login/'
 AUTH_USER_MODEL = 'core.User'
 INSTALLED_APPS = [
-    'simpleui',
     'django.contrib.admin',
     'django.contrib.auth',
-    'axes',
-    'auditlog',
+    'audit.apps.AuditConfig',
     'jobs',
-    'import_export',
+    'axes',
 ]
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'common.middleware.real_ip.RealIPMiddleware',
+    'audit.middleware.AuditContextMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'auditlog.middleware.AuditlogMiddleware',
     'axes.middleware.AxesMiddleware',
 ]
 AUTHENTICATION_BACKENDS = [
@@ -234,6 +232,24 @@ class User(AbstractUser):
     pass
 """
 
+    AUDIT_MODELS = """\
+from django.db import models
+
+class AuditLogImmutable(Exception):
+    pass
+
+class AuditLogQuerySet(models.QuerySet):
+    pass
+
+class AuditLog(models.Model):
+    action = models.CharField(max_length=50)
+"""
+
+    AUDIT_SERVICES = """\
+def audit_log(**kwargs):
+    return None
+"""
+
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
@@ -255,7 +271,7 @@ class User(AbstractUser):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
-        for folder in ('django/config', 'django/core', 'django/common', 'django/jobs/migrations'):
+        for folder in ('django/config', 'django/core', 'django/common', 'django/audit', 'django/jobs/migrations'):
             (root / folder).mkdir(parents=True, exist_ok=True)
         (root / 'django' / 'manage.py').write_text('# manage\n', encoding='utf-8')
         (root / 'django' / 'config' / 'settings.py').write_text(
@@ -265,11 +281,13 @@ class User(AbstractUser):
         (root / 'django' / 'config' / 'wsgi.py').write_text(self.WSGI, encoding='utf-8')
         (root / 'django' / 'config' / 'urls.py').write_text(self.URLS, encoding='utf-8')
         (root / 'django' / 'core' / 'models.py').write_text(self.MODELS, encoding='utf-8')
+        (root / 'django' / 'audit' / 'models.py').write_text(self.AUDIT_MODELS, encoding='utf-8')
+        (root / 'django' / 'audit' / 'services.py').write_text(self.AUDIT_SERVICES, encoding='utf-8')
         (root / 'django' / 'jobs' / 'migrations' / '0001_initial.py').write_text(
             '# initial\n', encoding='utf-8'
         )
         marker = {
-            'contract': 'v2', 'tier': tier, 'project': 'fixture',
+            'contract': 'v2.3', 'tier': tier, 'project': 'fixture',
             'role': 'test', 'notes': notes,
             'external_boundaries': boundaries or [],
         }
@@ -325,14 +343,151 @@ class User(AbstractUser):
     def test_middleware_order_enforced(self):
         # Axes 不在最后 → middleware_order FAIL
         broken = self.SETTINGS.replace(
-            "    'auditlog.middleware.AuditlogMiddleware',\n"
             "    'axes.middleware.AxesMiddleware',\n",
             "    'axes.middleware.AxesMiddleware',\n"
-            "    'auditlog.middleware.AuditlogMiddleware',\n",
+            "    'django.middleware.common.CommonMiddleware',\n",
         )
         root = self.make_project(settings_text=broken)
         self.assertIn(
             'middleware_order',
+            self.codes_at(self.checker.check_project(root), 'FAIL'),
+        )
+
+    def test_audit_app_and_service_required(self):
+        no_app = self.make_project(
+            settings_text=self.SETTINGS.replace("    'audit.apps.AuditConfig',\n", '')
+        )
+        self.assertIn(
+            'audit_app',
+            self.codes_at(self.checker.check_project(no_app), 'FAIL'),
+        )
+
+        no_service = self.make_project()
+        (no_service / 'django' / 'audit' / 'services.py').unlink()
+        self.assertIn(
+            'audit_service',
+            self.codes_at(self.checker.check_project(no_service), 'FAIL'),
+        )
+
+    def test_audit_append_only_required(self):
+        root = self.make_project()
+        (root / 'django' / 'audit' / 'models.py').write_text(
+            'from django.db import models\n'
+            'class AuditLog(models.Model):\n'
+            '    action = models.CharField(max_length=50)\n',
+            encoding='utf-8',
+        )
+        self.assertIn(
+            'audit_append_only',
+            self.codes_at(self.checker.check_project(root), 'FAIL'),
+        )
+
+    def test_audit_single_entry_rejects_direct_writes(self):
+        root = self.make_project()
+        (root / 'django' / 'core' / 'views.py').write_text(
+            'from audit.models import AuditLog\n'
+            'def view():\n'
+            '    AuditLog.objects.create(action="x")\n',
+            encoding='utf-8',
+        )
+        self.assertIn(
+            'audit_single_entry',
+            self.codes_at(self.checker.check_project(root), 'FAIL'),
+        )
+
+    def test_audit_single_entry_catches_bulk_create_and_instance_save(self):
+        root = self.make_project()
+        (root / 'django' / 'core' / 'views.py').write_text(
+            'from audit.models import AuditLog\n'
+            'def view():\n'
+            '    AuditLog.objects.bulk_create([AuditLog(action="x")])\n'
+            '    AuditLog(action="y").save()\n',
+            encoding='utf-8',
+        )
+        self.assertIn(
+            'audit_single_entry',
+            self.codes_at(self.checker.check_project(root), 'FAIL'),
+        )
+
+    def test_orm_raw_sql_escape_hatch_rejected(self):
+        root = self.make_project()
+        (root / 'django' / 'core' / 'views.py').write_text(
+            'def view():\n'
+            '    User.objects.raw("SELECT 1")\n'
+            '    User.objects.extra(where=["1=1"])\n',
+            encoding='utf-8',
+        )
+        self.assertIn(
+            'no_raw_sql_in_django',
+            self.codes_at(self.checker.check_project(root), 'FAIL'),
+        )
+
+    def test_business_raw_and_extra_methods_are_not_raw_sql(self):
+        """client.raw() / parser.extra() 是普通业务方法，不能当 ORM 裸 SQL。"""
+        root = self.make_project()
+        (root / 'django' / 'core' / 'client.py').write_text(
+            'class Client:\n'
+            '    def raw(self, value):\n'
+            '        return value\n'
+            '    def extra(self, **kwargs):\n'
+            '        return kwargs\n'
+            '\n'
+            'client = Client()\n'
+            'client.raw("payload")\n'
+            'parser = Client()\n'
+            'parser.extra(verbose=True)\n',
+            encoding='utf-8',
+        )
+        self.assertNotIn(
+            'no_raw_sql_in_django',
+            self.codes_at(self.checker.check_project(root), 'FAIL'),
+        )
+
+    def test_rawsql_attribute_and_annassign_are_detected(self):
+        root = self.make_project()
+        (root / 'django' / 'core' / 'expr.py').write_text(
+            'expressions.RawSQL("SELECT 1")\n', encoding='utf-8'
+        )
+        self.assertIn(
+            'no_raw_sql_in_django',
+            self.codes_at(self.checker.check_project(root), 'FAIL'),
+        )
+        typed = self.make_project(
+            settings_text=self.SETTINGS.replace(
+                "AUTH_USER_MODEL = 'core.User'",
+                "AUTH_USER_MODEL: str = 'core.User'",
+            ).replace(
+                "SECRET_KEY = env('SECRET_KEY', default='')",
+                "SECRET_KEY: str = env('SECRET_KEY', default='')",
+            )
+        )
+        codes = self.codes_at(self.checker.check_project(typed), 'FAIL')
+        self.assertNotIn('auth_user_model', codes)
+        self.assertNotIn('secret_key_literal', codes)
+
+    def test_audit_single_entry_catches_chained_delete(self):
+        """AuditLog.objects.filter(...).delete() 也要被门禁拦住。"""
+        root = self.make_project()
+        (root / 'django' / 'core' / 'views.py').write_text(
+            'from audit.models import AuditLog\n'
+            'AuditLog.objects.filter(action="x").delete()\n',
+            encoding='utf-8',
+        )
+        self.assertIn(
+            'audit_single_entry',
+            self.codes_at(self.checker.check_project(root), 'FAIL'),
+        )
+
+    def test_audit_single_entry_ignores_audit_app_and_tests(self):
+        root = self.make_project()
+        (root / 'django' / 'audit' / 'internal.py').write_text(
+            'AuditLog.objects.create(action="x")\n', encoding='utf-8'
+        )
+        (root / 'django' / 'core' / 'test_extra.py').write_text(
+            'AuditLog.objects.create(action="x")\n', encoding='utf-8'
+        )
+        self.assertNotIn(
+            'audit_single_entry',
             self.codes_at(self.checker.check_project(root), 'FAIL'),
         )
 
@@ -447,7 +602,7 @@ class User(AbstractUser):
         (root / 'core').mkdir()
         (root / 'common').mkdir()
         (root / '.contract.json').write_text(json.dumps({
-            'contract': 'v2', 'tier': 2, 'project': 'flat', 'role': 'project',
+            'contract': 'v2.3', 'tier': 2, 'project': 'flat', 'role': 'project',
             'notes': '', 'external_boundaries': [],
         }), encoding='utf-8')
         codes = self.codes_at(self.checker.check_project(root), 'FAIL')
@@ -550,7 +705,7 @@ class User(AbstractUser):
     def test_json_report_shape(self):
         report = self.checker.check_project(self.make_project())
         data = self.checker.build_json(report)
-        self.assertEqual(data['contract'], 'v2')
+        self.assertEqual(data['contract'], 'v2.3')
         self.assertEqual(data['summary']['FAIL'], 0)
         self.assertIsInstance(data['findings'], list)
 

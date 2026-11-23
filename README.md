@@ -14,8 +14,8 @@
 | --- | --- |
 | Web / HTTP | Django WSGI + Waitress（单进程多线程），无 Nginx / gunicorn |
 | 数据库 | SQLite(WAL) + `busy_timeout=20000`；Django 用户库与 core 业务库都在 `data/` |
-| 后台登录 | **Django Auth + django-axes**（失败 5 次锁 10 分钟），SimpleUI 后台在 `/admin/` |
-| 审计 | django-auditlog（Django 侧）+ core 自有审计（业务侧），双轨并存 |
+| 后台登录 | **Django Auth + django-axes**（失败 5 次锁 10 分钟），原生 Django 后台在 `/admin/` |
+| 审计 | 独立 `audit` app（表 `audit_auditlog`，只追加、可导出、可清理）+ 特权侧 `data/state/ops-audit.jsonl`，同一日志页合并展示 |
 | 静态文件 | WhiteNoise 托管，`collectstatic` 后离线可用 |
 | 业务核心 | 原 `core.py` / `fullbackup.py` **零改动**，`worker.py` root 提权 + 安装码闸门全部保留 |
 | 前端 | `index.html` 单页应用**零改动**，所有 REST API 路径与响应结构保持兼容 |
@@ -39,7 +39,7 @@ selftest_django.py  selftest 的 Flask→Django 兼容层（424 项自检原样�
 运行时与离线依赖（跟随底座模板 v1.1.0）：
 
 - `start.sh` 按 `PYTHON_BIN` → `runtime/python/bin/python3.1x`（底座新约定）→ `python/bin/python3.1x`（本包交付目录）→ `runtime/bin/python3.1x`（源码开发）→ `django/python3.12`（旧路径）的顺序找解释器；只看文件存在、不依赖执行位，执行前会校验并提示 `chmod`。
-- `./start.sh wheel:download` 在联网构建机上按目标平台下载 wheel（sdist-only 的 `django-simpleui` 会自动构建成 wheel）；`./start.sh standalone:install` 检测到 `WHEEL_DIR` 下的 `*.whl` 就走 `--no-index` 离线安装，pip 缺失时用 `ensurepip` 恢复。本项目 `.env.example` 把 `WHEEL_DIR` 设为 `vendor/wheels`，与交付包自带的 wheel 仓库共用。
+- `./start.sh wheel:download` 在联网构建机上按目标平台下载 wheel（只发 sdist 的包会自动构建成 wheel）；`./start.sh standalone:install` 检测到 `WHEEL_DIR` 下的 `*.whl` 就走 `--no-index` 离线安装，pip 缺失时用 `ensurepip` 恢复。本项目 `.env.example` 把 `WHEEL_DIR` 设为 `vendor/wheels`，与交付包自带的 wheel 仓库共用。
 - `STANDALONE=True` 时 `standalone:*` 命令强制使用本地解释器，不会误进 Docker 容器。
 - **模式归一化**：`standalone:*` 命令强制 `STANDALONE=True` 且默认按纯 HTTP 处理（忽略 `.env` 里残留的 `USE_HTTPS=true`），并把探测到的本机内网 IP 临时加入 `HOSTS`；裸机前面若已有 TLS 终止，显式设 `STANDALONE_USE_HTTPS=true` 才会保留 Secure Cookie。Docker 生命周期命令（`up/init/update/dev*`）则强制 `STANDALONE=False`，`migrate/shell` 等通用命令仍完全尊重 `.env`。
 - **项目根只读的部署**：`settings.py` 在 import 阶段对运行时目录只做 best-effort 创建（失败仅告警、不中断启动），真正的预建由 `install.sh` / `standalone:init` 承担。若项目根归 root 只读、只有专属目录归服务用户可写，设 `RUNTIME_DIR=/var/lib/openvpn-web` 即可把 data/staticfiles/media/logs 统一重定向到可写区；也可单独设 `DATA_DIR` / `STATIC_ROOT` / `MEDIA_ROOT` / `LOG_DIR` / `CACHE_DIR`（单项优先级更高）。

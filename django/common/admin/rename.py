@@ -4,7 +4,7 @@ from django.apps import apps
 
 THIRD_PARTY_APP_NAMES = {
     'axes': '安全监控',
-    'auditlog': '操作审计',
+    'audit': '操作审计',
     'django_celery_beat': '定时任务',
     'django_celery_results': '任务结果',
 }
@@ -17,8 +17,8 @@ THIRD_PARTY_MODEL_NAMES = {
     'axes.AccessLog': '登录流水',
     'axes.AccessFailureLog': '旧登录流水',
 
-    # auditlog
-    'auditlog.LogEntry': '操作日志',
+    # audit
+    'audit.AuditLog': '操作审计',
 
     # celery beat
     'django_celery_beat.PeriodicTask': '定时任务',

@@ -47,4 +47,4 @@ WHEEL_PLATFORM=native ./start.sh wheel:download   # 按构建机当前平台下�
 可用变量：`WHEEL_DIR`（本项目 `.env.example` 设为 `vendor/wheels`）、
 `WHEEL_PLATFORM`、`WHEEL_PYTHON`、`WHEEL_ABI`、`WHEEL_IMPL`。
 
-`django-simpleui` 只发布 sdist，脚本会自动下载并在构建机上编成 `py3-none-any` wheel。
+只发 sdist、没有 wheel 的包，脚本会自动下载并在构建机上编成 `py3-none-any` wheel。

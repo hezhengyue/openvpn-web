@@ -31,8 +31,9 @@ sys.path.insert(0, HERE)
 import selftest_django as web              # noqa: E402
 from ovpn import bridge as _bridge         # noqa: E402
 from ovpn.models import (                  # noqa: E402
-    VpnUser, UserGroupMember, AclGrant, PeerGrant, AuditRecord,
+    VpnUser, UserGroupMember, AclGrant, PeerGrant,
 )
+from audit.models import AuditLog          # noqa: E402
 
 core = web.core
 fullbackup = _bridge.fullbackup
@@ -185,13 +186,14 @@ def main():
     check("会话接口返回 csrf", bool(j["csrf"]))
     check("未登录不回管理账户名", j.get("admin_user") == "", j.get("admin_user"))
     _h0 = c.get("/")
-    # 禁止嵌套：SimpleUI 后台用同源 iframe 打开菜单，所以是 SAMEORIGIN +
-    # frame-ancestors 'self'（等价于「只允许自己被嵌」，跨站嵌套仍然禁止）。
-    check("安全响应头齐全（nosniff / 同源嵌套 / CSP / no-referrer）",
+    # 后台已换回原生 Django 模板（无 iframe 菜单），全站禁止嵌框：DENY +
+    # frame-ancestors 'none'，比原来的 SAMEORIGIN 更严。
+    check("安全响应头齐全（nosniff / 禁嵌套 / CSP / no-referrer）",
           _h0.headers.get("X-Content-Type-Options") == "nosniff"
-          and _h0.headers.get("X-Frame-Options") == "SAMEORIGIN"
+          and _h0.headers.get("X-Frame-Options") == "DENY"
           and _h0.headers.get("Referrer-Policy") == "no-referrer"
-          and "frame-ancestors 'self'" in (_h0.headers.get("Content-Security-Policy") or ""),
+          and "frame-ancestors 'none'" in (_h0.headers.get("Content-Security-Policy") or "")
+          and "unsafe-eval" not in (_h0.headers.get("Content-Security-Policy") or ""),
           dict(_h0.headers))
     check("未登录访问 state 被拒", c.get("/api/state").status_code == 401)
     lr = c.post("/api/login", json={"username": "admin", "password": "wrong"})
@@ -1157,7 +1159,7 @@ def main():
         [_t.start() for _t in _ts]
         [_t.join(60) for _t in _ts]
         check("8 线程并发写审计不报 database is locked", not errs, errs[:2])
-        n = AuditRecord.objects.filter(action="selftest.concurrent").count()
+        n = AuditLog.objects.filter(action="selftest.concurrent").count()
         check("并发写入条目不丢", n == 160, n)
 
     section("多线程下的一致性")
@@ -1205,14 +1207,14 @@ def main():
     _tb = _th.Thread(target=_audit_as, args=("bob",))
     _ta.start(); _tb.start(); _ta.join(30); _tb.join(30)
     _rows = {}
-    for _r in AuditRecord.objects.filter(action="selftest.actor").values("actor"):
-        _rows[_r["actor"]] = _rows.get(_r["actor"], 0) + 1
+    for _r in AuditLog.objects.filter(action="selftest.actor").values("actor_name"):
+        _rows[_r["actor_name"]] = _rows.get(_r["actor_name"], 0) + 1
     check("并发下审计归属不串人（alice/bob 各 15 条）",
           _rows.get("alice") == 15 and _rows.get("bob") == 15, _rows)
     core.audit_ctx_set("", "")
     core.log_audit("admin", "selftest.actor", "无上下文时回落到 admin")
-    _last = (AuditRecord.objects.filter(action="selftest.actor")
-             .order_by("-id").values_list("actor", flat=True).first())
+    _last = (AuditLog.objects.filter(action="selftest.actor")
+             .order_by("-created_at").values_list("actor_name", flat=True).first())
     check("没有上下文时审计仍能落一个操作者", _last == "admin", _last)
 
     # ---------- 安装码：给「上传即 root」这条路加一道人闸 ----------

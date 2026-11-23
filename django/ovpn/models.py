@@ -180,26 +180,6 @@ class PeerGrant(models.Model):
         return '%s -> %s' % (self.src_username, self.dst_username)
 
 
-class AuditRecord(models.Model):
-    """操作审计（Web 侧写入）。字段与前端 `/api/logs?kind=audit` 的返回一一对应。"""
-
-    ts = models.CharField(_('时间'), max_length=32, blank=True, default='')
-    actor = models.CharField(_('操作者'), max_length=64, blank=True, default='')
-    action = models.CharField(_('动作'), max_length=64, blank=True, default='')
-    detail = models.TextField(_('详情'), blank=True, default='')
-    ip = models.CharField(_('来源 IP'), max_length=45, blank=True, default='')
-
-    class Meta:
-        db_table = 'audit'
-        verbose_name = _('操作审计')
-        verbose_name_plural = verbose_name
-        ordering = ['-id']
-        indexes = [models.Index(fields=['-id'], name='idx_audit_id')]
-
-    def __str__(self):
-        return '%s %s' % (self.actor, self.action)
-
-
 class AuthLog(models.Model):
     """拨号认证日志（认证脚本写入，Web 只读）。"""
 

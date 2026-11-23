@@ -7,7 +7,7 @@
   STANDALONE=True   裸机便携模式：
       便携 Python 3.12 + SQLite(WAL) + WhiteNoise + Waitress，零外部服务
 
-两种模式共用同一份代码、同一套 Admin/SimpleUI/Axes/Auditlog/Import-Export。
+两种模式共用同一份代码、同一套原生 Django Admin / Axes / 独立 audit app 统一审计。
 """
 
 import os
@@ -112,9 +112,9 @@ CSRF_TRUSTED_ORIGINS = [
 ]
 CSRF_COOKIE_SECURE = USE_HTTPS
 SESSION_COOKIE_SECURE = USE_HTTPS
-# Django 默认 X_FRAME_OPTIONS=DENY，裸机没有 Nginx 时 SimpleUI 的菜单 iframe 会被拦截。
-# 默认 SAMEORIGIN 兼顾安全与后台可用；个别业务页需要更严策略时在视图/中间件单独覆盖。
-X_FRAME_OPTIONS = env('X_FRAME_OPTIONS', default='SAMEORIGIN')
+# 后台使用 Django 原生模板（已移除 SimpleUI 的 iframe 菜单），
+# 没有嵌框需求，保持 Django 默认的 DENY。
+X_FRAME_OPTIONS = env('X_FRAME_OPTIONS', default='DENY')
 # 前端沿用 Flask 版的 `X-CSRF-Token` 头。Django 默认读的是 `X-CSRFToken`
 # （META 里是 HTTP_X_CSRFTOKEN，没有中间连字符），不同名会被当成没带 token。
 # 这里对齐既有的前端契约，前端一行都不用改。
@@ -150,7 +150,6 @@ LOGOUT_REDIRECT_URL = '/admin/login/'
 
 # ===================== 📦 应用与中间件 =====================
 INSTALLED_APPS = [
-    'simpleui',                 # 必须放在 django.contrib.admin 之前
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -161,9 +160,8 @@ INSTALLED_APPS = [
     'ovpn',                     # OpenVPN 业务桥接（承载原 Flask 路由）
     'common.apps.CommonConfig',
     'jobs',
+    'audit.apps.AuditConfig',   # 统一审计：唯一写入口 audit.services.audit_log()
     'axes',
-    'import_export',
-    'auditlog',
 ]
 
 # django_celery_beat 只在 Docker 全家桶模式注册；裸机模式不暴露定时任务菜单
@@ -174,8 +172,10 @@ MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     # WhiteNoise 替代 Nginx 托管 /static/，DEBUG=False 也不丢样式
     'whitenoise.middleware.WhiteNoiseMiddleware',
-    # 必须在 AxesMiddleware / AuditlogMiddleware 之前修正 REMOTE_ADDR
+    # 必须在 AxesMiddleware / AuditContextMiddleware 之前修正 REMOTE_ADDR
     'common.middleware.real_ip.RealIPMiddleware',
+    # 请求级审计上下文（request_id / 当前 request，ContextVar 实现）
+    'audit.middleware.AuditContextMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -188,7 +188,6 @@ MIDDLEWARE = [
     'ovpn.middleware.SecurityHeadersMiddleware',
     'ovpn.middleware.BootstrapMiddleware',
     'ovpn.middleware.OvpnGuardMiddleware',
-    'auditlog.middleware.AuditlogMiddleware',
     # Axes 官方文档要求放最后：它只在响应阶段改写锁定响应
     'axes.middleware.AxesMiddleware',
 ]
@@ -336,12 +335,21 @@ AXES_CACHE = 'default'
 AXES_IPWARE_PROXY_COUNT = IPWARE_PROXY_COUNT
 # 锁定响应同时兼容 admin 表单登录与前端 JSON API（见 common/utils/axes.py）
 AXES_LOCKOUT_CALLABLE = 'common.utils.axes.axes_lockout_response'
-IMPORT_EXPORT_USE_TRANSACTIONS = True
-IMPORT_EXPORT_SKIP_ADMIN_CONFIRM = False
+
+
+# ===================== 🧾 统一审计 =====================
+# 审计记录保留天数，清理命令：manage.py audit_purge --days N [--dry-run]
+AUDIT_RETENTION_DAYS = env.int('AUDIT_RETENTION_DAYS', default=180)
+# 无操作人时的兜底名字；业务侧 50 处调用都显式传 actor，这里留空即可。
+AUDIT_FALLBACK_ACTOR = env('AUDIT_FALLBACK_ACTOR', default='')
+# 认证事件自动捕获白名单（字符串或元组均可，逗号分隔）。
+# 登录 / 退出 / 失败 / 锁定由业务侧 core.log_audit 记（带中文动作码与失败原因），
+# 这里只留 lockout：Axes 锁定没有业务入口，必须靠信号补。
+AUDIT_CAPTURE_EVENTS = env('AUDIT_CAPTURE_EVENTS', default='lockout')
 
 
 # ===================== 📁 静态 / 媒体 / 上传 =====================
-# 允许 compose 通过环境变量统一覆盖路径；SimpleUI 用默认 StaticFilesStorage，
+# 允许 compose 通过环境变量统一覆盖路径；使用默认 StaticFilesStorage，
 # 不用 ManifestStaticFilesStorage，避免离线包个别 .map 文件缺失报错。
 STATIC_ROOT = _runtime_dir('STATIC_ROOT', 'staticfiles')
 MEDIA_ROOT = _runtime_dir('MEDIA_ROOT', 'media')
@@ -454,6 +462,9 @@ LOGGING['loggers'] = {
         'propagate': False,
     },
     'ovpn': {'handlers': _core_handlers, 'level': 'DEBUG', 'propagate': False},
+    # 审计写库失败只记运行日志（audit.services 内部 logger.exception），
+    # 业务不能因为审计故障 500，排查入口放在这里。
+    'audit': {'handlers': _core_handlers, 'level': 'INFO', 'propagate': False},
 }
 
 
@@ -486,46 +497,6 @@ else:
     EMAIL_USE_SSL = False
     EMAIL_USE_TLS = False
     DEFAULT_FROM_EMAIL = f'noreply@{ALLOWED_HOSTS[0] if ALLOWED_HOSTS else "localhost"}'
-
-
-# ===================== 🎨 SimpleUI 后台美化 =====================
-SIMPLEUI_HOME_INFO = False
-SIMPLEUI_ANALYSIS = False
-SIMPLEUI_STATIC_OFFLINE = True
-
-# Logo 首选 static/img/logo.png（两种模式都能显示）；
-# 仅 Docker 模式兼容旧习惯的 media/logo.png（由 Nginx 托管 /media/）。
-# 裸机 DEBUG=False 时没有 Nginx，绝不能把 SIMPLEUI_LOGO 指向 /media/。
-if (BASE_DIR / 'static' / 'img' / 'logo.png').exists():
-    SIMPLEUI_LOGO = '/static/img/logo.png'
-elif not STANDALONE and (MEDIA_ROOT / 'logo.png').exists():
-    SIMPLEUI_LOGO = '/media/logo.png'
-
-SIMPLEUI_ICON = {
-    '用户管理': 'far fa-bars',
-    '人员档案': 'far fa-person',
-    '任务中心': 'far fa-bars',
-    '安全监控': 'fas fa-shield-alt',
-    '锁定记录': 'fas fa-lock',
-    '登录流水': 'fas fa-list-alt',
-    '操作审计': 'fas fa-history',
-    '操作日志': 'fas fa-file-signature',
-}
-
-_menu_display = [
-    '用户管理',       # core
-    '任务中心',       # jobs
-    '安全监控',       # Axes
-    '操作审计',       # Audit log
-]
-if not STANDALONE:
-    _menu_display.append('定时任务')  # django_celery_beat
-
-SIMPLEUI_CONFIG = {
-    'system_keep': False,
-    'menu_display': _menu_display,
-    'dynamic': True,
-}
 
 
 # ===================== 🛡️ 生产环境启动拦截 =====================

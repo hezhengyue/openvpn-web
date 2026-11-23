@@ -19,7 +19,9 @@
 from django.contrib import admin
 from django.utils.translation import gettext_lazy as _
 
-from .models import (AclGrant, AssetGroup, AssetItem, AuditRecord, AuthLog,
+from audit.admin import AuditModelAdmin
+
+from .models import (AclGrant, AssetGroup, AssetItem, AuthLog,
                      BackupRecord, OvpnTask, PeerGrant, SystemSetting,
                      UserGroup, UserGroupMember, VpnUser)
 
@@ -40,12 +42,18 @@ class ReadOnlyAdmin(admin.ModelAdmin):
 
 
 @admin.register(VpnUser)
-class VpnUserAdmin(admin.ModelAdmin):
+class VpnUserAdmin(AuditModelAdmin):
     """VPN 账号台账。
 
     只允许改「资料类」字段；用户名、固定 IP、启用状态、密码都必须走 SPA——
     它们牵动证书、ccd 文件和路由，光改库不会生效。
+
+    继承 AuditModelAdmin：改动自动落审计（字段级 old/new），不再手写 log_audit。
+    密码两列不参与变更对比，避免明文/哈希进审计记录。
     """
+
+    audit_module = 'VPN 账号'
+    audit_exclude_fields = ('password_hash', 'password_plain', 'created_at', 'updated_at')
 
     list_display = ('username', 'vpn_ip', 'real_name', 'dept', 'enabled',
                     'expires_at', 'updated_at')
@@ -77,16 +85,6 @@ class VpnUserAdmin(admin.ModelAdmin):
     def has_delete_permission(self, request, obj=None):
         # 删除同理：要回收证书与规则，统一走 SPA 的「停用/删除」
         return False
-
-    def save_model(self, request, obj, form, change):
-        super().save_model(request, obj, form, change)
-        changed = ', '.join(form.changed_data) or '无字段变化'
-        try:
-            from .bridge import core
-            core.log_audit(request.user.username, 'admin.user.edit',
-                           '后台修改账号 %s 资料（%s）' % (obj.username, changed))
-        except Exception:
-            pass
 
 
 @admin.register(AssetGroup)
@@ -151,19 +149,6 @@ class SystemSettingAdmin(ReadOnlyAdmin):
     def short_value(self, obj):
         v = obj.v or ''
         return v if len(v) <= 80 else v[:80] + '…'
-
-
-@admin.register(AuditRecord)
-class AuditRecordAdmin(ReadOnlyAdmin):
-    list_display = ('ts', 'actor', 'action', 'ip', 'short_detail')
-    list_filter = ('action',)
-    search_fields = ('actor', 'action', 'detail', 'ip')
-    ordering = ('-id',)
-    list_per_page = 100
-
-    @admin.display(description=_('详情'))
-    def short_detail(self, obj):
-        return (obj.detail or '')[:60]
 
 
 @admin.register(AuthLog)

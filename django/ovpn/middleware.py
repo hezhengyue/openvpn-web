@@ -158,13 +158,9 @@ def _must_change():
     return bool(core.get_meta("admin_must_change"))
 
 
-# 需要 'unsafe-eval' 的路径：Django/SimpleUI 后台
-#   SimpleUI 的登录页与菜单是 new Vue({el:'.login-main'})，拿 DOM 当模板交给
-#   Vue 运行时编译器，编译器内部用 new Function 生成渲染函数。没有 'unsafe-eval'
-#   就会被 CSP 拒绝，Vue 挂载失败、挂载点被替换成空注释节点，页面一片空白。
-#   这几条路径是 Django 自带的 staff-only 后台，不承载业务输入，单独放宽可接受；
-#   业务 SPA（/、/api/*）的 CSP 保持收紧，一行都不动。
-_EVAL_PATHS = ("/admin/", "/jobs/")
+# CSP 只放 'unsafe-inline'：业务 SPA 与后台都是自包含页面内联脚本。
+# 移除 SimpleUI 后后台回到 Django 原生模板（没有 Vue 运行时编译），
+# 'unsafe-eval' 不再需要，整条去掉——少一个口子就少一类 XSS 利用面。
 
 
 class SecurityHeadersMiddleware:
@@ -174,20 +170,16 @@ class SecurityHeadersMiddleware:
     def __call__(self, request):
         resp = self.get_response(request)
         resp.setdefault("X-Content-Type-Options", "nosniff")
-        # 与 settings.X_FRAME_OPTIONS 保持一致：SimpleUI 后台用 iframe 打开菜单，
-        # 写死 DENY 会把后台页面自己框死（Django 默认也是 SAMEORIGIN 才好用）。
+        # 与 settings.X_FRAME_OPTIONS 保持一致（默认 DENY：没有任何嵌框需求）。
         resp.setdefault("X-Frame-Options", getattr(settings, "X_FRAME_OPTIONS", "DENY"))
         resp.setdefault("Referrer-Policy", "no-referrer")
         resp.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
-        script_src = "script-src 'self' 'unsafe-inline'"
-        if request.path.startswith(_EVAL_PATHS):
-            script_src += " 'unsafe-eval'"
         resp.setdefault(
             "Content-Security-Policy",
-            "default-src 'self'; " + script_src + "; "
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; "
             "style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; "
             "connect-src 'self'; object-src 'none'; base-uri 'self'; "
-            "form-action 'self'; frame-ancestors 'self'")
+            "form-action 'self'; frame-ancestors 'none'")
         if request.is_secure or (request.META.get("HTTP_X_FORWARDED_PROTO") or "").lower() == "https":
             resp.setdefault("Strict-Transport-Security", "max-age=31536000")
         ctype = resp.get("Content-Type", "")

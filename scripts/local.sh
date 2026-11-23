@@ -137,7 +137,7 @@ download_standalone_wheels() {
         platform_args=(--only-binary=:all:)
     fi
 
-    # 1) 逐条下载。django-simpleui 这类只发 sdist 的包先在本机构建成 wheel，
+    # 1) 逐条下载。只发 sdist 的包先在本机构建成 wheel，
     #    否则 --only-binary 会直接报 "No matching distribution"。
     local spec sdist_dir sdist
     while IFS= read -r spec || [[ -n "$spec" ]]; do

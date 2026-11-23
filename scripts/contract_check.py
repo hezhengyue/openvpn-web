@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # scripts/contract_check.py
-"""接入契约 v2 的机器可读检查器（CONTRACT.md 的判定实现）。
+"""接入契约 v2.3 的机器可读检查器（CONTRACT.md 的判定实现）。
 
 只用标准库 + AST 读源码，绝不 import Django settings：
   - 不触发 import 阶段的目录创建 / 环境变量校验
@@ -18,7 +18,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-CONTRACT_VERSION = "v2"
+CONTRACT_VERSION = "v2.3"
 VALID_TIERS = (1, 2, 3)
 
 TIER_TITLES = {
@@ -47,7 +47,8 @@ SQL_PREFIXES = (
 )
 
 REAL_IP = "common.middleware.real_ip.RealIPMiddleware"
-AUDITLOG_MW = "auditlog.middleware.AuditlogMiddleware"
+AUDIT_CTX_MW = "audit.middleware.AuditContextMiddleware"
+AUTH_MW = "django.contrib.auth.middleware.AuthenticationMiddleware"
 AXES_MW = "axes.middleware.AxesMiddleware"
 
 
@@ -123,7 +124,7 @@ def parse_python(path: Path) -> tuple[ast.Module | None, str | None]:
 def list_sequence(tree: ast.Module | None, name: str) -> list[str] | None:
     """按源码顺序收集模块级 NAME = [...] / NAME += [...] 中的字符串常量。
 
-    顺序有语义：校验中间件先后、simpleui 必须排在 admin 之前。
+    顺序有语义：校验中间件先后（RealIP → 审计上下文 → Axes，Axes 收尾）。
     返回 None 表示该变量没有模块级赋值；空列表表示有赋值但无字符串元素。
     """
     if tree is None:
@@ -241,6 +242,52 @@ def _is_db_exec_call(node: ast.Call, method: str) -> bool:
     )
 
 
+def _call_chain_identifiers(node: ast.AST) -> tuple[set[str], set[str]]:
+    """收集调用链上的变量名与属性名，跳过中间的 ast.Call / ast.Subscript。
+
+    `User.objects.filter(...).raw()` 的 func 是 Attribute(raw) → Call(filter)
+    → Attribute(objects) → Name(User)，普通 dotted_name() 会在 Call 处断链。
+    """
+    names: set[str] = set()
+    attrs: set[str] = set()
+    while True:
+        while isinstance(node, (ast.Call, ast.Subscript)):
+            node = node.func if isinstance(node, ast.Call) else node.value
+        if isinstance(node, ast.Attribute):
+            attrs.add(node.attr)
+            node = node.value
+        elif isinstance(node, ast.Name):
+            names.add(node.id)
+            break
+        else:
+            break
+    return names, attrs
+
+
+def _is_sql_literal(value: ast.AST | None) -> bool:
+    return (
+        isinstance(value, ast.Constant)
+        and isinstance(value.value, str)
+        and " ".join(value.value.split()).upper().startswith(SQL_PREFIXES)
+    )
+
+
+def _is_orm_raw_call(node: ast.Call, method: str) -> bool:
+    """限定 .raw() / .extra() 的 ORM 形态，避免误伤普通业务方法。
+
+    - 属性链含 objects / _default_manager，或接收者是 qs / queryset；
+    - raw() 首参是 SQL 语句字面量；
+    - extra() 带 Django 的 select/where/tables 等关键字参数。
+    """
+    names, attrs = _call_chain_identifiers(node.func)
+    if attrs & {"objects", "_default_manager"} or names & {"qs", "queryset"}:
+        return True
+    if method == "raw":
+        return _is_sql_literal(node.args[0] if node.args else None)
+    extra_kwargs = {"select", "select_params", "where", "params", "tables", "order_by"}
+    return any(kw.arg in extra_kwargs for kw in node.keywords)
+
+
 def scan_raw_sql(root: Path) -> list[str]:
     """AST 判定 django/ 内的数据库连接/执行调用。
 
@@ -248,6 +295,11 @@ def scan_raw_sql(root: Path) -> list[str]:
       - <sqlite3|pymysql|psycopg2|psycopg|mysql.connector>.connect(...)
       - executemany / executescript 调用
       - 游标/连接对象上的 execute，或第一个参数为 SQL 语句字面量的 execute
+    ORM 逃生舱按调用形态判定：
+      - RawSQL(...) 与 expressions.RawSQL(...) 都命中；
+      - .raw() / .extra() 仅命中 objects / _default_manager / qs / queryset 链、
+        SQL 字面量首参或 extra(select=.../where=.../tables=...) 等 ORM 形态；
+      - client.raw()、parser.extra() 等普通业务方法不算裸 SQL。
     内置豁免严格按文件：
       - django/common/apps.py 的 PRAGMA 连接初始化
       - django/config/urls.py 的 SELECT 1 健康检查（大小写不敏感）
@@ -258,13 +310,29 @@ def scan_raw_sql(root: Path) -> list[str]:
     hits: list[str] = []
     for rel, _path, tree in iter_python_files(root):
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            if not isinstance(node, ast.Call):
                 continue
-            full = dotted_name(node.func)
+            func = node.func
+            is_rawsql = (
+                (isinstance(func, ast.Name) and func.id == "RawSQL")
+                or (isinstance(func, ast.Attribute) and func.attr == "RawSQL")
+            )
+            if is_rawsql:
+                label = dotted_name(func) or "RawSQL"
+                hits.append(f"{rel}:{node.lineno} ({label}())")
+                continue
+            if not isinstance(func, ast.Attribute):
+                continue
+            full = dotted_name(func)
             head, _, method = full.rpartition(".")
 
             if method == "connect" and head in CONNECT_MODULES:
                 hits.append(f"{rel}:{node.lineno} ({full}())")
+                continue
+            # Django ORM 自带的裸 SQL 逃生舱：.raw() / .extra() / RawSQL()。
+            if method in ("raw", "extra"):
+                if _is_orm_raw_call(node, method):
+                    hits.append(f"{rel}:{node.lineno} ({full or method}())")
                 continue
             if method not in DB_EXEC_METHODS:
                 continue
@@ -350,7 +418,7 @@ def check_urls_security(root: Path) -> bool:
 def check_auth_user_model(settings_tree: ast.Module | None) -> bool:
     node = assignment_node(settings_tree, "AUTH_USER_MODEL")
     return (
-        isinstance(node, ast.Assign)
+        isinstance(node, (ast.Assign, ast.AnnAssign))
         and isinstance(node.value, ast.Constant)
         and node.value.value == "core.User"
     )
@@ -360,11 +428,105 @@ def check_middleware_order(middleware_seq: list[str] | None) -> bool:
     seq = middleware_seq or []
     try:
         real_ip_at = seq.index(REAL_IP)
-        auditlog_at = seq.index(AUDITLOG_MW)
+        audit_ctx_at = seq.index(AUDIT_CTX_MW)
+        auth_at = seq.index(AUTH_MW)
         axes_at = seq.index(AXES_MW)
     except ValueError:
         return False
-    return real_ip_at < auditlog_at and real_ip_at < axes_at and axes_at == len(seq) - 1
+    return (
+        real_ip_at < audit_ctx_at
+        and audit_ctx_at < auth_at
+        and real_ip_at < axes_at
+        and axes_at == len(seq) - 1
+    )
+
+
+def has_audit_module(root: Path) -> bool:
+    """独立 audit app：models.py 定义 AuditLog，services.py 定义 audit_log。"""
+    model_tree, _ = parse_python(root / "django" / "audit" / "models.py")
+    service_tree, _ = parse_python(root / "django" / "audit" / "services.py")
+    if model_tree is None or service_tree is None:
+        return False
+
+    has_model = any(
+        isinstance(node, ast.ClassDef)
+        and node.name == "AuditLog"
+        and any(dotted_name(base).endswith("Model") for base in node.bases)
+        for node in model_tree.body
+    )
+    has_service = any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "audit_log"
+        for node in service_tree.body
+    )
+    return has_model and has_service
+
+
+def has_audit_append_only(root: Path) -> bool:
+    """v2.1：models.py 必须定义 AuditLogQuerySet 与 AuditLogImmutable。"""
+    tree, _ = parse_python(root / "django" / "audit" / "models.py")
+    if tree is None:
+        return False
+    classes = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
+    return {"AuditLogQuerySet", "AuditLogImmutable"} <= classes
+
+
+def scan_audit_direct_writes(root: Path) -> list[str]:
+    """审计只走统一入口：业务代码不得直接增删改审计记录。
+
+    覆盖两类绕过：
+      1. AuditLog.objects.{create,bulk_create,update,bulk_update,delete}
+      2. AuditLog(...).save() / instance.save() / instance.delete()（对象级入口）
+    排除 django/audit/ 自身（服务层、清理通道、测试）与所有测试文件，
+    避免检查器把底座自己的实现与测试夹具判为违规。
+    """
+    manager_methods = {"create", "bulk_create", "update", "bulk_update", "delete"}
+    hits: list[str] = []
+    for rel, _path, tree in iter_python_files(root):
+        if rel.startswith("django/audit/") or is_test_file(rel):
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if isinstance(func, ast.Attribute):
+                full = dotted_name(func)
+                if func.attr in manager_methods and (
+                    full.startswith("AuditLog.objects.")
+                    or ".audit_logs." in full
+                    or head_name(func.value) == "AuditLog"
+                ):
+                    label = full or f"AuditLog().{func.attr}"
+                    hits.append(f"{rel}:{node.lineno} ({label})")
+                elif func.attr in ("save", "delete"):
+                    # AuditLog(...).save()：调用者的接收者是 AuditLog(...) 构造调用。
+                    receiver = func.value
+                    if (
+                        isinstance(receiver, ast.Call)
+                        and dotted_name(receiver.func) == "AuditLog"
+                    ):
+                        hits.append(f"{rel}:{node.lineno} (AuditLog().{func.attr})")
+            elif isinstance(func, ast.Name) and func.id == "AuditLog":
+                # AuditLog(...) 本身不违规，只在上面 save/delete 场景命中。
+                continue
+    return sorted(set(hits))
+
+
+def head_name(node: ast.AST) -> str:
+    """取属性链最左端的名字，跳过中间 Call/Subscript。
+
+    AuditLog.objects.filter(...).delete() 的 func.value 是 ast.Call，
+    不解包会漏掉链式写审计的绕过。
+    """
+    while True:
+        while isinstance(node, (ast.Call, ast.Subscript)):
+            node = node.func if isinstance(node, ast.Call) else node.value
+        if isinstance(node, ast.Attribute):
+            node = node.value
+        elif isinstance(node, ast.Name):
+            return node.id
+        else:
+            return ""
 
 
 def check_external_boundaries(root: Path, marker: dict, tier: int) -> list[str]:
@@ -481,10 +643,27 @@ def check_project(root: Path) -> Report:
                  "FAIL", 1, "auth_middleware", "MIDDLEWARE 含 AuthenticationMiddleware")
     report.check("django.contrib.admin" in apps, "FAIL", 1, "admin_app",
                  "INSTALLED_APPS 含 django.contrib.admin")
-    report.check("auditlog" in apps, "FAIL", 1, "auditlog_app",
-                 "INSTALLED_APPS 含 auditlog")
-    report.check(AUDITLOG_MW in middleware, "FAIL", 1, "auditlog_middleware",
-                 "MIDDLEWARE 含 AuditlogMiddleware")
+    report.check(
+        "audit.apps.AuditConfig" in apps or "audit" in apps,
+        "FAIL", 1, "audit_app",
+        "INSTALLED_APPS 含独立 audit app（audit.apps.AuditConfig）",
+    )
+    report.check(
+        has_audit_module(root), "FAIL", 1, "audit_service",
+        "django/audit/ 定义 AuditLog 模型与 audit_log() 统一入口",
+        "不得引入第三方审计插件，也不得把审计代码散落在业务模块",
+    )
+    report.check(
+        has_audit_append_only(root), "FAIL", 1, "audit_append_only",
+        "django/audit/models.py 定义 AuditLogQuerySet 与 AuditLogImmutable（只追加）",
+        "业务不得绕过只追加约束直接改审计记录",
+    )
+    direct_writes = scan_audit_direct_writes(root)
+    report.check(
+        not direct_writes, "FAIL", 1, "audit_single_entry",
+        "业务代码只通过 audit.services.audit_log() 写审计",
+        "命中：" + ", ".join(direct_writes) if direct_writes else "",
+    )
     report.check("axes" in apps, "FAIL", 1, "axes_app", "INSTALLED_APPS 含 axes")
     report.check(AXES_MW in middleware, "FAIL", 1, "axes_middleware",
                  "MIDDLEWARE 含 AxesMiddleware")
@@ -494,7 +673,7 @@ def check_project(root: Path) -> Report:
                  "MIDDLEWARE 含 RealIPMiddleware")
     report.check(
         check_middleware_order(middleware), "FAIL", 1, "middleware_order",
-        "RealIP 在 Auditlog/Axes 之前，且 AxesMiddleware 为最后一项",
+        "RealIP → AuditContextMiddleware → AuthenticationMiddleware，且 AxesMiddleware 为最后一项",
         f"当前顺序：{' → '.join(middleware) if middleware else '(空)'}",
     )
     report.check(
@@ -519,7 +698,7 @@ def check_project(root: Path) -> Report:
 
     secret_node = assignment_node(settings_tree, "SECRET_KEY")
     secret_literal = (
-        isinstance(secret_node, ast.Assign)
+        isinstance(secret_node, (ast.Assign, ast.AnnAssign))
         and isinstance(secret_node.value, ast.Constant)
         and isinstance(secret_node.value.value, str)
         and secret_node.value.value.startswith("django-insecure")
@@ -555,13 +734,6 @@ def check_project(root: Path) -> Report:
 
     # ================= 第 2 层：底座可选能力（软报告） =================
     report.info("jobs" in apps, 2, "jobs_app", "jobs 已启用")
-    simpleui_at = apps.index("simpleui") if "simpleui" in apps else -1
-    admin_at = apps.index("django.contrib.admin") if "django.contrib.admin" in apps else -1
-    report.info(
-        simpleui_at >= 0 and admin_at >= 0 and simpleui_at < admin_at,
-        2, "simpleui_app", "simpleui 已启用且排在 admin 之前",
-    )
-    report.info("import_export" in apps, 2, "import_export_app", "import_export 已启用")
     report.info("STANDALONE" in (settings_source or ""), 2, "dual_mode", "保留双模式开关")
     report.info(
         any(is_test_file(rel) for rel, _path, _tree in iter_python_files(root)),
@@ -635,7 +807,7 @@ def build_json(report: Report) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="检查 Django 项目是否符合 django-web-base 接入契约 v2"
+        description="检查 Django 项目是否符合 django-web-base 接入契约 v2.3"
     )
     parser.add_argument("root", nargs="?", default=".", help="项目根目录（默认当前目录）")
     parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
