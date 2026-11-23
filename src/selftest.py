@@ -24,8 +24,8 @@ os.environ["OVPN_WEB_MOCK"] = "1"
 os.environ["OVPN_WEB_PORT"] = "8899"
 sys.path.insert(0, CODE)
 
-import core          # noqa: E402
-import fullbackup    # noqa: E402
+import core_legacy as core          # noqa: E402
+import fullbackup_legacy as fullbackup    # noqa: E402
 import selftest_django as web    # noqa: E402  （Django 版兼容层；原为 import app as web）
 
 PASS, FAIL = [], []

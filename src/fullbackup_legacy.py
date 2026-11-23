@@ -28,7 +28,7 @@ import sqlite3
 import secrets
 from datetime import datetime
 
-import core
+import core_legacy as core
 
 KIND = "openvpn-web-full-backup"
 FORMAT = 1

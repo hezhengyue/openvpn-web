@@ -2568,7 +2568,7 @@ def snapshot(tag="auto"):
     来源不同，格式、可下载性、恢复方式完全一致。延迟 import 是避开 fullbackup
     顶层 import core 造成的循环。
     """
-    import fullbackup
+    import fullbackup_legacy as fullbackup
     r = fullbackup.create(tag, kind="auto")
     con = db()
     try:
@@ -2638,7 +2638,7 @@ def _restore_legacy_snapshot(path):
 
 def restore_snapshot(path):
     """恢复一份备份：新格式 tar.gz 走统一恢复，老目录快照走兼容分支。"""
-    import fullbackup
+    import fullbackup_legacy as fullbackup
     if not path:
         raise ValueError("未指定备份")
     rp = os.path.realpath(path)

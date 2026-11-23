@@ -1,0 +1,45 @@
+{
+  "contract": "v2",
+  "tier": 3,
+  "project": "openvpn-web",
+  "role": "business",
+  "notes": "存量项目承载模式。前端页面与 REST 路径/字段沿用 Flask 版，接入底座期间保持零改动。特权动作（安装、生成安装码、准备二进制、重置口令、以 root 执行 worker）物理上无法由 Web 进程承担，登记在 src/ 与 bin/ 下。已知欠债：业务数据（14 张表：users/asset_*/user_group*/acl_grants/peer_grants/auth_*/audit/tasks/backups/preview_tokens/meta）目前仍由 ovpn 业务模块用原生 sqlite3 管理，尚未迁到 Django ORM；这是第 1 层待偿还项。",
+  "external_boundaries": [
+    {
+      "path": "src/install.sh",
+      "privilege": "root",
+      "reason": "安装 OpenVPN 与 Web、写 systemd 单元、配置 NAT 与内核转发，必须 root；Web 进程无此权限",
+      "interface": "CLI 一次性执行，读取包内 install 脚本与 vendor 依赖"
+    },
+    {
+      "path": "src/install-code.sh",
+      "privilege": "root",
+      "reason": "生成一次性安装码并写入 /etc/openvpn-web/install.token，令牌文件不可由 Web 进程创建",
+      "interface": "Web 以只读方式读取该令牌文件做校验"
+    },
+    {
+      "path": "src/prepare-openvpn.sh",
+      "privilege": "root",
+      "reason": "准备或就地编译 OpenVPN 二进制并写入 bin/，属于安装期特权步骤",
+      "interface": "由 install.sh 调用，产物落在 bin/openvpn"
+    },
+    {
+      "path": "src/reset-admin.sh",
+      "privilege": "root",
+      "reason": "管理口令无法登录时的救场通道，直接访问数据库重置；Web 进程按设计改不动以 root 执行的文件",
+      "interface": "CLI 执行，操作 data/db.sqlite3"
+    },
+    {
+      "path": "src/worker.py",
+      "privilege": "root",
+      "reason": "replace-binary / build-openvpn / update-web / rollback-binary 等动作需要写 bin/ 与系统目录，只能由 root 子进程执行",
+      "interface": "Web 写任务文件到 data/tasks，worker 轮询消费并以 root 执行后回写结果"
+    },
+    {
+      "path": "bin/openvpn",
+      "privilege": "root",
+      "reason": "OpenVPN 守护进程本体，需要 CAP_NET_ADMIN 绑定 1194 并配置 tun 设备",
+      "interface": "配置由 Web 渲染到 data/，daemon 重载读取；状态经管理套接字/进程探测回读"
+    }
+  ]
+}

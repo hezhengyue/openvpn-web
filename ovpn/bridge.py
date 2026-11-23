@@ -29,16 +29,18 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# 业务核心加载：交付包里 core.py/fullbackup.py 被平铺到包根；开发期它们还在 src/。
-# 两种布局都兼容，core.py 本身一行都不用改。
+# 业务核心加载：交付包里 core_legacy.py/fullbackup_legacy.py 被平铺到包根；
+# 开发期它们还在 src/。两种布局都兼容，业务代码本身一行都不用改。
+# 注意：Django 的 Auth app 现在叫 core/，业务模块必须避开 core 这个名字，
+# 否则 sys.path 上的 core 会解析到 Django app 包而不是业务模块。
 sys.path.insert(0, ROOT)
 try:
-    import core            # noqa: E402
-    import fullbackup      # noqa: E402
+    import core_legacy as core                # noqa: E402
+    import fullbackup_legacy as fullbackup    # noqa: E402
 except ModuleNotFoundError:
     sys.path.insert(0, os.path.join(ROOT, "src"))
-    import core            # noqa: E402
-    import fullbackup      # noqa: E402
+    import core_legacy as core                # noqa: E402
+    import fullbackup_legacy as fullbackup    # noqa: E402
 
 PORT = int(getattr(settings, 'OVPN_PORT', 8800))
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"

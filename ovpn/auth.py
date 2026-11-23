@@ -11,11 +11,11 @@ ovpn/auth.py —— 管理端登录（Django Auth + Axes）与用户自助改密
   /api/admin-user -> {ok, username, msg}
 """
 import re
-import uuid
 
 from django.contrib.auth import authenticate, login as auth_login, logout as auth_logout, get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
+from django.middleware.csrf import get_token, rotate_token
 
 from . import bridge
 from .bridge import core, ok, jerr, jbody, client_ip, actor, admin_user
@@ -29,9 +29,13 @@ def axes_locked(request, *args, **kwargs):
 
 
 def _csrf(request):
-    if not request.session.get("csrf"):
-        request.session["csrf"] = uuid.uuid4().hex
-    return request.session["csrf"]
+    """CSRF token 统一交给 Django 管理。
+
+    get_token() 会同时把 token 写进 csrftoken cookie，前端从 /api/session 的 JSON
+    取到后放在 X-CSRF-Token 头里回传；CsrfViewMiddleware 用同一个 cookie 校验。
+    不再自己生成 session['csrf']，避免两套 token 各说各话。
+    """
+    return get_token(request)
 
 
 def _must_change():
@@ -63,12 +67,13 @@ def api_login(request):
         return jerr("账户或密码错误", 401)
     auth_login(request, user)
     request.session.permanent = True
-    request.session["csrf"] = uuid.uuid4().hex
+    # 登录成功后轮换 token（防 session fixation），与 Django 官方推荐一致
+    rotate_token(request)
     core.set_meta("admin_user", user.username)
     forced = _must_change()
     core.log_audit(user.username, "login", "登录成功", ip=ip)
     return ok({
-        "csrf": request.session["csrf"],
+        "csrf": get_token(request),
         "initialized": bool(core.get_meta("initialized")),
         "must_change": forced,
         "admin_user": user.username,
@@ -78,6 +83,8 @@ def api_login(request):
 def api_logout(request):
     core.log_audit(actor(request) or admin_user(), "logout", "退出登录", ip=client_ip(request))
     auth_logout(request)
+    # 退出后旧 token 立即作废，避免拿着旧页面继续发写请求
+    rotate_token(request)
     return ok()
 
 
@@ -151,9 +158,8 @@ def api_self_password(request):
     key = "self:" + ip
     if bridge._fails_take(key) >= 5:
         return jerr("失败次数过多，10 分钟后再试", 429)
-    token = request.META.get("HTTP_X_CSRF_TOKEN") or (jbody(request) or {}).get("csrf")
-    if not token or token != request.session.get("csrf"):
-        return jerr("页面已过期，请刷新后重试", 403)
+    # CSRF 由 CsrfViewMiddleware 统一校验（X-CSRF-Token 对 csrftoken cookie），
+    # 这里不再重复比对，避免两套 token 不同源。
     d = jbody(request)
     u = core.user_by_vpn_ip(ip)
     if not u:

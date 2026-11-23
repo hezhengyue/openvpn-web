@@ -195,7 +195,7 @@ def main():
     say(" 模式: %s" % ("只出 tar.gz" if a.tar_only else "目录 + tar.gz"))
     say("=" * 60)
 
-    # 1) 程序文件平铺到根（install.sh 要求 core.py / serve.py 与它同级）
+    # 1) 程序文件平铺到根（install.sh 要求 core_legacy.py / serve.py 与它同级）
     if os.path.isdir(out_dir):
         shutil.rmtree(out_dir)
     os.makedirs(os.path.join(out_dir, "bin"), exist_ok=True)
@@ -205,13 +205,13 @@ def main():
         if os.path.isfile(p) and fn.rsplit(".", 1)[-1] in ("py", "html", "sh"):
             copy_file(p, os.path.join(out_dir, fn))
             n += 1
-    # Django 项目：根级文件 + 子应用目录（config/ovpn/accounts/common/jobs/templates/static）
+    # Django 项目：根级文件 + 子应用目录（config/ovpn/core/common/jobs/templates/static）
     for fn in ("manage.py", "requirements-standalone.txt", "requirements.txt", ".env.example"):
         p = os.path.join(ROOT, fn)
         if os.path.isfile(p):
             copy_file(p, os.path.join(out_dir, fn))
             n += 1
-    django_dirs = ("config", "ovpn", "accounts", "common", "jobs", "templates", "static")
+    django_dirs = ("config", "ovpn", "core", "common", "jobs", "templates", "static")
     for d in django_dirs:
         p = os.path.join(ROOT, d)
         if os.path.isdir(p):
@@ -247,7 +247,7 @@ def main():
     say("[5/5] 编译脚本与说明就位")
 
     # version.txt（不执行二进制，从文件内容里读）
-    core_py = os.path.join(out_dir, "core.py")
+    core_py = os.path.join(out_dir, "core_legacy.py")
     with open(core_py, encoding="utf-8") as f:
         mt = re.search(r'WEB_VERSION\s*=\s*"([^"]+)"', f.read())
     web_ver = mt.group(1) if mt else "未知"

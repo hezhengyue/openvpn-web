@@ -24,7 +24,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import core  # noqa: E402
+import core_legacy as core  # noqa: E402
 
 ROOT = core.ROOT
 BIN = core.BIN

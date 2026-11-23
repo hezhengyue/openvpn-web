@@ -16,7 +16,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import core  # noqa: E402
+import core_legacy as core  # noqa: E402
 
 LOCK_WINDOW = 600
 LOCK_MAX = 5

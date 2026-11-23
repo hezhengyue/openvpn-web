@@ -105,6 +105,13 @@ CSRF_TRUSTED_ORIGINS = [
 ]
 CSRF_COOKIE_SECURE = USE_HTTPS
 SESSION_COOKIE_SECURE = USE_HTTPS
+# 前端沿用 Flask 版的 `X-CSRF-Token` 头。Django 默认读的是 `X-CSRFToken`
+# （META 里是 HTTP_X_CSRFTOKEN，没有中间连字符），不同名会被当成没带 token。
+# 这里对齐既有的前端契约，前端一行都不用改。
+CSRF_HEADER_NAME = 'HTTP_X_CSRF_TOKEN'
+CSRF_COOKIE_NAME = 'csrftoken'
+CSRF_COOKIE_HTTPONLY = False      # 前端从 /api/session 的 JSON 取 token，不读 cookie，但保留可读便于排障
+CSRF_USE_SESSIONS = False         # token 走 cookie，未登录也能拿到（登录页就要发写请求）
 # 裸机直连时 REMOTE_ADDR 就是真实 IP，绝不读取 X-Forwarded-For
 SECURE_PROXY_SSL_HEADER = None if STANDALONE else ('HTTP_X_FORWARDED_PROTO', 'https')
 
@@ -115,7 +122,7 @@ IPWARE_HEADER_ORDER = ('REMOTE_ADDR',) if STANDALONE else ('HTTP_X_FORWARDED_FOR
 IPWARE_PROXY_COUNT = 0
 AXES_IPWARE_META_PRECEDENCE_ORDER = list(IPWARE_HEADER_ORDER)
 
-AUTH_USER_MODEL = 'accounts.User'
+AUTH_USER_MODEL = 'core.User'
 # 模板只有 admin，没有 Django 默认的 accounts/profile 页面。
 # 不设置 LOGIN_REDIRECT_URL 会导致登录成功后跳到 /accounts/profile/ 404。
 LOGIN_URL = '/admin/login/'
@@ -132,7 +139,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    'accounts',                 # 原 base 的 core app（Django Auth 用户模型），改名避开业务 core.py
+    'core',                     # Django Auth 用户模型（AUTH_USER_MODEL = core.User）
     'ovpn',                     # OpenVPN 业务桥接（承载原 Flask 路由）
     'common.apps.CommonConfig',
     'jobs',
@@ -486,7 +493,7 @@ SIMPLEUI_ICON = {
 }
 
 _menu_display = [
-    '用户管理',       # accounts
+    '用户管理',       # core
     '任务中心',       # jobs
     '安全监控',       # Axes
     '操作审计',       # Audit log

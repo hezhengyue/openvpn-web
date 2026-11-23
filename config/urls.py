@@ -11,9 +11,15 @@ from django.views.static import serve as static_serve
 
 
 def health_check(request):
-    """健康检查端点：同时检查 Web 与数据库连通性。"""
+    """健康检查端点：同时检查 Web 与数据库连通性。
+
+    用 SELECT 1 真发一条语句，而不是只 ensure_connection()：连接池/文件句柄
+    里的失效连接只有真正查询时才会暴露，只建连会把坏连接判成健康。
+    """
     try:
-        connection.ensure_connection()
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
         db_ok = True
     except Exception:
         db_ok = False

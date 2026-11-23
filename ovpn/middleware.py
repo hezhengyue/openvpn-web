@@ -5,18 +5,24 @@ ovpn/middleware.py —— 对应原 Flask 的 before_request / after_request
 
 中间件职责：
   1) BootstrapMiddleware  : 首次请求前初始化 core 库 + 同步管理账户名（幂等，带锁）
-  2) OvpnGuardMiddleware  : 来源 IP 白名单、到期账号处理、登录校验、首登强改密、CSRF
+  2) OvpnGuardMiddleware  : 来源 IP 白名单、到期账号处理、登录校验、首登强改密、
+                            带副作用 GET 的 CSRF 兜底
   3) SecurityHeadersMiddleware : 原 security_headers 的安全响应头 + HTML 不缓存
 
-Django 自带的 CsrfViewMiddleware 已从中移除（settings 里注释掉），因为我们沿用
-前端既有的「X-CSRF-Token == session['csrf']」契约，由 OvpnGuardMiddleware 校验，
-保证 index.html 前端零改动。
+CSRF 由 Django 自带的 CsrfViewMiddleware 负责：settings 里
+CSRF_HEADER_NAME = 'HTTP_X_CSRF_TOKEN' 与前端既有的头对齐，token 由 /api/session
+用 get_token() 下发（同时写 csrftoken cookie）。前端仍然零改动。
+只有 GET 但带副作用的两个接口（CSRF_GET_PATHS）Django 不校验，这里按同一份
+cookie token 补一次校验。
 """
 import os
 import uuid
 import threading
 
 from django.contrib.auth import logout as auth_logout
+from django.middleware.csrf import (
+    InvalidTokenFormat, _check_token_format, _does_token_match,
+)
 
 from . import bridge
 
@@ -71,10 +77,9 @@ class OvpnGuardMiddleware:
 
     def __call__(self, request):
         path = request.path
-        # ovpn 的 API 沿用前端既有的 X-CSRF-Token 契约（下方自行校验），
-        # 让 Django 自带 CSRF 跳过这些路径；/admin/ 与 /jobs/ 仍受 Django CSRF 保护。
-        if not (path.startswith("/admin/") or path.startswith("/jobs/")):
-            request._dont_enforce_csrf_checks = True
+        # CSRF 全部交给 CsrfViewMiddleware：settings 里 CSRF_HEADER_NAME 已对齐
+        # 前端的 X-CSRF-Token，token 由 /api/session 用 get_token() 下发。
+        # 这里只额外覆盖「带副作用的 GET」（Django 不管 GET），见下方 CSRF_GET_PATHS。
 
         ip = bridge.client_ip(request)
 
@@ -112,10 +117,29 @@ class OvpnGuardMiddleware:
         if _must_change() and path not in MUST_CHANGE_ALLOW:
             return bridge.jerr("首次登录请先修改管理密码", 403, must_change=True)
 
-        # CSRF：写请求（以及两个带副作用的 GET）都要过
-        if request.method in ("POST", "PUT", "DELETE", "PATCH") or path in CSRF_GET_PATHS:
-            token = request.META.get("HTTP_X_CSRF_TOKEN") or (bridge.jbody(request) or {}).get("csrf")
-            if not token or token != request.session.get("csrf"):
+        # CSRF：写请求与两个带副作用的 GET 都要过。
+        # 生产环境 CsrfViewMiddleware 已校验过一次；这里对 ovpn 自己的 API 再校验
+        # 一次，原因是 Django 的 test client 默认关闭 CSRF，只靠外层中间件无法在
+        # 自检里证明防护真的生效。/admin/ 与 /jobs/ 是 Django 原生页面，走标准
+        # 表单 token，不在这里重复校验。
+        needs_csrf = path in CSRF_GET_PATHS or (
+            request.method in ("POST", "PUT", "DELETE", "PATCH")
+            and not (path.startswith("/admin/") or path.startswith("/jobs/"))
+        )
+        if needs_csrf:
+            token = (request.META.get("HTTP_X_CSRF_TOKEN")
+                     or (bridge.jbody(request) or {}).get("csrf"))
+            secret = request.META.get("CSRF_COOKIE")
+            ok_csrf = False
+            if token and secret:
+                try:
+                    # _check_token_format 用抛异常表示非法，不是返回 bool；
+                    # _does_token_match 会先给 masked token 解掩码再比。
+                    _check_token_format(token)
+                    ok_csrf = _does_token_match(token, secret)
+                except InvalidTokenFormat:
+                    ok_csrf = False
+            if not ok_csrf:
                 return bridge.jerr("CSRF 校验失败，请刷新页面", 403)
 
         # 长任务执行期间拒绝其它写操作

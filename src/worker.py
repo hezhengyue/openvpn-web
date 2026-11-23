@@ -23,7 +23,7 @@ import subprocess
 import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import core  # noqa: E402
+import core_legacy as core  # noqa: E402
 
 ROOT = core.ROOT            # 数据/安装根（由 OVPN_WEB_ROOT 决定）
 DATA = core.DATA

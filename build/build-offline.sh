@@ -172,7 +172,7 @@ fi
 # 4) 打包
 cat > "$OUT/version.txt" <<EOF
 OpenVPN Web 一体化管理系统
-Web: $(grep -m1 'WEB_VERSION =' "$OUT/core.py" | tr -d '"' | awk '{print $3}')
+Web: $(grep -m1 'WEB_VERSION =' "$OUT/core_legacy.py" | tr -d '"' | awk '{print $3}')
 构建时间: $(date '+%Y-%m-%d %H:%M:%S %z')
 构建机: $(uname -srm) / glibc $(ldd --version 2>/dev/null | head -1 || echo unknown)
 EOF
