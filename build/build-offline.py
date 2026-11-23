@@ -248,6 +248,19 @@ def main():
             n += 1
     n += copy_tree(os.path.join(src, "django"), os.path.join(out_dir, "django"), eol_lf=True)
     n += copy_tree(os.path.join(src, "system"), os.path.join(out_dir, "system"), eol_lf=True)
+    # scripts/：接入契约检查器。core/tests.py 的 ContractCheckTest 按
+    # <项目根>/scripts/contract_check.py 定位它，装机后跑 manage.py test 要用；
+    # 漏带会让「测试全绿」这条验收在交付包上直接 1 error。
+    if os.path.isdir(os.path.join(src, "scripts")):
+        n += copy_tree(os.path.join(src, "scripts"), os.path.join(out_dir, "scripts"), eol_lf=True)
+    if os.path.isfile(os.path.join(src, "CONTRACT.md")):
+        copy_file(os.path.join(src, "CONTRACT.md"), os.path.join(out_dir, "CONTRACT.md"), eol_lf=True)
+        n += 1
+    # .contract.json：契约标记（tier 与外部边界登记）。缺了它检查器会退回
+    # tier 2 / unspecified，external_boundaries 直接判失败。
+    if os.path.isfile(os.path.join(src, ".contract.json")):
+        copy_file(os.path.join(src, ".contract.json"), os.path.join(out_dir, ".contract.json"), eol_lf=True)
+        n += 1
     # install.sh 的正身在 system/，但「解包后直接 ./install.sh」是既有使用习惯，
     # 包根再放一份同内容副本；脚本自身会向上找到含 django/ 的那一层作为安装源。
     inst = os.path.join(src, "system", "install.sh")

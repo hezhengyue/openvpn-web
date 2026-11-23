@@ -19,6 +19,7 @@ import traceback
 
 from django.conf import settings
 from django.http import HttpResponse, FileResponse
+from django.shortcuts import render
 from django.views.decorators.csrf import csrf_exempt
 from django.contrib.auth import get_user_model
 
@@ -881,12 +882,13 @@ def api_restart(request):
 
 # =========================================================== 前端页面
 def index(request):
-    # 单页前端：django/templates/index.html（交付包随 Django 项目一起装）
-    p = os.path.join(str(settings.BASE_DIR), "templates", "index.html")
-    with open(p, "rb") as f:
-        data = f.read()
-    resp = HttpResponse(data, content_type="text/html; charset=utf-8")
-    return resp
+    """单页前端：django/templates/index.html
+
+    走 Django 模板引擎只是为了把版本号从 `core.WEB_VERSION` 注入进去——页面里
+    其余 116KB 是纯 HTML/JS，一个 `{{ }}` / `{% %}` 都没有，所以渲染结果与原文件
+    逐字节等价。这样版本号只有一处定义，不再需要改前端时同步手改两遍。
+    """
+    return render(request, "index.html", {"page_version": core.WEB_VERSION})
 
 
 def favicon(request):

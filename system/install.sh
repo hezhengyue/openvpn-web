@@ -310,7 +310,7 @@ chown -R root:root "$DEST/system" 2>/dev/null || true
 chmod 644 "$DEST/system"/*.py 2>/dev/null || true
 chmod 755 "$DEST/system"/*.sh 2>/dev/null || true
 chmod 700 "$DEST/system/install-code.sh" 2>/dev/null || true
-for d in django/config django/core django/common django/jobs django/ovpn django/templates django/static django/scripts; do
+for d in django/config django/core django/common django/jobs django/ovpn django/templates django/static scripts; do
     [ -d "$DEST/$d" ] || continue
     chown -R root:root "$DEST/$d" 2>/dev/null || true
     find "$DEST/$d" -type f -name '*.py' -exec chmod 644 {} + 2>/dev/null || true

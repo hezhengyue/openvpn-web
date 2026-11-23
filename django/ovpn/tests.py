@@ -215,3 +215,108 @@ class CsrfFailureTest(TestCase):
         self.assertEqual(resp.status_code, 403)
         self.assertEqual(resp.json()["ok"], False)
         self.assertTrue(resp.json()["msg"])
+
+
+class SecurityHeadersTest(TestCase):
+    """CSP 要分路径：业务页收紧（不许 eval），后台放宽（SimpleUI 需要 eval）。
+
+    后台登录页是 new Vue({el:'.login-main'})，Vue 运行时编译器用 new Function
+    生成渲染函数；CSP 里没有 'unsafe-eval' 就会被拒，挂载点被替换成空注释节点，
+    表现就是「页面一片空白」。这条用例就是防它再退化。
+    """
+
+    def test_business_page_csp_has_no_unsafe_eval(self):
+        resp = Client().get("/api/session")
+        csp = resp["Content-Security-Policy"]
+        self.assertIn("script-src 'self' 'unsafe-inline'", csp)
+        self.assertNotIn("unsafe-eval", csp)
+
+    def test_admin_page_csp_allows_eval(self):
+        resp = Client().get("/admin/login/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("'unsafe-eval'", resp["Content-Security-Policy"])
+
+
+class IndexPageTest(TestCase):
+    """版本号必须由服务端注入：页面里只有 {{ page_version }}，值来自 core.WEB_VERSION。"""
+
+    def test_page_version_injected_from_web_version(self):
+        resp = Client().get("/")
+        self.assertEqual(resp.status_code, 200)
+        html = resp.content.decode("utf-8")
+        self.assertIn("const PAGE_VERSION='%s'" % core.WEB_VERSION, html)
+        self.assertNotIn("{{ page_version }}", html)
+
+
+class AdminRegistrationTest(TestCase):
+    """业务台账要能在后台看到；但带副作用的写入不许从后台走。"""
+
+    def test_business_models_registered(self):
+        from django.contrib import admin as dj_admin
+        from . import models
+
+        for name in ("VpnUser", "AssetGroup", "AssetItem", "UserGroup",
+                     "UserGroupMember", "AclGrant", "PeerGrant",
+                     "SystemSetting", "AuditRecord", "AuthLog",
+                     "OvpnTask", "BackupRecord"):
+            self.assertIn(getattr(models, name), dj_admin.site._registry)
+
+    def test_password_columns_never_rendered(self):
+        from django.contrib import admin as dj_admin
+        from .models import VpnUser
+
+        ma = dj_admin.site._registry[VpnUser]
+        self.assertNotIn("password_hash", ma.fields)
+        self.assertNotIn("password_plain", ma.fields)
+        self.assertIn("password_state", ma.readonly_fields)
+
+    def test_admin_cannot_create_or_delete_accounts(self):
+        from django.contrib import admin as dj_admin
+        from django.test import RequestFactory
+        from django.contrib.auth import get_user_model
+        from .models import VpnUser
+
+        request = RequestFactory().get("/admin/")
+        request.user = get_user_model()(username="root", is_superuser=True,
+                                        is_staff=True, is_active=True)
+        ma = dj_admin.site._registry[VpnUser]
+        self.assertFalse(ma.has_add_permission(request))
+        self.assertFalse(ma.has_delete_permission(request))
+
+    def test_grants_are_read_only(self):
+        from django.contrib import admin as dj_admin
+        from django.test import RequestFactory
+        from django.contrib.auth import get_user_model
+        from .models import AclGrant
+
+        request = RequestFactory().get("/admin/")
+        request.user = get_user_model()(username="root", is_superuser=True,
+                                        is_staff=True, is_active=True)
+        ma = dj_admin.site._registry[AclGrant]
+        self.assertFalse(ma.has_add_permission(request))
+        self.assertFalse(ma.has_change_permission(request))
+        self.assertFalse(ma.has_delete_permission(request))
+
+    def test_auditlog_records_business_change(self):
+        from auditlog.models import LogEntry
+
+        VpnUser.objects.create(username="audit_probe", vpn_ip="10.8.0.99",
+                               password_hash="x", note="")
+        row = VpnUser.objects.get(username="audit_probe")
+        row.note = "改备注"
+        row.save()
+        self.assertTrue(LogEntry.objects.filter(
+            content_type__model="vpnuser", object_pk="audit_probe").exists())
+
+    def test_auditlog_registered_for_business_models_only(self):
+        from auditlog.registry import auditlog
+        from . import models
+
+        registered = set(auditlog.get_models())
+        for name in ("VpnUser", "AssetGroup", "AssetItem", "UserGroup",
+                     "UserGroupMember", "AclGrant", "PeerGrant"):
+            self.assertIn(getattr(models, name), registered, name)
+        # 日志/高频表不该登记，否则 auditlog 会被自己的写入刷满
+        for name in ("SystemSetting", "AuditRecord", "AuthLog",
+                     "OvpnTask", "BackupRecord"):
+            self.assertNotIn(getattr(models, name), registered, name)

@@ -158,6 +158,15 @@ def _must_change():
     return bool(core.get_meta("admin_must_change"))
 
 
+# 需要 'unsafe-eval' 的路径：Django/SimpleUI 后台
+#   SimpleUI 的登录页与菜单是 new Vue({el:'.login-main'})，拿 DOM 当模板交给
+#   Vue 运行时编译器，编译器内部用 new Function 生成渲染函数。没有 'unsafe-eval'
+#   就会被 CSP 拒绝，Vue 挂载失败、挂载点被替换成空注释节点，页面一片空白。
+#   这几条路径是 Django 自带的 staff-only 后台，不承载业务输入，单独放宽可接受；
+#   业务 SPA（/、/api/*）的 CSP 保持收紧，一行都不动。
+_EVAL_PATHS = ("/admin/", "/jobs/")
+
+
 class SecurityHeadersMiddleware:
     def __init__(self, get_response):
         self.get_response = get_response
@@ -170,9 +179,12 @@ class SecurityHeadersMiddleware:
         resp.setdefault("X-Frame-Options", getattr(settings, "X_FRAME_OPTIONS", "DENY"))
         resp.setdefault("Referrer-Policy", "no-referrer")
         resp.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+        script_src = "script-src 'self' 'unsafe-inline'"
+        if request.path.startswith(_EVAL_PATHS):
+            script_src += " 'unsafe-eval'"
         resp.setdefault(
             "Content-Security-Policy",
-            "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+            "default-src 'self'; " + script_src + "; "
             "style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; "
             "connect-src 'self'; object-src 'none'; base-uri 'self'; "
             "form-action 'self'; frame-ancestors 'self'")
