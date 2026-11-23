@@ -23,8 +23,8 @@ import socket
 import subprocess
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import core_legacy as core  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from system import core  # noqa: E402
 
 ROOT = core.ROOT
 BIN = core.BIN

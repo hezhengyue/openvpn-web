@@ -180,11 +180,11 @@ def main():
     a = ap.parse_args()
 
     src, bin_, runtime, vendor, build = (os.path.join(ROOT, x) for x in
-                                        ("src", "bin", "runtime", "vendor", "build"))
+                                        (".", "bin", "runtime", "vendor", "build"))
     out_dir = os.path.join(a.out, NAME)
     tar_path = os.path.join(a.out, NAME + ".tar.gz")
 
-    for p, why in ((src, "运行时代码"), (bin_, "预编译二进制"), (runtime, "离线 Python"),
+    for p, why in ((os.path.join(src, "django"), "Django 项目"), (bin_, "预编译二进制"), (runtime, "离线 Python"),
                    (vendor, "静态库/源码/wheel")):
         if not os.path.isdir(p):
             say("错误: 缺少 %s（%s）" % (p, why))
@@ -195,28 +195,27 @@ def main():
     say(" 模式: %s" % ("只出 tar.gz" if a.tar_only else "目录 + tar.gz"))
     say("=" * 60)
 
-    # 1) 程序文件平铺到根（install.sh 要求 core_legacy.py / serve.py 与它同级）
+    # 1) 程序文件：根级 serve.py + django/ 整个项目 + system/ 特权脚本 + tests/ 自检
+    # 交付包与源码布局保持一致（不再平铺），install.sh / serve.py / worker 的路径假设
+    # 因此只有一份，不会出现「源码一套、装机另一套」。
     if os.path.isdir(out_dir):
         shutil.rmtree(out_dir)
     os.makedirs(os.path.join(out_dir, "bin"), exist_ok=True)
     n = 0
-    for fn in sorted(os.listdir(src)):
+    for fn in ("serve.py", "README.md"):
         p = os.path.join(src, fn)
-        if os.path.isfile(p) and fn.rsplit(".", 1)[-1] in ("py", "html", "sh"):
-            copy_file(p, os.path.join(out_dir, fn))
-            n += 1
-    # Django 项目：根级文件 + 子应用目录（config/ovpn/core/common/jobs/templates/static）
-    for fn in ("manage.py", "requirements-standalone.txt", "requirements.txt", ".env.example"):
-        p = os.path.join(ROOT, fn)
         if os.path.isfile(p):
             copy_file(p, os.path.join(out_dir, fn))
             n += 1
-    django_dirs = ("config", "ovpn", "core", "common", "jobs", "templates", "static")
-    for d in django_dirs:
-        p = os.path.join(ROOT, d)
-        if os.path.isdir(p):
-            n += copy_tree(p, os.path.join(out_dir, d))
-    say("[1/5] 程序文件 + Django 项目 %d 个" % n)
+    n += copy_tree(os.path.join(src, "django"), os.path.join(out_dir, "django"))
+    n += copy_tree(os.path.join(src, "system"), os.path.join(out_dir, "system"))
+    os.makedirs(os.path.join(out_dir, "tests"), exist_ok=True)
+    for fn in ("selftest.py", "selftest_django.py"):
+        p = os.path.join(src, "tests", fn)
+        if os.path.isfile(p):
+            copy_file(p, os.path.join(out_dir, "tests", fn))
+            n += 1
+    say("[1/5] 程序文件 + django/ + system/ %d 个" % n)
 
     # 2) 二进制
     for fn in sorted(os.listdir(bin_)):
@@ -240,14 +239,14 @@ def main():
     for fn in ("build-static-openvpn.sh",):
         p = os.path.join(build, fn)
         if os.path.isfile(p):
-            copy_file(p, os.path.join(out_dir, fn))
+            copy_file(p, os.path.join(out_dir, "system", fn))
     rd = os.path.join(ROOT, "README.md")
     if os.path.isfile(rd):
         copy_file(rd, os.path.join(out_dir, "README.md"))
     say("[5/5] 编译脚本与说明就位")
 
     # version.txt（不执行二进制，从文件内容里读）
-    core_py = os.path.join(out_dir, "core_legacy.py")
+    core_py = os.path.join(out_dir, "system", "core.py")
     with open(core_py, encoding="utf-8") as f:
         mt = re.search(r'WEB_VERSION\s*=\s*"([^"]+)"', f.read())
     web_ver = mt.group(1) if mt else "未知"

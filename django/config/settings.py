@@ -20,9 +20,12 @@ from urllib.parse import quote_plus
 import environ
 from django.core.exceptions import ImproperlyConfigured
 
+# BASE_DIR = django/（Django 项目根：manage.py、config/、core/、ovpn/ 所在层）
 BASE_DIR = Path(__file__).resolve().parent.parent
-# 平铺布局：.env、core.py、manage.py 都在项目根，二者同目录
-PROJECT_ROOT = BASE_DIR
+# PROJECT_ROOT = 安装根（data/、bin/、system/、vendor/ 所在层）。
+# 交付包里 install.sh 会把 django/ 的内容平铺到安装根，此时两者重合；
+# 源码布局下它们是父子关系。
+PROJECT_ROOT = BASE_DIR.parent
 
 env = environ.Env()
 # 优先级：进程环境变量 > 项目根目录 .env > 代码默认值
@@ -42,8 +45,9 @@ def _runtime_dir(var_name, subdir):
         return Path(explicit)
     if RUNTIME_DIR:
         return Path(RUNTIME_DIR) / subdir
-    # 平铺布局：运行时目录直接在项目根，不再多一层 django/
-    return BASE_DIR / subdir
+    # 运行时目录（data/staticfiles/media/logs）落在安装根，即 PROJECT_ROOT，
+    # 与 bin/、system/、vendor/ 同级；源码布局下就是仓库根，交付包里就是 /opt/openvpn-web。
+    return PROJECT_ROOT / subdir
 
 
 def _ensure_dir(path, label):

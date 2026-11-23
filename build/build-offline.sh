@@ -43,15 +43,18 @@ echo "============================================================"
 rm -rf "$OUT"; mkdir -p "$OUT"/{bin,data}
 # 从 Windows/zip 中转过来的文件会丢可执行位，先补回来，否则会被误判成"没有二进制"而去重编
 [ -d "$ROOT/bin" ] && chmod +x "$ROOT"/bin/* 2>/dev/null || true
-chmod +x "$ROOT"/build/*.sh "$SRC"/*.sh 2>/dev/null || true
-# 运行时代码平铺到包根：install.sh 与 core.py/serve.py 必须同级（脚本里写死了 $DEST/…）
-cp -f "$SRC"/*.py "$SRC"/*.html "$SRC"/*.sh "$OUT"/ 2>/dev/null || true
-cp -f "$ROOT/README.md" "$OUT"/ 2>/dev/null || true
-# 目标机「上传源码自动编译」要用这个脚本，worker.py 是按 ROOT/build-static-openvpn.sh 找的
-cp -f "$BUILD/build-static-openvpn.sh" "$OUT"/ 2>/dev/null || true
-chmod 755 "$OUT"/*.sh
+chmod +x "$ROOT"/build/*.sh "$ROOT"/system/*.sh 2>/dev/null || true
+# 程序按 django/ + system/ 两个目录整体进包，与源码布局完全一致（不再平铺）
+cp -f "$ROOT/serve.py" "$ROOT/README.md" "$OUT"/ 2>/dev/null || true
+cp -a "$ROOT/django" "$OUT"/ 2>/dev/null || true
+cp -a "$ROOT/system" "$OUT"/ 2>/dev/null || true
+mkdir -p "$OUT/tests"
+cp -f "$ROOT/tests/selftest.py" "$ROOT/tests/selftest_django.py" "$OUT/tests/" 2>/dev/null || true
+# 目标机「上传源码自动编译」要用这个脚本，core 按 ROOT/system/build-static-openvpn.sh 找
+cp -f "$BUILD/build-static-openvpn.sh" "$OUT/system"/ 2>/dev/null || true
+chmod 755 "$OUT/system"/*.sh 2>/dev/null || true
 # 安装码脚本能造令牌 → 只给 root 执行，别在包里就摆成 755
-[ -f "$OUT/install-code.sh" ] && chmod 700 "$OUT/install-code.sh"
+[ -f "$OUT/system/install-code.sh" ] && chmod 700 "$OUT/system/install-code.sh"
 # 收进仓库里已编好的东西：静态 openvpn + 静态 openssl（签证书用，最小化系统可能没有 openssl）
 if [ -d "$ROOT/bin" ]; then
     for f in "$ROOT"/bin/*; do [ -f "$f" ] && cp -f "$f" "$OUT/bin/"; done
@@ -172,7 +175,7 @@ fi
 # 4) 打包
 cat > "$OUT/version.txt" <<EOF
 OpenVPN Web 一体化管理系统
-Web: $(grep -m1 'WEB_VERSION =' "$OUT/core_legacy.py" | tr -d '"' | awk '{print $3}')
+Web: $(grep -m1 'WEB_VERSION =' "$OUT/system/core.py" | tr -d '"' | awk '{print $3}')
 构建时间: $(date '+%Y-%m-%d %H:%M:%S %z')
 构建机: $(uname -srm) / glibc $(ldd --version 2>/dev/null | head -1 || echo unknown)
 EOF

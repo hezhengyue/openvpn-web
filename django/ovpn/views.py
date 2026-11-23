@@ -17,6 +17,7 @@ import time
 import threading
 import traceback
 
+from django.conf import settings
 from django.http import HttpResponse, FileResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.contrib.auth import get_user_model
@@ -34,11 +35,9 @@ def api_state(request):
     users = core.list_users()
     vi = core.version_info()
     online = core.online_users()
-    con = core.db()
-    n_grants = con.execute("SELECT COUNT(*) FROM acl_grants").fetchone()[0]
-    n_peers = con.execute("SELECT COUNT(*) FROM peer_grants").fetchone()[0]
-    recent = [dict(r) for r in con.execute("SELECT * FROM auth_log ORDER BY id DESC LIMIT 8").fetchall()]
-    con.close()
+    n_grants = core.count_grants()
+    n_peers = core.count_peer_grants()
+    recent = core.recent_auth(8)
     try:
         _usable = set(core.usable_host_ips(c))
         stale = [{"username": u["username"], "vpn_ip": u["vpn_ip"], "enabled": u["enabled"]}
@@ -79,14 +78,12 @@ def api_allow_set(request):
 
 # =========================================================== 长任务
 def api_task(request, tid):
-    con = core.db()
-    r = con.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
-    con.close()
+    r = core.task_get(tid)
     if not r:
         return ok({"id": tid, "kind": "", "status": "unknown", "progress": 100,
                    "msg": "任务记录已随快照回滚，请以自检结果为准", "created_at": "",
                    "finished_at": "", "actor": ""})
-    return ok(dict(r))
+    return ok(r)
 
 
 def api_task_log(request, tid):
@@ -884,10 +881,8 @@ def api_restart(request):
 
 # =========================================================== 前端页面
 def index(request):
-    # 交付包里 index.html 平铺到包根；开发期在 src/
-    p = os.path.join(ROOT, "index.html")
-    if not os.path.exists(p):
-        p = os.path.join(ROOT, "src", "index.html")
+    # 单页前端：django/templates/index.html（交付包随 Django 项目一起装）
+    p = os.path.join(str(settings.BASE_DIR), "templates", "index.html")
     with open(p, "rb") as f:
         data = f.read()
     resp = HttpResponse(data, content_type="text/html; charset=utf-8")
@@ -900,6 +895,6 @@ def favicon(request):
 
 def self_page(request):
     """用户自助改密页（不需要后台登录；拨着 VPN 时按来源 IP 自动认人）"""
-    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "self_page.html")
+    p = os.path.join(str(settings.BASE_DIR), "templates", "self_page.html")
     with open(p, "rb") as f:
         return HttpResponse(f.read(), content_type="text/html; charset=utf-8")

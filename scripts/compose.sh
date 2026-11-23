@@ -150,7 +150,8 @@ MANAGE() {
         local base="${BASE_DIR:-$PWD}"
         local py
         py="$(python_bin)"
-        (cd "$base" && "$py" manage.py "$@")
+        # 项目结构：manage.py 在 django/ 下（Django 项目根），运行时目录在安装根
+        (cd "$base/django" && "$py" manage.py "$@")
     fi
 }
 

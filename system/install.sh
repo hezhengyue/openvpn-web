@@ -272,10 +272,10 @@ PRECHECK_STATE="未通过"
 # 重装时端口多半是本服务自己占着（后面会 restart），只警告不拦；首装才硬检查。
 if [ -s "$DEST/data/admin_password.txt" ]; then
     PRECHECK_RC=0
-    "$PY" "$DEST/precheck.py" --root "$DEST" --port "$PORT" --reinstall || PRECHECK_RC=$?
+    "$PY" "$DEST/system/precheck.py" --root "$DEST" --port "$PORT" --reinstall || PRECHECK_RC=$?
 else
     PRECHECK_RC=0
-    "$PY" "$DEST/precheck.py" --root "$DEST" --port "$PORT" || PRECHECK_RC=$?
+    "$PY" "$DEST/system/precheck.py" --root "$DEST" --port "$PORT" || PRECHECK_RC=$?
 fi
 if [ "$PRECHECK_RC" != 0 ]; then
     say "错误: 安装前预检未通过，已中止（上面一次列齐了所有问题，修完直接重跑本脚本）"
@@ -296,12 +296,15 @@ chown -R "$USER:$USER" "$DEST/data"
 chown -R root:root "$DEST/bin" 2>/dev/null || true
 chmod 755 "$DEST/bin" 2>/dev/null || true
 chmod 755 "$DEST/bin"/* 2>/dev/null || true
-chown root:root "$DEST" "$DEST"/*.py "$DEST"/*.html "$DEST"/*.sh 2>/dev/null || true
+chown root:root "$DEST" "$DEST"/*.py "$DEST"/*.html 2>/dev/null || true
 chmod 644 "$DEST"/*.py "$DEST"/*.html 2>/dev/null || true
-chmod 755 "$DEST"/*.sh 2>/dev/null || true
-# Django 项目代码（config/ovpn/accounts/common/jobs/templates/static）同样 root 所有、Web 不可写；
-# 只有 data/ 归服务用户。任何「下次会以 root 执行」的代码都不能被 Web 进程改。
-for d in config ovpn accounts common jobs templates static scripts; do
+# system/ 与 django/ 里的代码同样 root 所有、Web 不可写；只有 data/ 归服务用户。
+# 任何「下次会以 root 执行」的代码都不能被 Web 进程改。
+chown -R root:root "$DEST/system" 2>/dev/null || true
+chmod 644 "$DEST/system"/*.py 2>/dev/null || true
+chmod 755 "$DEST/system"/*.sh 2>/dev/null || true
+chmod 700 "$DEST/system/install-code.sh" 2>/dev/null || true
+for d in django/config django/core django/common django/jobs django/ovpn django/templates django/static django/scripts; do
     [ -d "$DEST/$d" ] || continue
     chown -R root:root "$DEST/$d" 2>/dev/null || true
     find "$DEST/$d" -type f -name '*.py' -exec chmod 644 {} + 2>/dev/null || true
@@ -319,13 +322,13 @@ for d in logs staticfiles media; do
     chmod 750 "$DEST/$d" 2>/dev/null || true
 done
 # WhiteNoise 从 STATIC_ROOT 提供资源，安装时以 root 收集一次；Web 只需读。
-if [ -f "$DEST/manage.py" ]; then
-    "$PY" "$DEST/manage.py" collectstatic --noinput >/dev/null 2>&1 || \
+if [ -f "$DEST/django/manage.py" ]; then
+    "$PY" "$DEST/django/manage.py" collectstatic --noinput >/dev/null 2>&1 || \
         say "      警告: collectstatic 失败，静态资源可能不可用"
 fi
 # 安装码脚本是「装外部代码」的唯一人工闸门，只能 root 执行
-if [ -f "$DEST/install-code.sh" ]; then
-    chown root:root "$DEST/install-code.sh" && chmod 700 "$DEST/install-code.sh"
+if [ -f "$DEST/system/install-code.sh" ]; then
+    chown root:root "$DEST/system/install-code.sh" && chmod 700 "$DEST/system/install-code.sh"
 fi
 # 安装码存放目录（600 的令牌文件由 install-code.sh 写）
 install -d -m 700 -o root -g root "$ETC" 2>/dev/null || { mkdir -p "$ETC" && chmod 700 "$ETC"; }
@@ -341,7 +344,7 @@ Defaults:$USER env_keep += "OVPN_WEB_ROOT"
 # 末尾必须是 " *"：sudoers 里不带通配符的规则要求参数完全一致，
 # 而实际调用是 worker.py <32位task_id>，只写 worker.py 会导致 "sudo: a password is required"。
 # worker.py 自己校验 task_id 格式，并且动作只能从 data/tasks 里的白名单读取，不给自由参数。
-$USER ALL=(root) NOPASSWD: $PY $DEST/worker.py *
+$USER ALL=(root) NOPASSWD: $PY $DEST/system/worker.py *
 EOF
 chmod 440 "$SUDOERS"
 if command -v visudo >/dev/null 2>&1; then
@@ -406,14 +409,14 @@ systemctl enable openvpn-web >/dev/null 2>&1 || true
 # 装完必须 openvpn + web 都在跑。缺二进制不能「装到一半退出、让用户去网页向导上传」——
 # 那时候 Web 还没起，人只能干瞪眼。所以这里自己解决：包内 → 就地编译。
 step "[7/9] 准备 OpenVPN 二进制（包内 → 就地编译）"
-if [ "$WITH_TOOLS" = 1 ] && [ -x "$DEST/prepare-openvpn.sh" ]; then
+if [ "$WITH_TOOLS" = 1 ] && [ -x "$DEST/system/prepare-openvpn.sh" ]; then
     say "      顺带补齐编译工具（--with-build-tools）"
-    bash "$DEST/prepare-openvpn.sh" --tools-only "$DEST" || \
+    bash "$DEST/system/prepare-openvpn.sh" --tools-only "$DEST" || \
         say "      编译工具没装成（可能离线）；不影响已有二进制，只是以后不能在本机编"
 fi
 BIN_OK=0
-if [ -x "$DEST/prepare-openvpn.sh" ]; then
-    if bash "$DEST/prepare-openvpn.sh" "$DEST"; then BIN_OK=1; fi
+if [ -x "$DEST/system/prepare-openvpn.sh" ]; then
+    if bash "$DEST/system/prepare-openvpn.sh" "$DEST"; then BIN_OK=1; fi
 elif [ -x "$DEST/bin/openvpn" ] && "$DEST/bin/openvpn" --version >/dev/null 2>&1; then
     say "      已就位：$("$DEST/bin/openvpn" --version 2>/dev/null | head -1)"
     BIN_OK=1
@@ -426,7 +429,7 @@ step "[8/9] 配置 OpenVPN 服务端（CA / 配置 / ACL / NAT / 启动）"
 VPN_OK=0
 if [ "$BIN_OK" = 1 ]; then
     export OVPN_WEB_ROOT="$DEST" OVPN_WEB_PY="$PY" OVPN_WEB_PORT="$PORT" OVPN_WEB_OWNER="$USER"
-    if SETUP_OUT="$("$PY" "$DEST/setup.py" "${SETUP_ARGS[@]+"${SETUP_ARGS[@]}"}")"; then
+    if SETUP_OUT="$("$PY" "$DEST/system/setup.py" "${SETUP_ARGS[@]+"${SETUP_ARGS[@]}"}")"; then
         printf '%s\n' "$SETUP_OUT"
         VPN_OK=1
     else
@@ -467,7 +470,7 @@ done
 say ""
 say "==> 装完自检（包内 selftest.py，只用临时目录，不碰生产数据）"
 SELFTEST_RC=0
-SELFTEST_OUT="$("$PY" "$DEST/selftest.py" 2>&1)" || SELFTEST_RC=$?
+SELFTEST_OUT="$("$PY" "$DEST/tests/selftest.py" 2>&1)" || SELFTEST_RC=$?
 printf '%s\n' "$SELFTEST_OUT" | tail -6
 if [ "$SELFTEST_RC" = 0 ]; then
     SELFTEST_STATE="全部通过"
@@ -475,7 +478,7 @@ if [ "$SELFTEST_RC" = 0 ]; then
 else
     SELFTEST_STATE="有失败项（见上方输出）"
     say "      警告: 自检有失败项；服务已在运行，请把上面的输出发给维护者"
-    say "      完整输出可重跑：$PY $DEST/selftest.py"
+    say "      完整输出可重跑：$PY $DEST/tests/selftest.py"
 fi
 say ""
 
@@ -484,7 +487,7 @@ say ""
 BUILD_ENV="$("$PY" - <<'PYEOF' 2>/dev/null || true
 import os, sys
 sys.path.insert(0, os.environ.get("OVPN_WEB_ROOT", "/opt/openvpn-web"))
-import core
+from system import core
 e = core.check_build_env(force=True)
 if e["ok"]:
     print("可用 · gcc / make / pkg-config 齐备")
@@ -510,8 +513,8 @@ VERSION="$("$DEST/bin/openvpn" --version 2>/dev/null | head -1 | awk '{print $2}
 # 装完二进制就位、服务直接可用；这个码是留给「升级」页的：换二进制 / 编源码 / 更新 Web
 # 都要人工放行。先印一个 2 小时的在这里，省得装完还要另开终端（一次性，填错 5 次作废）。
 FIRSTCODE=""
-if [ -x "$DEST/install-code.sh" ]; then
-    FIRSTCODE="$(OVPN_CODE_QUIET=1 "$DEST/install-code.sh" 7200 2>/dev/null || true)"
+if [ -x "$DEST/system/install-code.sh" ]; then
+    FIRSTCODE="$(OVPN_CODE_QUIET=1 "$DEST/system/install-code.sh" 7200 2>/dev/null || true)"
 fi
 CLIENT_IP="$("$PY" - "$DEST" <<'PYEOF' 2>/dev/null || true
 import os, sys, json, sqlite3
@@ -548,7 +551,7 @@ cat <<EOF
  管理账户:   admin
  管理密码:   $( [ "$NEWPW" = 1 ] && echo "admin（首次登录强制修改）" || echo "（沿用已有 data/admin_password.txt）" )
  OpenVPN:    ${VPN_STATE}  监听 ${CLIENT_IP:-$IP}:1194
- 安装码:     ${FIRSTCODE:-（生成失败，请执行 $DEST/install-code.sh）}  ← 「升级」页换二进制/源码时填，2 小时内有效
+ 安装码:     ${FIRSTCODE:-（生成失败，请执行 $DEST/system/install-code.sh）}  ← 「升级」页换二进制/源码时填，2 小时内有效
  本机编译:   ${BUILD_ENV}
  客户端配置: $DEST/data/company.ovpn   （全员共用，含 CA 与 tls-crypt）
  服务端配置: $DEST/data/server.conf
@@ -579,6 +582,6 @@ fi
 if [ "$VPN_OK" != 1 ] || [ "$VPID" != "yes" ]; then
     say ""
     say "警告: 服务端没跑起来（OpenVPN: $VPN_STATE）。Web 已经起来了，可以登录看日志；"
-    say "      补齐 openvpn 二进制后重跑 $DEST/setup.py，或直接重跑本脚本。"
+    say "      补齐 openvpn 二进制后重跑 $DEST/system/setup.py，或直接重跑本脚本。"
     exit 3
 fi

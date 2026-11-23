@@ -17,12 +17,15 @@ import os
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-# 交付包里 serve.py 平铺到包根（与 config/、core.py 同级）；源码布局下它在 src/。
-# 两种布局都兼容：找到同时含 config/ 的那一层作为项目根。
+# serve.py 恒在安装根（与 bin/、system/、vendor/、data/ 同级）。
 ROOT = _HERE
-if not os.path.isdir(os.path.join(ROOT, "config")):
-    ROOT = os.path.dirname(_HERE)
-sys.path.insert(0, ROOT)
+# Django 项目根：源码布局是 ROOT/django；交付包里 install.sh 把 django/ 的内容
+# 平铺到 ROOT，此时两者重合。两种布局都兼容。
+DJANGO_DIR = ROOT
+if os.path.isdir(os.path.join(ROOT, "django", "config")):
+    DJANGO_DIR = os.path.join(ROOT, "django")
+sys.path.insert(0, ROOT)          # 让 system/ 包可导入（特权脚本边界）
+sys.path.insert(0, DJANGO_DIR)    # 让 config/、core/、ovpn/ 可导入
 PORT = int(os.environ.get("OVPN_WEB_PORT", "8800"))
 try:
     THREADS = max(1, min(64, int(os.environ.get("OVPN_WEB_THREADS", "8"))))

@@ -28,19 +28,12 @@ from django.http import JsonResponse, HttpResponse, FileResponse
 from django.conf import settings
 from django.contrib.auth import get_user_model
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# 业务核心加载：交付包里 core_legacy.py/fullbackup_legacy.py 被平铺到包根；
-# 开发期它们还在 src/。两种布局都兼容，业务代码本身一行都不用改。
-# 注意：Django 的 Auth app 现在叫 core/，业务模块必须避开 core 这个名字，
-# 否则 sys.path 上的 core 会解析到 Django app 包而不是业务模块。
-sys.path.insert(0, ROOT)
-try:
-    import core_legacy as core                # noqa: E402
-    import fullbackup_legacy as fullbackup    # noqa: E402
-except ModuleNotFoundError:
-    sys.path.insert(0, os.path.join(ROOT, "src"))
-    import core_legacy as core                # noqa: E402
-    import fullbackup_legacy as fullbackup    # noqa: E402
+ROOT = str(getattr(settings, 'PROJECT_ROOT', '') or
+           os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# 业务门面：纯逻辑继承自 system/core.py，数据访问全部是 Django ORM（django/ 内零裸 SQL）。
+from .services import core                      # noqa: E402
+from .services import backup as fullbackup      # noqa: E402
 
 PORT = int(getattr(settings, 'OVPN_PORT', 8800))
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
@@ -168,11 +161,7 @@ def tlog(tid, msg):
 
 
 def task_update(tid, **kw):
-    con = core.db()
-    sets = ",".join("%s=?" % k for k in kw)
-    con.execute("UPDATE tasks SET %s WHERE id=?" % sets, list(kw.values()) + [tid])
-    con.commit()
-    con.close()
+    core.task_update(tid, **kw)
 
 
 def sudo_worker(tid, action, params=None, timeout=300):
@@ -184,10 +173,10 @@ def sudo_worker(tid, action, params=None, timeout=300):
         pass
     with open(os.path.join(TASKS_DIR, tid + ".json"), "w", encoding="utf-8") as f:
         json.dump({"action": action, "params": params or {}}, f, ensure_ascii=False)
-    # worker.py：交付包平铺到包根；开发期在 src/
-    worker = os.path.join(ROOT, "worker.py")
+    # 特权执行器在 system/（安装根下，零 Django 依赖）
+    worker = os.path.join(ROOT, "system", "worker.py")
     if not os.path.exists(worker):
-        worker = os.path.join(ROOT, "src", "worker.py")
+        worker = os.path.join(ROOT, "worker.py")
     if MOCK:
         cmd = [sys.executable, worker, tid]
     else:
@@ -210,11 +199,7 @@ def start_task(kind, steps, actor_name="admin", on_error=None):
     """steps: [(label, fn)]；fn 返回字符串写入日志。全程持全局写锁。"""
     tid = uuid.uuid4().hex
     core.ensure_dirs()
-    con = core.db()
-    con.execute("INSERT INTO tasks(id,kind,status,progress,msg,created_at,actor) VALUES(?,?,?,?,?,?,?)",
-                (tid, kind, "running", 0, "排队中", core.now(), actor_name))
-    con.commit()
-    con.close()
+    core.task_create(tid, kind, actor_name)
 
     def runner():
         try:

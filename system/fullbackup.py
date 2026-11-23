@@ -28,7 +28,7 @@ import sqlite3
 import secrets
 from datetime import datetime
 
-import core_legacy as core
+from system import core  # noqa: E402
 
 KIND = "openvpn-web-full-backup"
 FORMAT = 1
@@ -196,6 +196,42 @@ def create(tag="手动", keep=10, kind="manual"):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# 恢复备份时不允许被旧包覆盖的「底座运行态」表：登录会话、Django 用户、
+# 迁移记录、内容类型、审计、任务队列、防爆破计数。
+PROTECTED_TABLES = (
+    "django_session", "django_migrations", "django_content_type",
+    "core_user", "auth_group", "auth_permission",
+    "auth_group_permissions", "core_user_groups", "core_user_user_permissions",
+    "auditlog_logentry",
+    "jobs_job", "jobs_joblog",
+    "axes_accessattempt", "axes_accesslog", "axes_accessfailurelog",
+)
+
+
+def _dump_tables(con, names):
+    """把指定表的现有内容读进内存（只读，不落地）。"""
+    out = {}
+    have = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    for t in names:
+        if t not in have:
+            continue
+        cur = con.execute('SELECT * FROM "%s"' % t)
+        cols = [d[0] for d in cur.description]
+        out[t] = (cols, cur.fetchall())
+    return out
+
+
+def _put_tables(con, data):
+    """整库覆盖后把上面读出来的内容写回去。"""
+    for t, (cols, rows) in data.items():
+        con.execute('DELETE FROM "%s"' % t)
+        if not rows:
+            continue
+        q = 'INSERT OR REPLACE INTO "%s" (%s) VALUES (%s)' % (
+            t, ",".join('"%s"' % c for c in cols), ",".join("?" * len(cols)))
+        con.executemany(q, rows)
+
+
 def _safe_member(name):
     """tar 里的路径必须规整，挡住 ../../etc/passwd 这类路径穿越"""
     return (name and not name.startswith("/") and not name.startswith("\\")
@@ -312,7 +348,10 @@ def _restore(path, audit=True, protect=True, with_bin=False):
             for fn in os.listdir(srcccd):
                 shutil.copy2(os.path.join(srcccd, fn), os.path.join(core.CCD, fn))
 
-        # ---- 恢复 web/：数据库在线写回，不动当前审计（否则这次操作自己就没了） ----
+        # ---- 恢复 web/：只回灌业务表，底座自己的表一律不覆盖 ----
+        # 备份包里带的是整库文件，但 core_user / django_session / auditlog / jobs
+        # 属于「底座运行态」，被旧包覆盖会导致：当前登录会话失效、审计断档、
+        # 迁移记录回退。所以先读出这些表的现有内容，覆盖后再写回去。
         web = os.path.join(tmp, "web")
         dbfile = os.path.join(web, "openvpn-web.db")
         if os.path.isfile(dbfile):
@@ -323,16 +362,16 @@ def _restore(path, audit=True, protect=True, with_bin=False):
             src = sqlite3.connect(dbfile)
             tgt = core.db()
             try:
+                keep = _dump_tables(tgt, PROTECTED_TABLES)
                 with tgt:
                     src.backup(tgt)
+                _put_tables(tgt, keep)
+                tgt.executemany("INSERT OR REPLACE INTO audit(id,ts,actor,action,detail,ip)"
+                                " VALUES(?,?,?,?,?,?)", audit_rows)
+                tgt.commit()
             finally:
                 src.close()
                 tgt.close()
-            con = core.db()
-            con.executemany("INSERT OR REPLACE INTO audit(id,ts,actor,action,detail,ip)"
-                            " VALUES(?,?,?,?,?,?)", audit_rows)
-            con.commit()
-            con.close()
         for name in WEB_FILES:
             p = os.path.join(web, name)
             if os.path.isfile(p):

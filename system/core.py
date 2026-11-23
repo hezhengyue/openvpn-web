@@ -38,7 +38,9 @@ ROOT = os.environ.get("OVPN_WEB_ROOT", "/opt/openvpn-web")
 SYS_LOCK = threading.RLock()      # 可重入：write_all_config 内部还会调 rebuild_ccd
 
 DATA = os.path.join(ROOT, "data")
-DB_PATH = os.path.join(DATA, "openvpn-web.db")
+# 与 Django 同用一个物理库：Web 走 ORM，特权脚本（worker/auth-verify/setup）走 sqlite，
+# 两边看到的是同一份台账。文件名沿用 django-web-base 的 db.sqlite3。
+DB_PATH = os.path.join(DATA, "db.sqlite3")
 STATE = os.path.join(DATA, "state")
 CCD = os.path.join(DATA, "ccd")
 TASKS = os.path.join(DATA, "tasks")
@@ -47,15 +49,15 @@ STAGING = os.path.join(DATA, "staging")
 BACKUPS = os.path.join(DATA, "backups")
 USER_BACKUP_KEEP = 200          # 台账自动备份保留份数（每次账号变更一份 xlsx）
 BIN = os.path.join(ROOT, "bin", "openvpn")
-WORKER = os.path.join(ROOT, "worker.py")
-AUTH_VERIFY = os.path.join(ROOT, "auth-verify.py")
+WORKER = os.path.join(ROOT, "system", "worker.py")
+AUTH_VERIFY = os.path.join(ROOT, "system", "auth-verify.py")
 PY = os.environ.get("OVPN_WEB_PY") or (
     os.path.join(ROOT, "python", "bin", "python3")
     if os.path.exists(os.path.join(ROOT, "python", "bin", "python3")) else "/usr/bin/python3"
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "2.0.0"
+WEB_VERSION = "2.1.0"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -2568,7 +2570,7 @@ def snapshot(tag="auto"):
     来源不同，格式、可下载性、恢复方式完全一致。延迟 import 是避开 fullbackup
     顶层 import core 造成的循环。
     """
-    import fullbackup_legacy as fullbackup
+    from system import fullbackup  # noqa: E402
     r = fullbackup.create(tag, kind="auto")
     con = db()
     try:
@@ -2638,7 +2640,7 @@ def _restore_legacy_snapshot(path):
 
 def restore_snapshot(path):
     """恢复一份备份：新格式 tar.gz 走统一恢复，老目录快照走兼容分支。"""
-    import fullbackup_legacy as fullbackup
+    from system import fullbackup  # noqa: E402
     if not path:
         raise ValueError("未指定备份")
     rp = os.path.realpath(path)
@@ -2735,7 +2737,9 @@ def build_env():
     sp = os.path.join(ROOT, "vendor", "static", "prefix.tar.gz")
     add("预编译静态库", os.path.exists(sp),
         sp if os.path.exists(sp) else "缺失（只能上传已编译好的二进制）")
-    script = os.path.join(ROOT, "build-static-openvpn.sh")
+    script = os.path.join(ROOT, "system", "build-static-openvpn.sh")
+    if not os.path.exists(script):
+        script = os.path.join(ROOT, "build-static-openvpn.sh")
     add("构建脚本", os.path.exists(script), script if os.path.exists(script) else "缺失")
     free = 0.0
     try:

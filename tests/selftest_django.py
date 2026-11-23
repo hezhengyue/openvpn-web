@@ -15,10 +15,12 @@ import io
 
 # selftest.py 在 import 本模块前已设好 OVPN_WEB_ROOT / OVPN_WEB_MOCK / OVPN_WEB_PORT
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_ROOT = _HERE
-if not os.path.isdir(os.path.join(_ROOT, "config")):
-    _ROOT = os.path.dirname(_HERE)
-sys.path.insert(0, _ROOT)
+_PROJECT = os.path.dirname(_HERE)          # 安装根（system/、data/、bin/ 所在层）
+sys.path.insert(0, _PROJECT)               # 让 system 包可导入
+if os.path.isdir(os.path.join(_PROJECT, "django", "config")):
+    sys.path.insert(0, os.path.join(_PROJECT, "django"))    # 源码布局
+else:
+    sys.path.insert(0, _PROJECT)                            # 交付包平铺布局
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
 os.environ["STANDALONE"] = "True"
 os.environ.setdefault("USE_HTTPS", "false")
@@ -139,28 +141,31 @@ class _Web:
 
     @staticmethod
     def bootstrap_admin():
-        """兼容旧 selftest：初始化 core 默认 admin/admin 与强改标记，并同步 Django 用户。"""
+        """兼容旧 selftest：建一个 admin/admin 的 Django 超级用户并置首登强改标记。
+
+        旧版这里还会写 core 的 admin_hash；现在管理口令完全由 Django Auth 承担，
+        业务库里只保留「管理账户名」和「首登强改」两个展示用标记。
+        """
         core.init_db()
-        if not core.get_meta("admin_hash"):
+        if not core.get_meta("admin_user"):
             core.set_meta("admin_user", "admin")
-            core.set_meta("admin_hash", core.hash_password("admin"))
+        if core.get_meta("admin_must_change") is None:
             core.set_meta("admin_must_change", 1)
-            # 旧版 bootstrap 会写凭据文件，selftest 有断言依赖它
-            pwfile = os.path.join(core.DATA, "admin_password.txt")
-            if not os.path.exists(pwfile):
-                with open(pwfile, "w", encoding="utf-8") as f:
-                    f.write("admin\n")
+        # 旧版 bootstrap 会写凭据文件，selftest 有断言依赖它
+        pwfile = os.path.join(core.DATA, "admin_password.txt")
+        if not os.path.exists(pwfile):
+            with open(pwfile, "w", encoding="utf-8") as f:
+                f.write("admin\n")
         User = get_user_model()
-        # core 体系当前默认口令是 admin（新装）：确保 Django 侧 admin 密码也是 admin
-        if core.admin_verify("admin"):
-            u = User.objects.filter(username="admin").first()
-            if not u:
-                u = User(username="admin", is_staff=True, is_superuser=True)
-            if not u.check_password("admin"):
-                u.set_password("admin")
-            u.is_staff = True
-            u.is_superuser = True
-            u.save()
+        u = User.objects.filter(username="admin").first()
+        if not u:
+            # 只有「新建管理员」才用默认口令；已存在的账号绝不覆盖密码，
+            # 否则会把 selftest 中途改过的新密码又打回 admin。
+            u = User(username="admin", is_staff=True, is_superuser=True)
+            u.set_password("admin")
+        u.is_staff = True
+        u.is_superuser = True
+        u.save()
 
 
 # selftest 里 `import app as web` -> 换成 `import selftest_django as web`，

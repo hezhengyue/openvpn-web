@@ -17,16 +17,25 @@ import subprocess
 import tarfile
 from datetime import datetime, timedelta
 
-CODE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(os.path.abspath(__file__))        # tests/
+CODE = os.path.dirname(HERE)                             # 安装根（system/、django/、bin/ 所在层）
+SYS = os.path.join(CODE, "system")
+DJANGO = os.path.join(CODE, "django") if os.path.isdir(os.path.join(CODE, "django")) else CODE
 TMP = tempfile.mkdtemp(prefix="ovpnweb-selftest-")
 os.environ["OVPN_WEB_ROOT"] = TMP
 os.environ["OVPN_WEB_MOCK"] = "1"
 os.environ["OVPN_WEB_PORT"] = "8899"
-sys.path.insert(0, CODE)
+sys.path.insert(0, HERE)
 
-import core_legacy as core          # noqa: E402
-import fullbackup_legacy as fullbackup    # noqa: E402
-import selftest_django as web    # noqa: E402  （Django 版兼容层；原为 import app as web）
+# 兼容层内部完成 django.setup() + 建库；业务门面与 ORM 模型都从它拿
+import selftest_django as web              # noqa: E402
+from ovpn import bridge as _bridge         # noqa: E402
+from ovpn.models import (                  # noqa: E402
+    VpnUser, UserGroupMember, AclGrant, PeerGrant, AuditRecord,
+)
+
+core = web.core
+fullbackup = _bridge.fullbackup
 
 PASS, FAIL = [], []
 # 闸门/版本号这类用例要真的执行一个 shell 脚本，Windows 上跑不了（目标环境是 Linux）
@@ -40,6 +49,21 @@ def check(name, cond, detail=""):
         return
     (PASS if cond else FAIL).append(name)
     print(("  [PASS] " if cond else "  [FAIL] ") + name + (("  -> " + str(detail)) if detail and not cond else ""))
+
+
+def _admin_pw_ok(pw):
+    """管理口令现在只存在 Django 的 auth_user 里。"""
+    from django.contrib.auth import get_user_model
+    u = get_user_model().objects.filter(username="admin").first()
+    return bool(u and u.check_password(pw))
+
+
+def _set_admin_pw(pw):
+    from django.contrib.auth import get_user_model
+    u = get_user_model().objects.filter(username="admin").first()
+    if u:
+        u.set_password(pw)
+        u.save()
 
 
 def section(t):
@@ -63,7 +87,7 @@ def main():
     # ---------- 默认凭据 / 首次登录强制改密 ----------
     section("默认 admin/admin 与首登强改")
     check("默认管理账户是 admin", core.admin_user() == "admin", core.admin_user())
-    check("默认管理密码是 admin", core.admin_verify("admin"))
+    check("默认管理密码是 admin", _admin_pw_ok("admin"))
     check("新装标记首次登录必须改密", core.admin_must_change())
     _init_pw = open(os.path.join(core.DATA, "admin_password.txt")).read().splitlines()[0]
     check("默认凭据文件写入 admin", _init_pw == "admin", _init_pw)
@@ -79,13 +103,13 @@ def main():
     check("首登改密无需手填旧密码", rr.get_json().get("ok") is True, rr.get_json())
     check("改密后强改标记清除", core.admin_must_change() is False)
     check("改密后业务接口放行", fc.get("/api/state", headers=FH).status_code == 200)
-    check("改密后默认密码失效", core.admin_verify("admin") is False)
+    check("改密后默认密码失效", _admin_pw_ok("admin") is False)
     check("凭据文件不再留明文口令",
           open(os.path.join(core.DATA, "admin_password.txt")).read().startswith("#"))
     check("新密码可登录", web.app.test_client().post(
         "/api/login", json={"username": "admin", "password": "TestPass123!"}).get_json().get("ok") is True)
 
-    core.set_meta("admin_hash", core.hash_password("TestPass123!"))
+    _set_admin_pw("TestPass123!")
     web.bootstrap_admin()
     c = web.app.test_client()
 
@@ -223,13 +247,9 @@ def main():
     core.update_user("lisi", new_username="lisi-new")
     names = [u["username"] for u in core.list_users()]
     check("改名后旧名消失、新名在册", "lisi" not in names and "lisi-new" in names, names)
-    con = core.db()
-    mem = [r[0] for r in con.execute(
-        "SELECT username FROM user_group_members WHERE username='lisi-new'")]
-    acl = [r[0] for r in con.execute(
-        "SELECT subject FROM acl_grants WHERE subject_type='user' AND subject='lisi-new'")]
-    peer = con.execute("SELECT COUNT(*) FROM peer_grants WHERE src_username='lisi-new'").fetchone()[0]
-    con.close()
+    mem = [m.username for m in UserGroupMember.objects.filter(username="lisi-new")]
+    acl = [g.subject for g in AclGrant.objects.filter(subject_type="user", subject="lisi-new")]
+    peer = PeerGrant.objects.filter(src_username="lisi-new").count()
     check("用户组成员跟着改名", len(mem) == 1, mem)
     check("资产授权跟着改名", acl == ["lisi-new"], acl)
     check("客户端互访授权跟着改名", peer == 1)
@@ -310,13 +330,13 @@ def main():
         f = os.path.join(TMP, "cred.txt")
         with open(f, "w") as fh:
             fh.write(name + "\n" + pw + "\n")
-        return subprocess.run([sys.executable, os.path.join(CODE, "auth-verify.py"), f],
+        return subprocess.run([sys.executable, os.path.join(SYS, "auth-verify.py"), f],
                               env=env, capture_output=True, text=True, timeout=30).returncode
     check("正确密码放行", auth("zhangsan", u1["password"]) == 0)
     check("错误密码拒绝", auth("zhangsan", "nope") == 1)
     check("不存在账号拒绝", auth("ghost", "x") == 1)
     check("凭据文件缺失 fail-closed",
-          subprocess.run([sys.executable, os.path.join(CODE, "auth-verify.py")],
+          subprocess.run([sys.executable, os.path.join(SYS, "auth-verify.py")],
                          env=env, capture_output=True, timeout=30).returncode == 1)
     for _ in range(5):
         auth("lisi", "wrong")
@@ -428,10 +448,7 @@ def main():
     # ---------- 密码覆盖 / 有效期自动停用 ----------
     section("密码覆盖与有效期自动停用")
     def _hash(n):
-        con = core.db()
-        r = con.execute("SELECT password_hash FROM users WHERE username=?", (n,)).fetchone()
-        con.close()
-        return r["password_hash"] if r else None
+        return VpnUser.objects.filter(username=n).values_list("password_hash", flat=True).first()
 
     all_rows = [["用户名", "姓名", "部门", "密码", "VPN固定IP", "状态", "有效期", "备注"],
                 ["zhangsan", "张三", "运维部", "NewPass1234", "10.8.0.12", "启用", "", ""],
@@ -1138,9 +1155,7 @@ def main():
         [_t.start() for _t in _ts]
         [_t.join(60) for _t in _ts]
         check("8 线程并发写审计不报 database is locked", not errs, errs[:2])
-        con = core.db()
-        n = con.execute("SELECT COUNT(*) FROM audit WHERE action='selftest.concurrent'").fetchone()[0]
-        con.close()
+        n = AuditRecord.objects.filter(action="selftest.concurrent").count()
         check("并发写入条目不丢", n == 160, n)
 
     section("多线程下的一致性")
@@ -1187,23 +1202,20 @@ def main():
     _ta = _th.Thread(target=_audit_as, args=("alice",))
     _tb = _th.Thread(target=_audit_as, args=("bob",))
     _ta.start(); _tb.start(); _ta.join(30); _tb.join(30)
-    con = core.db()
-    _rows = dict(con.execute("SELECT actor, COUNT(*) FROM audit WHERE action='selftest.actor' "
-                             "GROUP BY actor").fetchall())
-    con.close()
+    _rows = {}
+    for _r in AuditRecord.objects.filter(action="selftest.actor").values("actor"):
+        _rows[_r["actor"]] = _rows.get(_r["actor"], 0) + 1
     check("并发下审计归属不串人（alice/bob 各 15 条）",
           _rows.get("alice") == 15 and _rows.get("bob") == 15, _rows)
     core.audit_ctx_set("", "")
     core.log_audit("admin", "selftest.actor", "无上下文时回落到 admin")
-    con = core.db()
-    _last = con.execute("SELECT actor FROM audit WHERE action='selftest.actor' "
-                        "ORDER BY id DESC LIMIT 1").fetchone()[0]
-    con.close()
+    _last = (AuditRecord.objects.filter(action="selftest.actor")
+             .order_by("-id").values_list("actor", flat=True).first())
     check("没有上下文时审计仍能落一个操作者", _last == "admin", _last)
 
     # ---------- 安装码：给「上传即 root」这条路加一道人闸 ----------
     section("安装码闸门（替换二进制 / 编译源码 / 更新 Web）")
-    import worker as wk
+    from system import worker as wk
     _etc = os.path.join(TMP, "etc-installcode")
     os.makedirs(_etc, exist_ok=True)
     wk.ETC = _etc
@@ -1271,11 +1283,11 @@ def main():
 
     # 回归：MOCK 环境变量曾经能经 sudoers 的 env_keep 传到 worker，
     # 让 GATED 动作在没有安装码的情况下照样执行 —— 这是能直接提权的洞。
-    _wsrc = open(os.path.join(CODE, "worker.py"), encoding="utf-8").read()
-    _isrc = open(os.path.join(CODE, "install.sh"), encoding="utf-8").read()
+    _wsrc = open(os.path.join(SYS, "worker.py"), encoding="utf-8").read()
+    _isrc = open(os.path.join(SYS, "install.sh"), encoding="utf-8").read()
     # Django 版：原 app.py 里的 env 透传搬到了 ovpn/bridge.py，GET CSRF 名单搬到 ovpn/middleware.py。
     # 源码布局 selftest 在 src/（ovpn 在上一级）；交付平铺布局 selftest 与 ovpn/ 同级。
-    _code_root = CODE if os.path.isdir(os.path.join(CODE, "ovpn")) else os.path.dirname(CODE)
+    _code_root = DJANGO
     _ovpn_dir = os.path.join(_code_root, "ovpn")
     _bsrc = open(os.path.join(_ovpn_dir, "bridge.py"), encoding="utf-8").read()
     _msrc = open(os.path.join(_ovpn_dir, "middleware.py"), encoding="utf-8").read()
@@ -1342,42 +1354,30 @@ def main():
     # ccd 文件同样被 root 的 openvpn 按配置片段解析：脏 vpn_ip 不能写进去
     _ccd_u = core.list_users()[0]
     _ccd_oldip = _ccd_u["vpn_ip"]
-    _con = core.db()
-    _con.execute("UPDATE users SET vpn_ip=? WHERE username=?",
-                 ('10.8.0.5\nup "/bin/sh -c id"', _ccd_u["username"]))
-    _con.commit()
-    _con.close()
+    VpnUser.objects.filter(username=_ccd_u["username"]).update(
+        vpn_ip='10.8.0.5\nup "/bin/sh -c id"')
     try:
         core.rebuild_ccd()
         check("rebuild_ccd 对脏 vpn_ip 拒绝生成 ccd", False)
     except Exception:
         check("rebuild_ccd 对脏 vpn_ip 拒绝生成 ccd", True)
-    _con = core.db()
-    _con.execute("UPDATE users SET vpn_ip=? WHERE username=?", (_ccd_oldip, _ccd_u["username"]))
-    _con.commit()
-    _con.close()
+    VpnUser.objects.filter(username=_ccd_u["username"]).update(vpn_ip=_ccd_oldip)
     core.rebuild_ccd()
     check("脏数据清理后 ccd 恢复正常生成", True)
     check("valid_username 拒绝尾随换行的名字（match 的 $ 会放过）",
           not core.valid_username("张三\n") and not core.valid_username("x\n")
           and core.valid_username("张三") and core.valid_username("alice-01"))
-    _con = core.db()
-    _con.execute("UPDATE users SET username=? WHERE username=?", ("../staging/x", _ccd_u["username"]))
-    _con.commit()
-    _con.close()
+    VpnUser.objects.filter(username=_ccd_u["username"]).update(username="../staging/x")
     try:
         core.rebuild_ccd()
         check("rebuild_ccd 对脏 username（路径穿越）拒绝生成", False)
     except Exception:
         check("rebuild_ccd 对脏 username（路径穿越）拒绝生成", True)
-    _con = core.db()
-    _con.execute("UPDATE users SET username=? WHERE username=?", (_ccd_u["username"], "../staging/x"))
-    _con.commit()
-    _con.close()
+    VpnUser.objects.filter(username="../staging/x").update(username=_ccd_u["username"])
     core.rebuild_ccd()
 
     if POSIX:
-        _r = subprocess.run(["bash", os.path.join(CODE, "install-code.sh"), "600"],
+        _r = subprocess.run(["bash", os.path.join(SYS, "install-code.sh"), "600"],
                             capture_output=True, text=True,
                             env=dict(os.environ, OVPN_WEB_ETC=_etc, OVPN_CODE_QUIET="1"))
         _c = _r.stdout.strip()
@@ -1418,7 +1418,7 @@ def main():
     wk.action_rollback_binary({})
     check("指纹对得上才真的回滚", open(core.BIN, "rb").read() == b"EVIL-BINARY")
 
-    _inst = open(os.path.join(CODE, "install.sh"), encoding="utf-8").read()
+    _inst = open(os.path.join(SYS, "install.sh"), encoding="utf-8").read()
     check("install.sh 把 bin/ 收给 root（Web 用户不能再写要被 root 执行的程序）",
           'chown -R root:root "$DEST/bin"' in _inst)
     # 装完必须 openvpn + web 都在跑：缺二进制不许「装到一半退出、让用户去还没起的网页上传」
@@ -1428,7 +1428,7 @@ def main():
           '缺少静态二进制' not in _inst)
     check("服务端没起来时 install.sh 以非 0 退出（别让自动化以为装好了）",
           "exit 3" in _inst)
-    _prep = os.path.join(CODE, "prepare-openvpn.sh")
+    _prep = os.path.join(SYS, "prepare-openvpn.sh")
     check("prepare-openvpn.sh 随包分发", os.path.isfile(_prep))
     _prepsrc = open(_prep, encoding="utf-8").read() if os.path.isfile(_prep) else ""
     check("缺二进制时就地编译（源码与依赖都在包内，不联网）",
@@ -1438,7 +1438,7 @@ def main():
     check("prepare-openvpn.sh 缺工具时先试着自动补装（yum/dnf/apt 都认）",
           "install_tools" in _prepsrc and "apt-get" in _prepsrc
           and "pkgconfig" in _prepsrc and "OVPN_NO_AUTO_TOOL_INSTALL" in _prepsrc)
-    _bo_p = os.path.join(CODE, "..", "build", "build-offline.sh")
+    _bo_p = os.path.join(CODE, "build", "build-offline.sh")
     if os.path.isfile(_bo_p):
         _bo = open(_bo_p, encoding="utf-8").read()
         _bo_ok = 'vendor/src' in _bo and '"$VENDOR"/src/*.tar.gz' in _bo
@@ -1450,7 +1450,7 @@ def main():
     check("install.sh 强制只用随包 Python，不再退回目标机系统 python3",
           "强制随包便携版" in _inst and "不会退回系统 python3" in _inst
           and "command -v python3" not in _inst)
-    _pc_call = _inst.find('"$PY" "$DEST/precheck.py"')
+    _pc_call = _inst.find('"$PY" "$DEST/system/precheck.py"')
     check("install.sh 在动 /etc 与运行账号之前先跑环境预检",
           _pc_call > 0 and _pc_call < _inst.find('cat > "$SUDOERS"'))
     check("install.sh 预检有硬错误就中止（不留半套环境）",
@@ -1458,11 +1458,11 @@ def main():
     check("install.sh 重装场景端口占用只警告，首装才硬检查",
           "--reinstall" in _inst and "data/admin_password.txt" in _inst)
     check("install.sh 装完自动跑包内 selftest（交付即验收）",
-          '"$DEST/selftest.py"' in _inst and "SELFTEST_STATE" in _inst)
+          '"$DEST/tests/selftest.py"' in _inst and "SELFTEST_STATE" in _inst)
     check("安装完成信息里报告预检/自检结果与运行时来源",
           "环境预检:" in _inst and "装完自检:" in _inst and "运行时:" in _inst)
 
-    _pc_p = os.path.join(CODE, "precheck.py")
+    _pc_p = os.path.join(SYS, "precheck.py")
     check("precheck.py 随包分发", os.path.isfile(_pc_p))
     if os.path.isfile(_pc_p):
         _pc = open(_pc_p, encoding="utf-8").read()
@@ -1494,14 +1494,15 @@ def main():
         check("precheck.collect() 在任意平台上都能安全执行（无需 Linux 环境）", _fok)
         check("预检硬错误会让 main 返回非 0，警告只放行",
               'return 1 if any(f["level"] == "error"' in _pc)
-    _bop_py = os.path.join(CODE, "..", "build", "build-offline.py")
+    _bop_py = os.path.join(CODE, "build", "build-offline.py")
     if os.path.isfile(_bop_py):
         _bop_src = open(_bop_py, encoding="utf-8").read()
-        check("Windows 打包通配复制 src/*.py，precheck.py 自动进交付包",
-              '("py", "html", "sh")' in _bop_src)
+        check("Windows 打包把 django/ 与 system/ 整体收进交付包",
+              'copy_tree(os.path.join(src, "django")' in _bop_src
+              and 'copy_tree(os.path.join(src, "system")' in _bop_src)
 
     # Windows 上打包：不执行包内 Linux Python，只搬运 + 按规则写 tar
-    _py_p = os.path.join(CODE, "..", "build", "build-offline.py")
+    _py_p = os.path.join(CODE, "build", "build-offline.py")
     if os.path.isfile(_py_p):
         _pysrc = open(_py_p, encoding="utf-8").read()
         check("build-offline.py 存在（Windows 上也能打出可安装的包）", True)
@@ -1516,7 +1517,7 @@ def main():
           "vendor/wheels" in _inst and "--find-links" in _inst)
 
     # 闸门做在 worker 里，但用户得能在界面上把码填进来，否则这功能等于没有
-    _html = open(os.path.join(CODE, "index.html"), encoding="utf-8").read()
+    _html = open(os.path.join(DJANGO, "templates", "index.html"), encoding="utf-8").read()
     check("向导第 2 步与升级页都有安装码输入框",
           'id="wcode"' in _html and 'id="upcode"' in _html)
     _viewsrc = open(os.path.join(_code_root, "ovpn", "views.py"), encoding="utf-8").read()
@@ -1524,7 +1525,7 @@ def main():
           _viewsrc.count('"install_code"') >= 3, _viewsrc.count('"install_code"'))
 
     if POSIX:
-        import worker as wk
+        from system import worker as wk
         f1 = wk.take_sys_lock(2)
         try:
             try:
