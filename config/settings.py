@@ -28,6 +28,41 @@ env = environ.Env()
 # 优先级：进程环境变量 > 项目根目录 .env > 代码默认值
 environ.Env.read_env(PROJECT_ROOT / '.env')
 
+
+# ===================== 📂 运行时目录策略 =====================
+# RUNTIME_DIR 是「统一可写区」总开关：设置后，未单独指定的运行时目录自动落到它下面。
+# 本项目为平铺布局，默认运行时目录在 BASE_DIR/{data,staticfiles,media,logs}；
+# 单独设置 DATA_DIR / STATIC_ROOT / MEDIA_ROOT / LOG_DIR / CACHE_DIR 时以它为准。
+RUNTIME_DIR = env('RUNTIME_DIR', default='').strip()
+
+
+def _runtime_dir(var_name, subdir):
+    explicit = env(var_name, default='').strip()
+    if explicit:
+        return Path(explicit)
+    if RUNTIME_DIR:
+        return Path(RUNTIME_DIR) / subdir
+    # 平铺布局：运行时目录直接在项目根，不再多一层 django/
+    return BASE_DIR / subdir
+
+
+def _ensure_dir(path, label):
+    """仅 best-effort 预建目录，失败只告警，不中断 import。
+
+    settings 在 import 阶段执行，任何命令（check/collectstatic/test）都会经过这里。
+    「项目根 root:root 只读、只有运行时目录归服务用户可写」的部署模型下，
+    直接 mkdir 会抛 PermissionError 导致服务根本起不来。目录预建的实际责任
+    交给启动入口（install.sh / standalone:init）；这里失败只告警。
+    """
+    try:
+        Path(path).mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        warnings.warn(
+            f'无法创建 {label} 目录 {path}（{exc}）；请确认已由启动入口预建且可写。',
+            RuntimeWarning,
+        )
+
+
 # ===================== 🌟 运行模式开关 =====================
 SECRET_KEY = env('SECRET_KEY', default='')
 DEBUG = env.bool('DEBUG', default=False)
@@ -36,6 +71,16 @@ STANDALONE = env.bool('STANDALONE', default=False)
 IN_DOCKER = os.path.exists('/.dockerenv') and not STANDALONE
 # HTTPS 与 DEBUG 解耦：裸机内网 HTTP 时显式写 USE_HTTPS=false
 USE_HTTPS = env.bool('USE_HTTPS', default=not DEBUG)
+# 裸机默认按无 TLS 处理：直接调用 manage.py 时也生效，避免复用 Docker .env
+# 导致 Secure Cookie / CSRF origin 在 HTTP 下失效。前置了 TLS 终止时显式开启。
+STANDALONE_USE_HTTPS = env.bool('STANDALONE_USE_HTTPS', default=False)
+if STANDALONE and USE_HTTPS and not STANDALONE_USE_HTTPS:
+    USE_HTTPS = False
+    warnings.warn(
+        'STANDALONE=True 且未设置 STANDALONE_USE_HTTPS=true，已按 HTTP 处理；'
+        '若前面有 TLS 终止请显式开启该开关。',
+        RuntimeWarning,
+    )
 PROJECT_NAME = env('PROJECT_NAME', default='openvpn-web')
 
 
@@ -71,6 +116,11 @@ IPWARE_PROXY_COUNT = 0
 AXES_IPWARE_META_PRECEDENCE_ORDER = list(IPWARE_HEADER_ORDER)
 
 AUTH_USER_MODEL = 'accounts.User'
+# 模板只有 admin，没有 Django 默认的 accounts/profile 页面。
+# 不设置 LOGIN_REDIRECT_URL 会导致登录成功后跳到 /accounts/profile/ 404。
+LOGIN_URL = '/admin/login/'
+LOGIN_REDIRECT_URL = '/admin/'
+LOGOUT_REDIRECT_URL = '/admin/login/'
 
 
 # ===================== 📦 应用与中间件 =====================
@@ -146,8 +196,8 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # ===================== 🗄️ 数据库：SQLite(WAL) / PostgreSQL =====================
 if STANDALONE:
-    DATA_DIR = Path(env('DATA_DIR', default=str(BASE_DIR / 'data')))
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    DATA_DIR = _runtime_dir('DATA_DIR', 'data')
+    _ensure_dir(DATA_DIR, 'DATA_DIR')
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
@@ -185,8 +235,8 @@ else:
 if STANDALONE:
     STANDALONE_CACHE = env('STANDALONE_CACHE', default='locmem').strip().lower()
     if STANDALONE_CACHE == 'file':
-        CACHE_DIR = Path(env('CACHE_DIR', default=str(BASE_DIR / 'data' / 'cache')))
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        CACHE_DIR = _runtime_dir('CACHE_DIR', 'data/cache')
+        _ensure_dir(CACHE_DIR, 'CACHE_DIR')
         CACHES = {
             'default': {
                 'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
@@ -245,9 +295,13 @@ AUTHENTICATION_BACKENDS = [
     'axes.backends.AxesStandaloneBackend',
     'django.contrib.auth.backends.ModelBackend',
 ]
-AXES_FAILURE_LIMIT = 5
-# 与旧版「失败 5 次锁 10 分钟」一致
-AXES_COOLOFF_TIME = timedelta(minutes=10)
+# 锁定阈值与冷却时间可环境变量化：本项目默认 5 次 / 10 分钟（比底座 60 分钟短，
+# 与旧 Flask 版「失败 5 次锁 10 分钟」保持一致）。
+AXES_FAILURE_LIMIT = env.int('AXES_FAILURE_LIMIT', default=5)
+AXES_COOLOFF_MINUTES = env.int('AXES_COOLOFF_MINUTES', default=10)
+if AXES_COOLOFF_MINUTES <= 0:
+    raise ImproperlyConfigured('AXES_COOLOFF_MINUTES 必须为正整数')
+AXES_COOLOFF_TIME = timedelta(minutes=AXES_COOLOFF_MINUTES)
 AXES_LOCKOUT_PARAMETERS = [['ip_address', 'username']]
 AXES_RESET_ON_SUCCESS = True
 AXES_ENABLE_ADMIN = True
@@ -263,10 +317,11 @@ IMPORT_EXPORT_SKIP_ADMIN_CONFIRM = False
 # ===================== 📁 静态 / 媒体 / 上传 =====================
 # 允许 compose 通过环境变量统一覆盖路径；SimpleUI 用默认 StaticFilesStorage，
 # 不用 ManifestStaticFilesStorage，避免离线包个别 .map 文件缺失报错。
-STATIC_ROOT = Path(env('STATIC_ROOT', default=str(BASE_DIR / 'staticfiles')))
-MEDIA_ROOT = Path(env('MEDIA_ROOT', default=str(BASE_DIR / 'media')))
+STATIC_ROOT = _runtime_dir('STATIC_ROOT', 'staticfiles')
+MEDIA_ROOT = _runtime_dir('MEDIA_ROOT', 'media')
 # 项目自带的公共静态资源（例如 Logo）放这里，collectstatic 后由
 # Docker(Nginx) 与裸机(WhiteNoise) 两种模式的 /static/ 统一提供。
+# 这是源码内的只读输入目录，不随 RUNTIME_DIR 重定向。
 STATICFILES_DIRS = [BASE_DIR / 'static']
 STATIC_URL = '/static/'
 MEDIA_URL = '/media/'
@@ -274,10 +329,10 @@ STORAGES = {
     'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
     'staticfiles': {'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage'},
 }
-# static/ 也显式建目录：即便模板使用者删掉 static/img/.gitkeep，
-# 新克隆首次运行也不会触发 staticfiles.W004
+# best-effort 预建（失败只告警，真正预建交给启动入口）。
+# static/ 也包含在内：即便使用者删掉 static/img/.gitkeep，首次运行也不会触发 staticfiles.W004。
 for _p in (STATIC_ROOT, MEDIA_ROOT, BASE_DIR / 'static'):
-    _p.mkdir(parents=True, exist_ok=True)
+    _ensure_dir(_p, str(_p))
 
 DATA_UPLOAD_MAX_MEMORY_SIZE = 50 * 1024 * 1024
 FILE_UPLOAD_MAX_MEMORY_SIZE = 50 * 1024 * 1024
@@ -287,8 +342,8 @@ FILE_UPLOAD_MAX_MEMORY_SIZE = 50 * 1024 * 1024
 # Docker：只打 stdout/stderr，由 compose 的 json-file 轮转，避免 7 个进程
 #         同时切割同一个 TimedRotatingFileHandler 造成丢日志/FileNotFoundError。
 # 裸机  ：单进程 Waitress，保留按天轮转文件便于本地排查。
-LOG_DIR = Path(env('LOG_DIR', default=str(BASE_DIR / 'logs')))
-LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_DIR = _runtime_dir('LOG_DIR', 'logs')
+_ensure_dir(LOG_DIR, 'LOG_DIR')
 LOG_LEVEL = 'DEBUG' if DEBUG else 'INFO'
 LOG_FILE_LEVEL = 'INFO' if DEBUG else 'WARNING'
 LOG_RETENTION_DAYS = env.int('LOG_RETENTION_DAYS', default=90)

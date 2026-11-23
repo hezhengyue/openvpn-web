@@ -32,7 +32,7 @@ enter_local_env() {
 # 🚀 开发模式：Docker 起 db/redis，本地 .venv 跑 Django + Celery 热重载
 # =============================================================================
 run_local_dev() {
-    prepare_env
+    prepare_docker_env
 
     log_info "启动开发基础设施"
     compose_cmd dev up -d
@@ -210,6 +210,8 @@ install_standalone() {
 
 init_standalone() {
     install_standalone
+    # settings.py import 阶段已改为 best-effort 建目录，真正预建由这里承担
+    ensure_runtime_dirs
     log_info "初始化 SQLite / 静态文件 / 管理员"
     MANAGE collectstatic --noinput
     run_migrations

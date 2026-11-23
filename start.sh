@@ -22,7 +22,8 @@ case "${1:-help}" in
     # =========================================================
 
     up|start)
-        prepare_env
+        prepare_docker_env
+        require_compose
         ensure_cert
 
         log_info "启动生产环境"
@@ -31,7 +32,8 @@ case "${1:-help}" in
         ;;
 
     init|setup)
-        prepare_env
+        prepare_docker_env
+        require_compose
         ensure_cert
 
         log_info "初始化生产环境"
@@ -52,7 +54,8 @@ case "${1:-help}" in
         ;;
 
     update)
-        prepare_env
+        prepare_docker_env
+        require_compose
         ensure_cert
 
         log_info "更新生产环境"
@@ -79,7 +82,7 @@ case "${1:-help}" in
         ;;
 
     async:up)
-        prepare_env
+        prepare_docker_env
         require_compose
         $COMPOSE --profile async up -d $SERVICES_ASYNC
         ;;
@@ -99,12 +102,14 @@ case "${1:-help}" in
         ;;
 
     logs)
+        require_compose
         [[ -n "$2" ]] \
             && $COMPOSE logs -f "$2" \
             || $COMPOSE logs -f $SERVICES_FULL
         ;;
 
     exec)
+        require_compose
         container="${2:-web}"
         shell="${3:-bash}"
 
@@ -120,7 +125,7 @@ case "${1:-help}" in
         ;;
 
     dev:up)
-        prepare_env
+        prepare_docker_env
         compose_cmd dev up -d
         ;;
 
@@ -139,6 +144,7 @@ case "${1:-help}" in
         ;;
 
     dev:sync)
+        prepare_docker_env
         enter_local_env
         run_migrations
         ;;

@@ -44,7 +44,7 @@ Docker 模式:
 开发模式（Docker 基础设施 + 本地 .venv）:
   dev / dev:up / dev:down / dev:logs / dev:sync
 
-裸机便携模式:
+裸机便携模式（命令强制 STANDALONE=True / USE_HTTPS=false，TLS 终止时设 STANDALONE_USE_HTTPS=true）:
   standalone:install   安装 requirements-standalone.txt（检测到 wheelhouse 自动离线安装）
   standalone:init      安装依赖 + 迁移 + collectstatic + 管理员
   standalone:up        Waitress 启动（默认 0.0.0.0:8800）
