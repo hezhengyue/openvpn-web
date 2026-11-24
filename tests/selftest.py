@@ -119,8 +119,11 @@ def main():
     check("默认 VPN 网段", core.cfg()["vpn_cidr"] == "10.8.0.0/24")
     check("无 NAT 溯源默认关闭（默认 NAT 模式）", core.cfg()["nat_mode"] == "nat")
     check("默认隧道协议 TCP", core.cfg()["proto"] == "tcp")
-    check("默认 tun-mtu 1400", core.cfg()["tun_mtu"] == 1400)
-    check("默认 mssfix 1360（大包超时修复）", core.cfg()["mssfix"] == 1360)
+    check("默认 tun-mtu 1500（回归 OpenVPN 默认）", core.cfg()["tun_mtu"] == 1500)
+    check("默认 mssfix 0（极简，不钳制）", core.cfg()["mssfix"] == 0)
+    check("默认 data-ciphers 为 AEAD 三件套",
+          core.cfg()["data_ciphers"] == "AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305")
+    check("默认关闭 tls-crypt（极简客户端不内嵌密钥）", core.cfg()["tls_crypt"] is False)
     check("默认不再有内网网段概念", core.cfg()["lan_nets"] == [])
     # 全新安装回归：setup.py 先用 SCHEMA 裸建表，再 migrate --fake-initial。
     # SCHEMA 里每条 CREATE INDEX 引用的表都必须存在（否则 init_db 抛 no such table、
@@ -145,8 +148,9 @@ def main():
     ovpn = open(os.path.join(core.DATA, "company.ovpn")).read()
     rules = open(os.path.join(core.STATE, "rules.sh")).read()
     for k in ("username-as-common-name", "verify-client-cert none", "ccd-exclusive",
-              "auth-user-pass-verify", "tls-crypt"):
+              "auth-user-pass-verify"):
         check("server.conf 含 " + k, k in conf)
+    check("server.conf 默认不写 tls-crypt（极简）", "tls-crypt" not in conf)
     # 地址池改成可选：默认不写 ifconfig-pool，也不写 max-clients
     check("默认不写 ifconfig-pool（地址全由 ccd 固定下发）", "ifconfig-pool" not in conf)
     check("server.conf 注明未启用地址池", "未启用动态地址池" in conf)
@@ -161,48 +165,45 @@ def main():
     # "ifconfig-push <ip> <掩码>"，Windows 会 fatal（掩码被当成对端 IP）
     check("server.conf 写 topology subnet", "\ntopology subnet\n" in conf)
     check("server.conf 显式推送 topology subnet", 'push "topology subnet"' in conf)
-    check("company.ovpn 写 topology subnet", "\ntopology subnet\n" in ovpn)
-    check("server.conf 钳制 TCP MSS（mssfix 1360）", "\nmssfix 1360\n" in conf)
-    check("company.ovpn 同步钳制 TCP MSS", "\nmssfix 1360\n" in ovpn)
-    # link-mtu：默认不写（让 OpenVPN 推算）；排障时两端写死同一个值以消除
-    # 「客户端 1600 / 服务端 1768」的帧长口径不一致。
-    check("默认不写 link-mtu", "link-mtu " not in conf and "link-mtu " not in ovpn)
+    # 极简客户端：拓扑由服务端 push，MTU/MSS/cipher/压缩/DCO/tls-crypt 全部不写
+    check("极简 ovpn 不写 topology（由服务端 push）", "\ntopology subnet\n" not in ovpn)
+    check("极简 ovpn 不写 mssfix", "mssfix" not in ovpn)
+    check("server.conf 默认不写 mssfix", "mssfix" not in conf)
+    check("server.conf 默认不写 tun-mtu / link-mtu",
+          "tun-mtu " not in conf and "link-mtu " not in conf)
+    check("极简 ovpn 不写 tun-mtu / link-mtu",
+          "tun-mtu " not in ovpn and "link-mtu " not in ovpn)
+    # link_mtu 是服务端排障开关：显式设置只写 server.conf，绝不写进极简 ovpn
     _lm = dict(core.cfg(), link_mtu=1500)
-    check("显式 link-mtu 同时写入 server.conf 与 ovpn",
-          "\nlink-mtu 1500\n" in core.render_server_conf(_lm)
-          and "\nlink-mtu 1500\n" in core.render_ovpn(_lm))
-    # OpenVPN 不允许 --tun-mtu 与 --link-mtu 同时出现，否则启动直接 Options error
-    check("设了 link-mtu 就不再写 tun-mtu（OpenVPN 二选一）",
-          "tun-mtu " not in core.render_server_conf(_lm)
-          and "tun-mtu " not in core.render_ovpn(_lm))
-    check("link-mtu 纳入配置指纹", core.config_fingerprint(_lm) != core.config_fingerprint(core.cfg()))
-    # DCO 会绕过用户态 mssfix，且 Windows DCO 驱动大流量下会 reset 连接冲垮隧道：
-    # 两端都必须显式 disable-dco（见 2.4.1 修复），否则 RDP 仍会超时。
+    check("显式 link-mtu 只写 server.conf", "\nlink-mtu 1500\n" in core.render_server_conf(_lm))
+    check("显式 link-mtu 不污染极简 ovpn", "link-mtu " not in core.render_ovpn(_lm))
+    check("link-mtu 属于服务端内部调整，不改指纹",
+          core.config_fingerprint(_lm) == core.config_fingerprint(core.cfg()))
+    # DCO 只留服务端；客户端 ovpn 不写这个 2.6 专属指令，2.4 才不会报未知选项
     check("server.conf 禁用 DCO", "\ndisable-dco\n" in conf)
-    check("company.ovpn 禁用 DCO（修复 RDP 隧道崩溃）", "\ndisable-dco\n" in ovpn)
-    # tls-crypt 开关：默认开（有 tls-crypt / <tls-crypt>）；关掉后两端都不写。
-    # 用于对齐 iKuai 朴素实现排查 RDP/封装错位问题，指纹必须随之变化。
-    check("默认启用 tls-crypt", "tls-crypt " in conf and "<tls-crypt>" in ovpn)
-    _no_tls = dict(core.cfg(), tls_crypt=False)
-    check("关闭 tls-crypt 后 server.conf 不写 tls-crypt", "tls-crypt " not in core.render_server_conf(_no_tls))
-    check("关闭 tls-crypt 后 ovpn 无 <tls-crypt> 块", "<tls-crypt>" not in core.render_ovpn(_no_tls))
-    check("tls-crypt 开关纳入配置指纹", core.config_fingerprint(_no_tls) != core.config_fingerprint(core.cfg()))
-    # 非 AEAD（AES-256-CFB）须两端显式 cipher，才能复现 iKuai 的可用组合
+    check("极简 ovpn 不含 disable-dco（2.4 兼容）", "disable-dco" not in ovpn)
+    # tls-crypt 默认关；开时服务端写 tls-crypt，但极简 ovpn 永远不内嵌
+    check("默认关闭 tls-crypt", "tls-crypt " not in conf and "<tls-crypt>" not in ovpn)
+    _yes_tls = dict(core.cfg(), tls_crypt=True)
+    check("开启 tls-crypt 服务端写 tls-crypt", "tls-crypt " in core.render_server_conf(_yes_tls))
+    check("极简 ovpn 始终无 <tls-crypt> 块", "<tls-crypt>" not in core.render_ovpn(_yes_tls))
+    check("tls-crypt 开关不改极简客户端指纹",
+          core.config_fingerprint(_yes_tls) == core.config_fingerprint(core.cfg()))
+    # 服务端 AEAD 协商 + fallback；客户端一份 ovpn 通吃，不含任何 cipher 相关行
+    check("server.conf 写 AEAD data-ciphers",
+          "\ndata-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305\n" in conf)
+    check("server.conf fallback 为主算法 AES-256-GCM",
+          "\ndata-ciphers-fallback AES-256-GCM\n" in conf)
+    check("极简 ovpn 不写 data-ciphers/cipher/fallback",
+          "data-ciphers " not in ovpn and "\ncipher " not in ovpn)
     _cfb = dict(core.cfg(), data_ciphers="AES-256-CFB", tls_crypt=False, compress="lzo")
     _cfb_conf = core.render_server_conf(_cfb)
-    _cfb_ovpn = core.render_ovpn(_cfb)
-    check("非 AEAD 时 server.conf 写 cipher AES-256-CFB", "\ncipher AES-256-CFB\n" in _cfb_conf)
-    check("非 AEAD 时 ovpn 写 cipher AES-256-CFB", "\ncipher AES-256-CFB\n" in _cfb_ovpn)
-    # OpenVPN 2.6 忽略旧式 --cipher 做 NCP 协商：若客户端不把 CFB 加进
-    # data-ciphers，服务端（只收 CFB）会回 AUTH_FAILED/no shared cipher，
-    # GUI 误弹「错误的凭据」。两端 NCP 列表必须有交集，fallback 也要同步。
-    check("非 AEAD 时 ovpn 显式写 data-ciphers（2.6 NCP）", "\ndata-ciphers AES-256-CFB\n" in _cfb_ovpn)
-    check("非 AEAD 时 ovpn 的 fallback 与主 cipher 一致",
-          "\ndata-ciphers-fallback AES-256-CFB\n" in _cfb_ovpn)
-    check("AEAD 默认场景不往 ovpn 写 data-ciphers/cipher",
-          "data-ciphers " not in ovpn and "\ncipher " not in ovpn)
-    check("非 AEAD 时两端开启 LZO", "comp-lzo yes" in _cfb_conf and "comp-lzo yes" in _cfb_ovpn)
-    check("非 AEAD 场景不写 tls-crypt", "tls-crypt " not in _cfb_conf and "<tls-crypt>" not in _cfb_ovpn)
+    check("非 AEAD 时服务端仍写 cipher（老场景兼容）",
+          "\ncipher AES-256-CFB\n" in _cfb_conf)
+    check("极简 ovpn 与服务端 cipher 选择无关（改 cipher 不用重发）",
+          core.render_ovpn(_cfb) == ovpn)
+    check("改 cipher 不触发客户端重发",
+          core.config_fingerprint(_cfb) == core.config_fingerprint(core.cfg()))
     # VPN 网段必须自动出现在推送路由里，且只出现一次（不能走两处各写一遍）
     vpn_net = core.vpn_network(core.cfg())
     vpn_gw = str(vpn_net.network_address + 1)
@@ -232,8 +233,14 @@ def main():
     for k in ("redirect-gateway", "duplicate-cn", "client-to-client", "MASQUERADE"):
         check("server.conf 不含 " + k, k not in conf)
     check("ovpn 内联 CA", "<ca>" in ovpn and "BEGIN CERTIFICATE" in ovpn)
-    check("ovpn 内联 tls-crypt", "<tls-crypt>" in ovpn)
+    check("极简 ovpn 不含 tls-crypt 块", "<tls-crypt>" not in ovpn)
+    check("极简 ovpn 不含 comp-lzo / compress", "comp-lzo" not in ovpn and "compress " not in ovpn)
     check("ovpn 账号密码登录", "auth-user-pass" in ovpn)
+    check("极简 ovpn 仅含连接身份类指令",
+          all(ln.startswith(("#", "client", "dev ", "proto ", "remote ", "resolv-retry",
+                             "nobind", "persist-", "remote-cert-tls", "auth-user-pass",
+                             "verb ", "<ca>", "</ca>", "-----", ""))
+              for ln in ovpn.strip().splitlines()), ovpn)
     check("ovpn 不含个人凭据", "ifconfig-push" not in ovpn and "BEGIN PRIVATE KEY" not in ovpn)
     check("自建 NAT 链接管（带 comment 标记）", "OVPNWEB_NAT" in rules and "-t nat -F OVPNWEB_NAT" in rules)
     check("默认 NAT 模式做地址转换", "-j SNAT --to-source" in rules and "-j MASQUERADE" in rules)
@@ -659,11 +666,13 @@ def main():
     section("配置指纹与更新闸门")
     fp1 = core.config_fingerprint(core.cfg())
     check("改端口后指纹变化", core.config_fingerprint(dict(core.cfg(), port=1195)) != fp1)
-    check("改 mssfix 会触发客户端重发",
-          core.config_fingerprint(dict(core.cfg(), mssfix=1300)) != fp1)
+    check("改 mssfix 不触发客户端重发（服务端内部调整）",
+          core.config_fingerprint(dict(core.cfg(), mssfix=1300)) == fp1)
     check("mssfix=0 时不写 mssfix 指令",
           "mssfix" not in core.render_server_conf(dict(core.cfg(), mssfix=0))
           and "mssfix" not in core.render_ovpn(dict(core.cfg(), mssfix=0)))
+    check("改压缩方式不触发客户端重发（极简 ovpn 不含压缩）",
+          core.config_fingerprint(dict(core.cfg(), compress="lzo")) == fp1)
     _cfg = dict(core.cfg(), public_addr="vpn.example.com")
     check("未设对外端口时客户端用服务端口", "remote vpn.example.com 1194" in core.render_ovpn(_cfg))
     _mapped = dict(_cfg, public_port=11940)
@@ -697,8 +706,8 @@ def main():
     section("Web API（安装向导 / 设置 / 日志 / 自检）")
     params = {"public_addr": "vpn.example.com", "port": 1194, "proto": "tcp",
               "vpn_cidr": "10.8.0.0/24", "extra_routes": ["10.10.0.0/16"],
-              "dns": ["10.10.0.53"], "ntp": ["10.10.0.123"], "tun_mtu": 1400, "mssfix": 1360,
-              "compress": "off", "data_ciphers": "AES-256-GCM:CHACHA20-POLY1305",
+              "dns": ["10.10.0.53"], "ntp": ["10.10.0.123"], "tun_mtu": 1500, "mssfix": 0,
+              "compress": "off", "data_ciphers": "AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305",
               "tls_min": "1.2", "pool_enabled": False,
               "pool_start": "10.8.0.2", "pool_end": "10.8.0.9"}
     check("向导参数保存", P("/api/wizard/params", params).get_json()["ok"])

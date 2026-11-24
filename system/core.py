@@ -57,7 +57,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "2.4.3"
+WEB_VERSION = "2.5.0"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -79,24 +79,23 @@ DEFAULT_CFG = {
     "extra_routes": [],
     "dns": [],
     "ntp": [],
-    "tun_mtu": 1400,                # 公网 / PPPoE / 跨境线路的稳妥值，见 ui 提示
-    # TCP MSS 钳制：tun-mtu 1400 时，远程桌面等大包如果不钳制，封装后链路帧会超过
-    # 物理 MTU 1500，被分片/丢弃，表现就是「能 ping 通但 RDP 一直转圈超时」。
-    # 1360 = 1400 - 40（IPv4 + TCP 头），给 OpenVPN 封装留出余量；0 = 不下发该指令。
-    "mssfix": 1360,
-    # 显式链路 MTU（0 = 不写，让 OpenVPN 自己推算）。排障用：2.6 客户端与服务端
-    # 各自推算出的 link-mtu 可能不一致（实测客户端 1600 / 服务端按 1768 收包），
-    # RDP 大流量下触发 "Bad encapsulated packet length"。两端写死同一个值即可对齐。
+    # MTU/MSS 回归 OpenVPN 默认（1500，不钳制）：早期为排查「RDP 大流量隧道重置」
+    # 加过 tun-mtu 1400 / mssfix 1360，后来证实根因是 VPN 服务器与目标电脑同机的
+    # 流量回环，换独立服务器即恢复。极简客户端不再写这些指令，服务端也统一用默认，
+    # 两端口径一致，避免 IV_MTU 错位（Bad encapsulated packet length）。
+    "tun_mtu": 1500,
+    "mssfix": 0,                    # 0 = 不钳制 TCP MSS（极简默认）
+    # 显式链路 MTU（0 = 不写，让 OpenVPN 自己推算）。仅排障时按需在服务端单独下发；
+    # 极简客户端永远不写，保证一份 ovpn 通吃 2.4~2.6。
     "link_mtu": 0,
-    "compress": "off",              # off / lz4-v2 / lzo（改这个必须重新分发 company.ovpn）
+    "compress": "off",              # 极简默认：不压缩（压缩有 VORACLE 风险且 2.6 多一个 allow-compression 坑）
     # data-ciphers 是「协商顺序表」不是「同时开多个」：每条连接最终只用协商出来的那一个。
-    # 默认两个足够覆盖 AES-NI 服务器与无 AES 加速的 ARM 手机端，少一个是少一次协商分支。
-    "data_ciphers": "AES-256-GCM:CHACHA20-POLY1305",
-    # tls-crypt 在数据通道外包一层 HMAC；个别链路/驱动组合下会出现
-    # "Bad encapsulated packet length from peer" 的封装错位。关掉后退回
-    # 纯证书 + 用户密码认证（与 iKuai 等朴素实现一致）。默认保持开启，
-    # 只有排障时显式设为 False。
-    "tls_crypt": True,
+    # 三个 AEAD 覆盖 AES-NI 服务器、无 AES 加速的 ARM 手机端与老客户端；2.4 起支持 NCP。
+    "data_ciphers": "AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305",
+    # tls-crypt 是控制通道的静态密钥混淆层（抗端口扫描/抗握手 DoS），代价是客户端
+    # ovpn 必须内嵌一段 <tls-crypt> 块、将来换 key 要全员重发。极简方案默认关闭，
+    # 认证仍走服务端证书 + 账号密码，未授权连接照样被拒。
+    "tls_crypt": False,
     "tls_min": "1.2",
     # 动态地址池（ifconfig-pool）：默认关闭。
     # 本系统每个账号都由 ccd 的 ifconfig-push 固定下发 IP，池子是给「没台账的临时连接」
@@ -2373,36 +2372,27 @@ def render_server_conf(c):
         "key %s" % os.path.join(DATA, "server.key"),
         "dh none",
     ]
-    if c.get("tls_crypt", True):
+    if c.get("tls_crypt", False):
         L.append("tls-crypt %s" % os.path.join(DATA, "ta.key"))
     _dc = c["data_ciphers"]
     _first_dc = _dc.split(":")[0].strip()
     _non_aead = bool(_first_dc) and not any(x in _first_dc.upper() for x in ("GCM", "CHACHA", "AEAD"))
     L += [
         "data-ciphers %s" % _dc,
-        # 非 AEAD（如 AES-256-CFB）不参与 NCP 协商，必须靠老式 cipher 固定；
-        # fallback 同步成同一算法，否则对端协商不过时会落到不同的 CBC。
-        ("cipher %s" % _first_dc) if _non_aead else "data-ciphers-fallback AES-256-CBC",
+        # AEAD 场景：fallback 只给「不报 NCP 的老客户端」兜底，写主算法本身。
+        # 非 AEAD（AES-256-CFB）不参与 NCP，靠老式 cipher 固定，两端需重发 ovpn。
+        ("cipher %s" % _first_dc) if _non_aead else ("data-ciphers-fallback %s" % _first_dc),
         "tls-version-min %s" % c["tls_min"],
     ]
+    # 极简方案：MTU / MSS 一律回归 OpenVPN 默认，两端都不写。
+    # 根因已确认是「服务器与目标电脑同机」的回环，不是 MTU；写自定义值反而带来
+    # 客户端不认、两端口径不一致（Bad encapsulated packet length）的新问题。
+    # 只有运维显式设置 link_mtu 时才在服务端单独下发（排障用，客户端 ovpn 不变）。
     if int(c.get("link_mtu", 0) or 0) > 0:
-        # 两端显式写死同一链路 MTU，避免 2.6 客户端/服务端各自推算不一致
-        # （实测 1600 vs 1768，RDP 大流量触发 Bad encapsulated packet length）。
-        # OpenVPN 不允许同时出现 --tun-mtu 与 --link-mtu，只能二选一。
         L.append("link-mtu %s" % int(c["link_mtu"]))
-    else:
-        L.append("tun-mtu %s" % c["tun_mtu"])
-    L += [
-        # DCO（Data Channel Offload）把数据通道下沉到内核，会绕过用户态的
-        # mssfix/TCP MSS 钳制；一旦客户端 DCO 驱动有 bug（ovpn-dco-win 1.3.0
-        # 及更早版本存在已知问题），TCP 大流量会触发连接 reset、隧道反复重连。
-        # 强制走用户态通道，保证 mssfix 生效、规避 DCO 驱动差异。
-        "disable-dco",
-    ]
-    if int(c.get("mssfix", 1360) or 0) > 0:
-        # 钳制 TCP MSS，避免 tun-mtu + OpenVPN 封装后超过物理 MTU 1500：
-        # 大包（远程桌面 / SCP）被分片丢弃时，小包 ping 正常但 TCP 连接一直超时。
-        L.append("mssfix %s" % int(c["mssfix"]))
+    # DCO 只留服务端：--disable-dco 是本地选项、不会 push 给客户端，服务端关掉
+    # 即可让数据回落用户态；客户端 ovpn 保持极简（2.4 客户端不认这个指令）。
+    L.append("disable-dco")
     L += [
         "keepalive 10 120",
         "persist-key",
@@ -2427,14 +2417,24 @@ def render_server_conf(c):
 
 
 def render_ovpn(c):
+    """极简客户端配置：一份 ovpn 通吃 OpenVPN 2.4~2.6，服务端改加密/压缩/路由都不用重发。
+
+    只写「连接身份」这四类非写不可的东西：协议、服务器地址+端口、CA、认证方式。
+    其余全部由服务端下发或协商：
+      - 加密算法  -> NCP 自动协商（data-ciphers），客户端不写 cipher
+      - 压缩      -> 服务端不推，客户端默认 allow-compression no
+      - 拓扑/MTU  -> topology subnet 由服务端 push（老客户端也支持），MTU 用默认 1500
+      - tls-crypt -> 默认关闭，客户端无需内嵌 ta.key
+      - DCO       -> 只留服务端，客户端不写这个 2.6 专属指令（2.4 会不认）
+
+    这样服务端以后调 cipher / 压缩 / MTU / 推送路由都不需要重新分发这个文件。
+    """
     pki = read_pki()
     L = [
         "# OpenVPN Web 一体化管理系统 —— 全员共用这一个文件，不含任何个人凭据",
+        "# 极简通用配置：兼容 OpenVPN 2.4~2.6；加密由服务端协商、路由由服务端下发",
         "client",
         "dev tun",
-        # 服务端是 subnet 拓扑（ccd 下发的 ifconfig-push 是 IP + 掩码），
-        # 客户端必须一致，否则 Windows 会按点对点解析而启动失败。
-        "topology subnet",
         "proto %s" % _proto_name(c, "client"),
         "remote %s %s" % (c["public_addr"], int(c.get("public_port") or c["port"])),
         "resolv-retry infinite",
@@ -2442,64 +2442,22 @@ def render_ovpn(c):
         "persist-key",
         "persist-tun",
         "remote-cert-tls server",
-        "tls-version-min %s" % c["tls_min"],
-    ]
-    if int(c.get("link_mtu", 0) or 0) > 0:
-        # 必须与服务端完全一致：否则两端按各自的推算值封装，帧长错位。
-        # 同样二选一：OpenVPN 拒绝同时出现 --tun-mtu 和 --link-mtu。
-        L.append("link-mtu %s" % int(c["link_mtu"]))
-    else:
-        L.append("tun-mtu %s" % c["tun_mtu"])
-    L += [
-        # 关键：Windows 客户端 2.6 默认启用 DCO，数据通道下沉内核会绕过用户态
-        # mssfix，且 ovpn-dco-win 1.3.0 及更早版本有已知连接稳定性问题。
-        # 实测 RDP 大流量会触发 "Bad encapsulated packet length" 并让隧道反复重连。
-        # 强制禁用 DCO，退回用户态通道，mssfix 才能生效。
-        "disable-dco",
-    ]
-    if int(c.get("mssfix", 1360) or 0) > 0:
-        # 与服务端一致：客户端也要钳制出方向的 TCP MSS，
-        # 否则 Windows 发出的 1460 字节段进隧道后仍会超 MTU。
-        L.append("mssfix %s" % int(c["mssfix"]))
-    # NCP 只协商 AEAD（GCM/CHACHA20）。若主 cipher 是非 AEAD（如对齐 iKuai
-    # 用的 AES-256-CFB），客户端必须同时写两项：
-    #   data-ciphers           —— 加入 2.6 的 NCP 协商列表，否则客户端只上报
-    #                              默认 AEAD 列表，服务端只收 CFB 时直接
-    #                              AUTH_FAILED "no shared cipher"（GUI 会误报
-    #                              「错误的凭据」并反复弹密码框，密码其实是对的）；
-    #   cipher / fallback     —— 兼容 2.4 老客户端及 NCP 不可用时的回退。
-    # AEAD 场景保持不写，继续走默认的 NCP。
-    _first_cipher = (c.get("data_ciphers") or "").split(":")[0].strip()
-    if _first_cipher and not any(x in _first_cipher.upper() for x in ("GCM", "CHACHA", "AEAD")):
-        L += [
-            "data-ciphers %s" % (c.get("data_ciphers") or "").strip(),
-            "data-ciphers-fallback %s" % _first_cipher,
-            "cipher %s" % _first_cipher,
-        ]
-    L += [
-        "verb 3",
         "auth-user-pass",
-    ]
-    if c.get("compress", "off") == "lz4-v2":
-        L.append("compress lz4-v2")
-    elif c.get("compress", "off") == "lzo":
-        L.append("comp-lzo yes")
-    L += [
+        "verb 3",
         "<ca>",
         pki["ca"].strip(),
         "</ca>",
     ]
-    if c.get("tls_crypt", True):
-        L += [
-            "<tls-crypt>",
-            pki["ta"].strip(),
-            "</tls-crypt>",
-        ]
     return "\n".join(L) + "\n"
 
 
 def config_fingerprint(c):
-    """只换服务端二进制时不变；动了 CA / ta.key / 端口 / 加密套件 / 实际推送路由才变"""
+    """只反映「写进极简 ovpn 的内容」：服务器地址/端口/协议、推送路由、CA。
+
+    极简客户端不写 cipher / 压缩 / MTU / tls-crypt / DCO，这些全部由服务端协商或
+    push，所以服务端改它们都不需要重新分发 ovpn（指纹保持不变，need_redistribute=False）。
+    这正是「服务端改配置不影响客户端」的落地口径。
+    """
     pki = read_pki()
     # 用「真正下发给客户端的路由集合」而不是原始输入：
     # 把内网网段挪进附加推送路由、或换了种写法但结果相同，都不该触发全员重发 ovpn
@@ -2508,25 +2466,9 @@ def config_fingerprint(c):
               for n in push_targets(c, include_vpn=False)]
     blob = json.dumps({
         "addr": c["public_addr"], "port": int(c.get("public_port") or c["port"]), "proto": c["proto"],
-        # VPN 网段不进指纹：ovpn 里没有它，客户端连上由服务端 ifconfig/push 下发，
-        # 换网段只需要账号地址跟着改，不需要全员重发 ovpn。
         "routes": routes,
-        "ciphers": c["data_ciphers"], "tls_min": c["tls_min"], "mtu": c["tun_mtu"],
-        # link_mtu 写进两端 ovpn/server.conf，改了必须让全员重发
-        "link_mtu": int(c.get("link_mtu", 0) or 0),
-        # tls-crypt 开/关会改变 ovpn 内容（有无 <tls-crypt> 块），必须纳入指纹
-        "tls_crypt": bool(c.get("tls_crypt", True)),
-        # mssfix 写进 ovpn，改了必须让全员重发客户端配置，否则新旧客户端行为不一致
-        "mssfix": int(c.get("mssfix", 1360) or 0),
-        # disable-dco 从 2.4.1 起写进 ovpn；老客户端没有它会在 RDP 大流量下冲垮隧道，
-        # 纳入指纹确保全员重发（用常量钉死，后续不再因升级本身反复变化）。
-        "dco_policy": "disabled",
-        # 2.4.2 起非 AEAD 客户端配置显式写 data-ciphers/fallback；老 ovpn 会因
-        # 「no shared cipher」连不上（GUI 误报密码错），必须纳入指纹强制重发。
-        "client_cipher_policy": "explicit",
-        "compress": c.get("compress", "off"),
         "ca": hashlib.sha256(pki["ca"].encode()).hexdigest(),
-        "ta": hashlib.sha256(pki["ta"].encode()).hexdigest(),
+        # ta.key 只在 tls-crypt 开启时才进 ovpn；极简版不内嵌它，换 key 不需要重发。
     }, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(blob.encode()).hexdigest()[:12]
 
