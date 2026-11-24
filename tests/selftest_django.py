@@ -55,11 +55,21 @@ class _Resp:
     def __init__(self, dj_resp):
         self._r = dj_resp
         self.status_code = dj_resp.status_code
-        # FileResponse 是流式的，没有 .content；拼起来模拟 Flask 的 .data
+        # FileResponse 是流式的，没有 .content；拼起来模拟 Flask 的 .data。
+        # 必须释放底层文件句柄：selftest 下载后紧接着 os.remove 同一个 tar.gz，
+        # Windows 上句柄没关会 WinError 32。只关 file_to_stream，不能调
+        # dj_resp.close()——那会触发 Django 的 request_finished 信号、
+        # close_old_connections() 顺手关掉线程里的 ORM 连接，后续并发写审计
+        # 会在已失效的连接上报 "attempt to write a readonly database"。
         if hasattr(dj_resp, "content"):
             self.data = dj_resp.content
         else:
-            self.data = b"".join(dj_resp.streaming_content)
+            try:
+                self.data = b"".join(dj_resp.streaming_content)
+            finally:
+                stream = getattr(dj_resp, "file_to_stream", None)
+                if stream is not None and hasattr(stream, "close"):
+                    stream.close()
         self.headers = dj_resp.headers
 
     def get_json(self):

@@ -441,3 +441,86 @@ class ImportIpHandoverTest(TestCase):
 
         self.assertEqual(VpnUser.objects.get(username='fresh').vpn_ip, '10.8.0.2')
         self.assertFalse(VpnUser.objects.filter(username='gone').exists())
+
+
+class ReviewFixRegressionTest(TestCase):
+    """钉死第二轮代码审查里新增/补齐的关键行为，防止后续改动悄悄回退。"""
+
+    def test_plain_http_and_forged_proxy_header_never_get_hsts(self):
+        from django.test import override_settings
+
+        # request.is_secure 是方法，漏括号会把 bound method 当真值，纯 HTTP
+        # 也下发一年 HSTS；也不能手工信任客户端伪造的 X-Forwarded-Proto。
+        with override_settings(SECURE_PROXY_SSL_HEADER=None):
+            resp = Client().get("/api/session")
+            self.assertNotIn("Strict-Transport-Security", resp)
+            forged = Client().get("/api/session", HTTP_X_FORWARDED_PROTO="https")
+            self.assertNotIn("Strict-Transport-Security", forged)
+
+    def test_rename_group_carries_group_grants(self):
+        core.set_meta("vpn_cidr", "10.8.0.0/24")
+        core.add_user("frank")
+        ag = core.add_asset_group("资产B", items=[("10.11.0.0/24", "tcp", "80")])
+        g = UserGroup.objects.create(name="旧名称", note="")
+        UserGroupMember.objects.create(group=g, username="frank")
+        core.add_grant("group", "旧名称", ag["id"])
+
+        core.update_user_group(g.id, name="新名称")
+
+        self.assertFalse(AclGrant.objects.filter(subject="旧名称").exists())
+        self.assertTrue(AclGrant.objects.filter(subject_type="group",
+                                                subject="新名称").exists())
+
+    def test_delete_user_clears_peer_grants(self):
+        core.set_meta("vpn_cidr", "10.8.0.0/24")
+        core.add_user("grace")
+        core.add_user("heidi")
+        core.add_peer_grant("grace", "heidi", proto="tcp", ports="22")
+
+        core.delete_user("grace")
+
+        self.assertFalse(PeerGrant.objects.filter(src_username="grace").exists())
+        self.assertFalse(PeerGrant.objects.filter(dst_username="grace").exists())
+
+    def test_expire_users_queues_pending_kick(self):
+        from datetime import date, timedelta
+
+        past = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+        core.set_meta("vpn_cidr", "10.8.0.0/24")
+        core.add_user("expired-one", expires_at=past)
+        core.take_expired_users()  # 清掉前面用例可能残留的待办
+
+        # 视图里的读台账操作会先于 60 秒节流扫描触发停用
+        core.list_users()
+        # 它留下的待踢名单不能丢，否则 ccd 残留且在线会话永远不断
+        self.assertIn("expired-one", core.take_expired_users())
+        self.assertEqual(core.take_expired_users(), [])
+
+    def test_reset_admin_disables_extra_superusers_in_place(self):
+        import os
+        from django.contrib.auth import get_user_model
+        from django.core.management import call_command
+
+        User = get_user_model()
+        primary = User.objects.create_superuser("oldadmin", "", "old-password")
+        extra = User.objects.create_superuser("secondboss", "", "second-password")
+
+        call_command("ovpn_cli", "reset-admin")
+
+        new_name = core.get_meta("admin_user")
+        primary.refresh_from_db()
+        extra.refresh_from_db()
+        self.assertEqual(primary.username, new_name)  # 原地改名，不是新建随机账号
+        self.assertTrue(primary.is_active)
+        self.assertFalse(extra.is_active)
+        self.assertFalse(extra.is_superuser)
+        self.assertEqual(User.objects.filter(is_superuser=True, is_active=True).count(), 1)
+        self.assertEqual(core.get_meta("admin_must_change"), 0)
+        try:
+            with open(os.path.join(core.DATA, "admin_password.txt"), encoding="utf-8") as f:
+                self.assertTrue(primary.check_password(f.readline().strip()))
+        except OSError:
+            pass  # 写救场文件失败不影响凭据本身
+
+    # 注：_restore_business_tables 的裸 SQL 夹具放在 system/tests/（特权层测试），
+    # 源码根契约禁止业务代码出现 cursor.execute，不能写在这里。

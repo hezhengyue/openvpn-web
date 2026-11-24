@@ -89,7 +89,9 @@ def _drop_token():
 
 def require_install_code(code):
     """校验一次性安装码，通过即作废该码。失败抛 RuntimeError（信息直接给到界面）。"""
-    hint = ("请在本机执行 sudo %s/install-code.sh 生成一次性安装码"
+    # 2.6 起安装码脚本随包放在 system/ 下；前端提示也是 sudo ./system/install-code.sh，
+    # 两边口径必须一致，否则照提示执行会直接 No such file or directory。
+    hint = ("请在本机执行 sudo %s/system/install-code.sh 生成一次性安装码"
             "（15 分钟内有效，只能用一次）" % ROOT)
     tok = _read_token()
     if tok is None:

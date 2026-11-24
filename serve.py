@@ -32,6 +32,16 @@ try:
 except ValueError:
     THREADS = 8
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
+# 先把 .env 读进进程环境，再做下面的 setdefault：django-environ 的优先级是
+# 进程环境变量 > .env > 代码默认，若先 setdefault("USE_HTTPS"/"HOSTS"/"SECRET_KEY")
+# 再让 settings 读 .env，用户写在 .env 里的域名/密钥会被这里的默认值占坑，
+# 典型后果是 .env 配了 HOSTS=vpn.example.com 却仍然 400 DisallowedHost。
+# read_env 默认 overwrite=False，systemd/命令行注入的环境变量依旧优先级最高。
+try:
+    import environ
+    environ.Env.read_env(os.path.join(ROOT, ".env"))
+except Exception as e:
+    print("[serve] 读取 .env 失败（继续用环境变量）: %s" % e)
 # 这是单机便携交付：强制裸机模式（SQLite + WhiteNoise + Waitress，零外部服务）。
 # 不读 .env 的 STANDALONE 开关——交付形态固定，避免误配成 Docker 模式连不上库。
 os.environ["STANDALONE"] = "True"
@@ -43,16 +53,27 @@ if os.environ.get("OVPN_WEB_HTTPS") == "1":
     os.environ["USE_HTTPS"] = "true"
     os.environ["TRUST_LOCAL_PROXY"] = "true"
 os.environ.setdefault("USE_HTTPS", "false")
-# 生产默认关 DEBUG；只有源码调试时显式设 OVPN_WEB_DEBUG=1 才打开
+# 生产默认关 DEBUG；只有源码调试时显式设 OVPN_WEB_DEBUG=1 才打开。
+# 这里同样用 setdefault，避免覆盖 .env 里显式配的 DEBUG。
 if os.environ.get("OVPN_WEB_DEBUG") == "1":
     os.environ["DEBUG"] = "true"
 else:
-    os.environ["DEBUG"] = "false"
+    os.environ.setdefault("DEBUG", "false")
 
 # SECRET_KEY：优先环境变量（.env / systemd 注入）；否则自动生成并持久化到 data/web.secret，
 # 保证「拷过去即用」——首次启动随机生成，之后重启沿用同一把，会话不会失效。
+# web.secret 必须与 system/core.py / settings.py 的可写区解析顺序一致，否则项目根
+# 只读、运维用 DATA_DIR/RUNTIME_DIR 重定向后，这里会往只读目录写而启动失败。
 if not os.environ.get("SECRET_KEY"):
-    secret_file = os.path.join(os.environ.get("OVPN_WEB_ROOT", ROOT), "data", "web.secret")
+    _data_dir = (os.environ.get("DATA_DIR") or "").strip()
+    if _data_dir:
+        _secret_dir = os.path.abspath(_data_dir)
+    else:
+        _runtime_dir = (os.environ.get("RUNTIME_DIR") or "").strip()
+        _secret_dir = (os.path.join(os.path.abspath(_runtime_dir), "data")
+                       if _runtime_dir
+                       else os.path.join(os.environ.get("OVPN_WEB_ROOT") or ROOT, "data"))
+    secret_file = os.path.join(_secret_dir, "web.secret")
     try:
         os.makedirs(os.path.dirname(secret_file), exist_ok=True)
         if os.path.exists(secret_file):

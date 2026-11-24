@@ -55,6 +55,9 @@ LOGIN_LOCK = threading.Lock()
 
 _PUBIP = {"ts": 0.0, "ip": "", "src": ""}
 _PUBIP_LOCK = threading.Lock()
+# 常态化维护：以前这些只在启动时跑一次，连续运行几个月不重启 JSONL 仍会膨胀。
+_MAINT_LAST = 0.0
+_MAINT_LOCK = threading.Lock()
 
 
 # --------------------------------------------------------------------------- 响应
@@ -172,13 +175,48 @@ def task_update(tid, **kw):
     core.task_update(tid, **kw)
 
 
-def sudo_worker(tid, action, params=None, timeout=300):
-    """特权动作：Web 只写任务文件，worker 从固定目录读，命令行不传自由参数。"""
-    core.ensure_dirs()
+def periodic_maintenance(force=False):
+    """每小时一次的常态化清理，挂在所有特权动作前，彻底免重启维护。
+
+    启动时 startup_maintenance 会先跑一轮；之后只要有 sudo_worker 调用
+    （改配置、装包、重建规则等日常操作）就会按小时节流补跑。
+    """
+    global _MAINT_LAST
+    now = time.time()
+    if not force and now - _MAINT_LAST < 3600:
+        return
+    with _MAINT_LOCK:
+        now = time.time()
+        if not force and now - _MAINT_LAST < 3600:
+            return
+        _MAINT_LAST = now
     try:
         core.maybe_prune_tasks()
     except Exception:
         pass
+    try:
+        if core.rotate_openvpn_log():
+            print("[定期维护] openvpn.log 超过 20MB，已转存并截断")
+    except Exception:
+        pass
+    for fn in ("ops-audit.jsonl", "auth.jsonl", "deny.jsonl"):
+        try:
+            if core.rotate_jsonl(os.path.join(core.STATE, fn)):
+                print("[定期维护] %s 超过 10MB，已转存为 %s.1" % (fn, fn))
+        except Exception:
+            pass
+    try:
+        n = core.prune_auth_logs(keep=5000)
+        if n:
+            print("[定期维护] 清理了 %d 条过期认证日志" % n)
+    except Exception:
+        pass
+
+
+def sudo_worker(tid, action, params=None, timeout=300):
+    """特权动作：Web 只写任务文件，worker 从固定目录读，命令行不传自由参数。"""
+    core.ensure_dirs()
+    periodic_maintenance()
     with open(os.path.join(TASKS_DIR, tid + ".json"), "w", encoding="utf-8") as f:
         json.dump({"action": action, "params": params or {}}, f, ensure_ascii=False)
     # 特权执行器在 system/（安装根下，零 Django 依赖）
@@ -250,7 +288,18 @@ def start_task(kind, steps, actor_name="admin", on_error=None):
             close_old_connections()
             WRITE_LOCK.release()
 
-    threading.Thread(target=runner, daemon=True).start()
+    try:
+        threading.Thread(target=runner, daemon=True).start()
+    except Exception as e:
+        # 线程创建失败时 runner 的 finally 不会执行，锁必须在这里释放，
+        # 否则整个 Web 永远卡在「有任务正在执行」。
+        try:
+            tlog(tid, "✘ 启动任务线程失败: %s" % e)
+            task_update(tid, status="failed", msg="启动任务线程失败: %s" % e,
+                        finished_at=core.now())
+        finally:
+            WRITE_LOCK.release()
+        raise
     return tid
 
 

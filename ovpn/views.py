@@ -64,9 +64,8 @@ def api_allow_set(request):
     items = d.get("allow")
     if not isinstance(items, list):
         items = str(items or "").replace("，", ",").split(",")
-    old = core.allow_list()
+    # set_allow_list 内部已写 security.allow 审计（含 old -> new），这里不再重复
     new = core.set_allow_list(items, keep_ip=client_ip(request))
-    core.log_audit("", "security.allow", "%s -> %s" % (",".join(old), ",".join(new)))
     return ok({"allow": new, "msg": "白名单已更新（立即生效，不用重启）"})
 
 
@@ -338,8 +337,8 @@ def asset_group_add(request):
     else:
         items = [core.norm_item(i.get("cidr", ""), i.get("proto", "any"), i.get("ports", ""))
                  for i in items]
+    # add_asset_group 内部已写 assetgroup.add 审计，视图层不要再补一条
     r = core.add_asset_group(d.get("name", ""), d.get("note", ""), items)
-    core.log_audit(actor(request) or "admin", "assetgroup.add", "%s %d 条" % (d.get("name", ""), r["count"]))
     return ok(r)
 
 

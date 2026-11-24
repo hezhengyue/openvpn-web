@@ -16,6 +16,7 @@ import json
 import os
 import sys
 import time
+import threading
 import ipaddress
 from datetime import datetime
 
@@ -266,6 +267,28 @@ def get_logs(kind="audit", limit=200):
 
 
 # --------------------------------------------------------------------------- 账号
+# 到期停用后还剩两步副作用：重建 ccd 删除配置、kick-user 踢下线。
+# 以前只有中间件那次扫描会做这两步，而 list_users() 等任意读台账的地方也会
+# 调 expire_users()：一旦读请求先把账号停用，中间件 60 秒节流窗口内跳过，
+# 等它下次扫到时库里已是 enabled=0，名单为空，ccd 残留且在线会话永远不断。
+# 所以停用动作本身把名单放进这个待处理集合，由中间件每次请求消费。
+_PENDING_EXPIRED = set()
+_PENDING_EXPIRED_LOCK = threading.Lock()
+
+
+def mark_expired_pending(names):
+    """把（处理失败的）到期名单放回待办，下次请求再补删 ccd / 踢人。"""
+    with _PENDING_EXPIRED_LOCK:
+        _PENDING_EXPIRED.update(n for n in names if n)
+
+
+def take_expired_users():
+    """取出并清空待办名单；只有真正处理完才会被取走。"""
+    with _PENDING_EXPIRED_LOCK:
+        pending = list(_PENDING_EXPIRED)
+        _PENDING_EXPIRED.clear()
+    return pending
+
 
 def expire_users(actor="system"):
     """扫描并自动停用到期账号，返回本次被停用的用户名列表。"""
@@ -276,6 +299,7 @@ def expire_users(actor="system"):
     names = list(qs.values_list('username', flat=True))
     if names:
         qs.update(enabled=False, updated_at=now())
+        mark_expired_pending(names)
     for n in names:
         log_audit(actor, "user.expire", "%s 有效期已到，自动停用" % n)
     return names

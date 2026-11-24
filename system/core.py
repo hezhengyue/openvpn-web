@@ -72,7 +72,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "2.6.6"
+WEB_VERSION = "2.6.7"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -2610,15 +2610,17 @@ def render_rules(c):
     if nat_mode == "nat":
         L += [
             '# 默认 NAT 模式：开箱可用，不需要机房网关配回程路由；但内网日志源 IP = VPN 服务器',
-            '# 固定内网 IP 时优先 SNAT（源地址稳定），探测不到再退回 MASQUERADE',
-            '# 按路由表取实际出接口的 src：直接取第一张 global 网卡会选中 docker0',
+            '# 默认路由出接口优先 SNAT（源地址稳定）；其它出接口的包交给 MASQUERADE',
+            '# 按路由表取实际出接口和 src：直接取第一张 global 网卡会选中 docker0',
             '# 或 tun0 的地址，SNAT 到那个 IP 后内网回包根本回不来',
+            '# -o 限定出接口很关键：双网卡机器发往内网口 eth1 的包如果也 SNAT',
+            '# 成公网口地址，内网服务器回包会走错网关；MASQUERADE 让内核按实际出接口选源 IP',
             "GW=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '/src/{for(i=1;i<=NF;i++) if($i==\"src\") print $(i+1); exit}' || true)",
-            'if [ -n "$GW" ]; then',
-            '  $IPT -t nat -A OVPNWEB_NAT -m comment --comment OVPNWEB_NAT -j SNAT --to-source "$GW"',
-            "else",
-            "  $IPT -t nat -A OVPNWEB_NAT -m comment --comment OVPNWEB_NAT -j MASQUERADE",
+            "EXTIF=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '/dev/{for(i=1;i<=NF;i++) if($i==\"dev\") print $(i+1); exit}' || true)",
+            'if [ -n "$GW" ] && [ -n "$EXTIF" ]; then',
+            '  $IPT -t nat -A OVPNWEB_NAT -m comment --comment OVPNWEB_NAT -o "$EXTIF" -j SNAT --to-source "$GW"',
             "fi",
+            '$IPT -t nat -A OVPNWEB_NAT -m comment --comment OVPNWEB_NAT -j MASQUERADE',
         ]
     else:
         L += [
@@ -3493,8 +3495,10 @@ def set_allow_list(items, keep_ip=""):
             raise
         except Exception:
             pass
+    old = allow_list()
     set_meta("web_allow_cidr", ",".join(clean))
-    log_audit("", "security.allow", "白名单 -> %s" % ",".join(clean))
+    # old -> new 的详情在这里记一次即可；以前视图层又记一条，审计页每条操作出现两次
+    log_audit("", "security.allow", "%s -> %s" % (",".join(old), ",".join(clean)))
     return clean
 
 

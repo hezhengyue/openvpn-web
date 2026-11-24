@@ -131,6 +131,15 @@ def create(tag="手动", keep=10, kind="manual"):
         try:
             with dst:
                 src.backup(dst)
+            # 备份包会被下载、外发，不能把当前活跃的管理会话和密码哈希一起打包。
+            # 这些「底座运行态」表恢复时本来就不回灌（见 PROTECTED_TABLES），
+            # 在备份副本里清空既减小泄露面，也不影响任何恢复语义。
+            for _t in PROTECTED_TABLES:
+                try:
+                    dst.execute('DELETE FROM "%s"' % _t)
+                except sqlite3.Error:
+                    pass  # 老库没有这张表
+            dst.commit()
         finally:
             dst.close()
             src.close()
@@ -207,31 +216,10 @@ PROTECTED_TABLES = (
     "audit_auditlog",
     "jobs_job", "jobs_joblog",
     "axes_accessattempt", "axes_accesslog", "axes_accessfailurelog",
+    # tasks 是前端正在轮询的运行态，回灌旧包会让任务进度变成 unknown；
+    # backups 是「恢复前保护备份」的记录，回灌会把刚打的记录抹掉。
+    "tasks", "backups",
 )
-
-
-def _dump_tables(con, names):
-    """把指定表的现有内容读进内存（只读，不落地）。"""
-    out = {}
-    have = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    for t in names:
-        if t not in have:
-            continue
-        cur = con.execute('SELECT * FROM "%s"' % t)
-        cols = [d[0] for d in cur.description]
-        out[t] = (cols, cur.fetchall())
-    return out
-
-
-def _put_tables(con, data):
-    """整库覆盖后把上面读出来的内容写回去。"""
-    for t, (cols, rows) in data.items():
-        con.execute('DELETE FROM "%s"' % t)
-        if not rows:
-            continue
-        q = 'INSERT OR REPLACE INTO "%s" (%s) VALUES (%s)' % (
-            t, ",".join('"%s"' % c for c in cols), ",".join("?" * len(cols)))
-        con.executemany(q, rows)
 
 
 def _table_names(con):
@@ -242,8 +230,8 @@ def _table_names(con):
 def _restore_business_tables(src, tgt):
     """只把备份包里的 ovpn 业务表回灌到目标库，不覆盖表结构与底座运行态表。
 
-    旧实现用 src.backup(tgt) 整库覆盖再写回 PROTECTED_TABLES：一旦备份包来自
-    老版本（少表 / 少列），整库结构会被抹掉，紧接着的 _put_tables 就会报
+    旧实现用 src.backup(tgt) 整库覆盖再写回受保护表：一旦备份包来自
+    老版本（少表 / 少列），整库结构会被抹掉，写回时就会报
     no such table / no such column，数据库停在半恢复状态。这里改为在单个事务内
     按「两边表结构的交集列」逐表DELETE+INSERT；目标库多出来的新表和列原样保留，
     老包缺列时只有目标表新增的必填列会明确报错并整体回滚。
@@ -260,6 +248,8 @@ def _restore_business_tables(src, tgt):
                 elif notnull and dflt is None and not pk:
                     raise ValueError(
                         "备份包不兼容：表 %s 缺少必填列 %s，已取消恢复（数据库未改动）" % (t, col))
+            if not can:
+                continue  # 两边同名但列完全不重合：跳过，绝不拼出 SELECT FROM "" 这种非法 SQL
             cols = ",".join('"%s"' % c for c in can)
             rows = src.execute('SELECT %s FROM "%s"' % (cols, t)).fetchall()
             tgt.execute('DELETE FROM "%s"' % t)

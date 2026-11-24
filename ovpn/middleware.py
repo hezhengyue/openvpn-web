@@ -15,13 +15,11 @@ CSRF_HEADER_NAME = 'HTTP_X_CSRF_TOKEN' 与前端既有的头对齐，token 由 /
 只有 GET 但带副作用的两个接口（CSRF_GET_PATHS）Django 不校验，这里按同一份
 cookie token 补一次校验。
 """
-import os
 import time
 import uuid
 import threading
 
 from django.conf import settings
-from django.contrib.auth import logout as auth_logout
 from django.middleware.csrf import (
     InvalidTokenFormat, _check_token_format, _does_token_match,
 )
@@ -128,15 +126,23 @@ class OvpnGuardMiddleware:
                 "python3 manage.py ovpn_cli allow %s" % (ip, ip), 403,
                 allow=core.allow_list())
 
-        # 到期的账号自动停用
+        # 到期的账号自动停用 + 补做副作用。
+        # expire_users() 可能被 list_users() 等视图先触发，那时它已经把名单放进
+        # core 的待办集合；这里每次请求先消费待办，再合并扫描结果，确保 60 秒
+        # 节流窗口内也不会漏掉「删 ccd + 踢下线」。
+        expired = []
         try:
-            expired = _expire_due_users()
+            expired = list(dict.fromkeys(core.take_expired_users() + _expire_due_users()))
             if expired:
                 core.write_all_config()
                 for name in expired:
                     bridge.sudo_worker(uuid.uuid4().hex, "kick-user", {"username": name})
         except Exception:
-            pass
+            # 写配置/踢人失败时放回待办，下次请求重试，绝不因节流而永久漏处理
+            try:
+                core.mark_expired_pending(expired)
+            except Exception:
+                pass
 
         # 免登录路径
         if _is_public(path):
@@ -147,6 +153,12 @@ class OvpnGuardMiddleware:
         # staff_member_required 会 302。若在这里返回 JSON 401，后台登录页
         # 也会被挡死，管理员根本进不去（base 的单测就是抓这个）。
         if path.startswith("/admin/") or path.startswith("/jobs/"):
+            # 这里提前 return 会跳过下面的滑动续期；不补这一句，管理员在
+            # Django Admin 连续操作超过 1 小时会被 session 到期踢出去。
+            _sess = getattr(request, "session", None)
+            if _sess is not None and getattr(getattr(request, "user", None),
+                                             "is_authenticated", False):
+                _sess.modified = True
             return self.get_response(request)
 
         # 登录校验：Django Auth
