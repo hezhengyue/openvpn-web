@@ -616,10 +616,14 @@ def _apply_import(token, actor="web", reset_empty=False, action="import.apply"):
         for n in gone:
             AclGrant.objects.filter(subject_type='user', subject=n).delete()
             UserGroupMember.objects.filter(username=n).delete()
-        if keep:
-            VpnUser.objects.exclude(username__in=list(keep)).delete()
-        else:
-            VpnUser.objects.all().delete()
+        # 两阶段写入：先把所有保留账号的 vpn_ip 挪到不可能冲突的占位值，再写最终值。
+        # 否则「新账号接手某个旧账号即将让出的 IP」会在逐行 upsert 时撞 UNIQUE
+        # （例：表内「会话」要 10.8.0.2，而该 IP 此刻还被即将改成 .3 的 test 占着）。
+        # 用短序号占位，彼此唯一、不超字段长度，且不是合法 IPv4，绝不与最终值冲突。
+        pending = list(VpnUser.objects.all().only('pk'))
+        for i, u in enumerate(pending):
+            VpnUser.objects.filter(pk=u.pk).update(
+                vpn_ip='__import_pending_%d__' % i)
         for r in rows:
             exp = r.get("expires_at") or ""
             fields = dict(

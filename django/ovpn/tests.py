@@ -393,3 +393,51 @@ class RawAuditSinkTest(TestCase):
                 if r["action"] == "setup.auto" and r["actor"] == "installer"
                 and r["ts"] == "2026-01-02 03:04:05"]
         self.assertTrue(rows)
+
+
+class ImportIpHandoverTest(TestCase):
+    """Excel 全量同步：新账号接手旧账号即将让出的 IP，不能撞 UNIQUE。"""
+
+    def test_new_user_takes_ip_freed_by_updated_user(self):
+        import json
+        from django.core.cache import cache
+
+        # 初始：test 占 10.8.0.2
+        core.set_meta('vpn_cidr', '10.8.0.0/24')
+        u = core.add_user('test', vpn_ip='10.8.0.2', password='old', actor='test')
+        self.assertEqual(VpnUser.objects.get(username='test').vpn_ip, '10.8.0.2')
+
+        # 导入表：会话 -> .2（接手），test -> .3（让出）。顺序故意让新账号在前。
+        rows = [
+            {'username': '会话', 'vpn_ip': '10.8.0.2', 'enabled': True,
+             'password': 'pw1', 'note': '', 'real_name': '', 'dept': '', 'expires_at': ''},
+            {'username': 'test', 'vpn_ip': '10.8.0.3', 'enabled': True,
+             'password': 'pw2', 'note': '', 'real_name': '', 'dept': '', 'expires_at': ''},
+        ]
+        token = 'handover-test-token'
+        cache.set(core._PREVIEW_CACHE_PREFIX + token,
+                  json.dumps(rows, ensure_ascii=False), core._PREVIEW_TTL)
+        result = core.apply_import(token, actor='test')
+        self.assertEqual(result['count'], 2)
+
+        self.assertEqual(VpnUser.objects.get(username='会话').vpn_ip, '10.8.0.2')
+        self.assertEqual(VpnUser.objects.get(username='test').vpn_ip, '10.8.0.3')
+
+    def test_new_user_takes_ip_freed_by_deleted_user(self):
+        import json
+        from django.core.cache import cache
+
+        core.set_meta('vpn_cidr', '10.8.0.0/24')
+        core.add_user('gone', vpn_ip='10.8.0.2', password='old', actor='test')
+
+        rows = [
+            {'username': 'fresh', 'vpn_ip': '10.8.0.2', 'enabled': True,
+             'password': 'pw', 'note': '', 'real_name': '', 'dept': '', 'expires_at': ''},
+        ]
+        token = 'handover-del-token'
+        cache.set(core._PREVIEW_CACHE_PREFIX + token,
+                  json.dumps(rows, ensure_ascii=False), core._PREVIEW_TTL)
+        core.apply_import(token, actor='test')
+
+        self.assertEqual(VpnUser.objects.get(username='fresh').vpn_ip, '10.8.0.2')
+        self.assertFalse(VpnUser.objects.filter(username='gone').exists())
