@@ -169,24 +169,24 @@ pre::-webkit-scrollbar-thumb{background:oklch(.45 .02 250);background-clip:conte
 .mbox .foot{display:flex;justify-content:flex-end;gap:8px;margin-top:20px;padding-top:16px;border-top:1px solid var(--border)}
 #toast{position:fixed;top:18px;left:50%;transform:translateX(-50%);z-index:99;display:flex;flex-direction:column;gap:10px;align-items:center;
  width:min(92vw,520px);pointer-events:none}
-/* 提示框统一白底黑字，类型只用左侧色条+图标区分，保证任何浏览器都清晰可读 */
-.tst{background:#fff;color:#111827;border:1px solid #e5e7eb;border-left:4px solid #374151;
- padding:10px 16px;border-radius:var(--r-md);font-size:12.5px;
+/* 提示框统一白底黑字：小条与大卡片同款结构（左侧粗色条 + 图标 + 正文），保证任何浏览器都清晰 */
+.tst{background:#fff;color:#111827;border:1px solid #e5e7eb;border-left:10px solid #374151;
+ padding:11px 14px;border-radius:var(--r-md);font-size:12.5px;
  box-shadow:var(--shadow-md);animation:toastin .24s cubic-bezier(.2,.8,.3,1);max-width:100%;line-height:1.55;
- pointer-events:auto;text-align:center}
-.tst.ok{border-left-color:#146c43}.tst.err{border-left-color:#a91d1d}.tst.warn{border-left-color:#b45309}
+ pointer-events:auto;text-align:left;display:flex;gap:10px;align-items:flex-start}
+.tst.ok{border-left-color:#16a34a}.tst.err{border-left-color:#dc2626}.tst.warn{border-left-color:#ea580c}
 @keyframes toastin{from{opacity:0;transform:translateY(-12px)}to{opacity:1;transform:none}}
-/* 关键操作结果用醒目大卡片：带图标、可点关闭、停留更久 */
-.tst.big{width:100%;max-width:none;text-align:left;padding:14px 16px;display:flex;gap:12px;align-items:flex-start;
- border-radius:var(--r-lg);box-shadow:var(--shadow-lg)}
-.tst.big .ic{flex:0 0 auto;width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;
- background:#e8f5ee;color:#146c43;font-size:15px;font-weight:700;line-height:1}
-.tst.err.big .ic{background:#fee2e2;color:#a91d1d}.tst.warn.big .ic{background:#fef3c7;color:#92400e}
-.tst.big .bd{flex:1;min-width:0}
-.tst.big .ttl{font-size:14px;font-weight:600;display:block;margin-bottom:3px}
-.tst.big .sub{font-size:12.5px;opacity:1;line-height:1.6;display:block;word-break:break-word}
-.tst.big .cl{flex:0 0 auto;cursor:pointer;font-size:17px;line-height:1;opacity:.65;padding:0 2px;background:none;border:0;color:#6b7280}
-.tst.big .cl:hover{opacity:1}
+.tst .ic{flex:0 0 auto;width:20px;height:20px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+ background:#dcfce7;color:#15803d;font-size:12px;font-weight:700;line-height:1}
+.tst.err .ic{background:#fee2e2;color:#b91c1c}.tst.warn .ic{background:#ffedd5;color:#c2410c}
+.tst .bd{flex:1;min-width:0}
+.tst .ttl{font-size:14px;font-weight:600;display:block;margin-bottom:3px}
+.tst .sub{font-size:12.5px;line-height:1.6;display:block;word-break:break-word}
+.tst .cl{flex:0 0 auto;cursor:pointer;font-size:17px;line-height:1;opacity:.65;padding:0 2px;background:none;border:0;color:#6b7280}
+.tst .cl:hover{opacity:1}
+/* 关键结果：同一套样式，只放大尺寸并加标题/关闭按钮 */
+.tst.big{width:100%;max-width:none;padding:14px 16px;gap:12px;border-radius:var(--r-lg);box-shadow:var(--shadow-lg)}
+.tst.big .ic{width:26px;height:26px;font-size:15px}
 
 /* ---------- 布局辅助 ---------- */
 .row{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}.row3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;align-items:start}.row4{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;align-items:start}
@@ -310,13 +310,13 @@ const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;'
    toast(msg, type, {big:true, title:'', ms:9000, html:false}) */
 function toast(m,t,opt){
   opt=opt||{};const d=document.createElement('div');d.className='tst '+(t||'')+(opt.big?' big':'');
-  if(opt.big){
-    const icon=t==='err'?'!':(t==='warn'?'!':'✓');
-    const ttl=opt.title||(t==='err'?'操作失败':(t==='warn'?'请注意':'操作成功'));
-    d.innerHTML='<span class="ic">'+icon+'</span><span class="bd"><span class="ttl">'+esc(ttl)+'</span>'
-      +'<span class="sub">'+(opt.html?m:esc(m))+'</span></span><button class="cl" type="button" aria-label="关闭">×</button>';
-    d.querySelector('.cl').onclick=()=>{d.style.display='none'};
-  }else{d.textContent=m}
+  const icon=t==='err'?'!':(t==='warn'?'!':'✓');
+  const ttl=opt.title||(t==='err'?'操作失败':(t==='warn'?'请注意':'操作成功'));
+  const head=opt.big?'<span class="ttl">'+esc(ttl)+'</span>':'';
+  d.innerHTML='<span class="ic">'+icon+'</span><span class="bd">'+head
+    +'<span class="sub">'+(opt.html?m:esc(m))+'</span></span>'
+    +(opt.big?'<button class="cl" type="button" aria-label="关闭">×</button>':'');
+  if(opt.big)d.querySelector('.cl').onclick=()=>{d.style.display='none'};
   $('#toast').appendChild(d);
   setTimeout(()=>{if(d.parentNode)d.remove()},opt.ms||(opt.big?9000:3600));
   return d;
