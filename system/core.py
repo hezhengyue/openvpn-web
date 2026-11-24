@@ -57,7 +57,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "2.3.0"
+WEB_VERSION = "2.4.0"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -80,6 +80,10 @@ DEFAULT_CFG = {
     "dns": [],
     "ntp": [],
     "tun_mtu": 1400,                # 公网 / PPPoE / 跨境线路的稳妥值，见 ui 提示
+    # TCP MSS 钳制：tun-mtu 1400 时，远程桌面等大包如果不钳制，封装后链路帧会超过
+    # 物理 MTU 1500，被分片/丢弃，表现就是「能 ping 通但 RDP 一直转圈超时」。
+    # 1360 = 1400 - 40（IPv4 + TCP 头），给 OpenVPN 封装留出余量；0 = 不下发该指令。
+    "mssfix": 1360,
     "compress": "off",              # off / lz4-v2 / lzo（改这个必须重新分发 company.ovpn）
     # data-ciphers 是「协商顺序表」不是「同时开多个」：每条连接最终只用协商出来的那一个。
     # 默认两个足够覆盖 AES-NI 服务器与无 AES 加速的 ARM 手机端，少一个是少一次协商分支。
@@ -756,8 +760,15 @@ def validate_cfg(c):
         mtu = int(c.get("tun_mtu", 1400))
         if not (576 <= mtu <= 1600):
             errs.append("tun-mtu 需在 576~1600 之间（公网推荐 1400，局域网可 1500）")
+        # mssfix 0 = 关闭钳制；否则必须留够 IPv4+TCP 头（40 字节），
+        # 大于 mtu-40 就形同虚设，还会让用户以为大包问题已经修了。
+        mssfix = int(c.get("mssfix", 1360))
+        if mssfix < 0 or mssfix > 1600:
+            errs.append("mssfix 需在 0~1600 之间（0 = 关闭，推荐 tun-mtu - 40）")
+        elif mssfix and mssfix > mtu - 40:
+            errs.append("mssfix 不能大于 tun-mtu - 40（%s），否则起不到钳制作用" % (mtu - 40))
     except Exception:
-        errs.append("tun-mtu 必须是数字")
+        errs.append("tun-mtu / mssfix 必须是数字")
     # 动态地址池：要么不开，开了就必须是网段内的合法一段，且不能把地址全吃掉
     if c.get("pool_enabled"):
         try:
@@ -2344,6 +2355,12 @@ def render_server_conf(c):
         "data-ciphers-fallback AES-256-CBC",
         "tls-version-min %s" % c["tls_min"],
         "tun-mtu %s" % c["tun_mtu"],
+    ]
+    if int(c.get("mssfix", 1360) or 0) > 0:
+        # 钳制 TCP MSS，避免 tun-mtu + OpenVPN 封装后超过物理 MTU 1500：
+        # 大包（远程桌面 / SCP）被分片丢弃时，小包 ping 正常但 TCP 连接一直超时。
+        L.append("mssfix %s" % int(c["mssfix"]))
+    L += [
         "keepalive 10 120",
         "persist-key",
         "persist-tun",
@@ -2384,6 +2401,12 @@ def render_ovpn(c):
         "remote-cert-tls server",
         "tls-version-min %s" % c["tls_min"],
         "tun-mtu %s" % c["tun_mtu"],
+    ]
+    if int(c.get("mssfix", 1360) or 0) > 0:
+        # 与服务端一致：客户端也要钳制出方向的 TCP MSS，
+        # 否则 Windows 发出的 1460 字节段进隧道后仍会超 MTU。
+        L.append("mssfix %s" % int(c["mssfix"]))
+    L += [
         "verb 3",
         "auth-user-pass",
     ]
@@ -2416,6 +2439,8 @@ def config_fingerprint(c):
         # 换网段只需要账号地址跟着改，不需要全员重发 ovpn。
         "routes": routes,
         "ciphers": c["data_ciphers"], "tls_min": c["tls_min"], "mtu": c["tun_mtu"],
+        # mssfix 写进 ovpn，改了必须让全员重发客户端配置，否则新旧客户端行为不一致
+        "mssfix": int(c.get("mssfix", 1360) or 0),
         "compress": c.get("compress", "off"),
         "ca": hashlib.sha256(pki["ca"].encode()).hexdigest(),
         "ta": hashlib.sha256(pki["ta"].encode()).hexdigest(),

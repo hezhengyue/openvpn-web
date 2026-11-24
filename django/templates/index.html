@@ -174,7 +174,7 @@ pre::-webkit-scrollbar-thumb{background:oklch(.45 .02 250);background-clip:conte
 @keyframes slide{from{opacity:0;transform:translateX(12px)}to{opacity:1;transform:none}}
 
 /* ---------- 布局辅助 ---------- */
-.row{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}.row3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;align-items:start}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}.row3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;align-items:start}.row4{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;align-items:start}
 .row>.card{margin-bottom:16px}
 /* 标签式多值输入 */
 .tags{display:flex;flex-wrap:wrap;gap:6px;align-items:center;border:1px solid var(--input);border-radius:var(--r-md);
@@ -212,7 +212,7 @@ pre::-webkit-scrollbar-thumb{background:oklch(.45 .02 250);background-clip:conte
 /* 卡内小节标题 */
 .sub{font-size:12px;color:var(--muted-foreground);margin:0 0 6px}
 @media(max-width:1100px){:root{--side-w:196px}.content{padding:16px}}
-@media(max-width:860px){:root{--side-w:0px}.side{display:none}.row,.row3{grid-template-columns:1fr}.top{padding:0 14px}}
+@media(max-width:860px){:root{--side-w:0px}.side{display:none}.row,.row3,.row4{grid-template-columns:1fr}.top{padding:0 14px}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
@@ -553,11 +553,13 @@ function cfgForm(c){c=c||S.cfg||{};const v=(k,d)=>esc(c[k]==null?(d||''):c[k]);
   <label class="f"><span>对外端口（映射后）</span><input type="number" id="c_public_port" value="${c.public_port?esc(c.public_port):''}" placeholder="留空 = 同服务端口"></label>
  </div>
  <div class="hint" id="addr_tip" style="margin:-6px 0 12px">服务器在内网、靠路由器把某个公网端口转到这台机器时：<b>服务端口</b>填本机实际监听端口，<b>对外端口</b>填公网映射端口，<b>对外地址</b>填公网 IP／域名。两者<b>不需要一致</b>，导出的客户端配置会自动使用「对外地址 + 对外端口」。</div>
- <div class="row3">
+ <div class="row4">
   <label class="f"><span>隧道协议</span><select id="c_proto"><option value="tcp" ${(c.proto||'tcp')==='tcp'?'selected':''}>TCP（默认，穿透性最好）</option><option value="udp" ${c.proto==='udp'?'selected':''}>UDP（延迟低，被限 UDP 时不通）</option></select></label>
   <label class="f"><span>VPN 网段</span><input id="c_vpn_cidr" value="${v('vpn_cidr','10.8.0.0/24')}"></label>
   <label class="f"><span>tun-mtu</span><input type="number" id="c_tun_mtu" value="${v('tun_mtu',1400)}"></label>
+  <label class="f"><span>mssfix（TCP MSS）</span><input type="number" id="c_mssfix" value="${v('mssfix',1360)}"></label>
  </div>
+ <div class="hint" style="margin:-6px 0 12px">mssfix 把 TCP 最大报文段钳制到 <b>1360</b>（tun-mtu 1400 − 40 字节 IP/TCP 头），避免隧道封装后超过物理 MTU，造成「能 ping 通但远程桌面／大文件传输超时」；填 <b>0</b> 表示关闭。</div>
  <div style="margin:0 0 14px">
   <div class="sub">附加推送路由 <span style="opacity:.7">· 回车加入，可粘贴多行</span></div>
   ${tagHtml('extra_routes','例如 10.20.0.0/16')}
@@ -635,7 +637,7 @@ function readCfg(){const g=id=>($('#'+id)||{}).value?$('#'+id).value.trim():'';
   public_port:g('c_public_port')?parseInt(g('c_public_port')):0,
   proto:g('c_proto'),vpn_cidr:g('c_vpn_cidr'),
   extra_routes:(TAGS.extra_routes||[]).slice(),dns:lst('c_dns'),ntp:lst('c_ntp'),
-  tun_mtu:parseInt(g('c_tun_mtu')),compress:g('c_compress'),data_ciphers:ck.join(':'),
+  tun_mtu:parseInt(g('c_tun_mtu')),mssfix:g('c_mssfix')?parseInt(g('c_mssfix')):0,compress:g('c_compress'),data_ciphers:ck.join(':'),
   tls_min:g('c_tls_min'),
   pool_enabled:!!($('#c_pool_on')&&$('#c_pool_on').checked),
   pool_start:g('c_pool_start'),pool_end:g('c_pool_end')}}

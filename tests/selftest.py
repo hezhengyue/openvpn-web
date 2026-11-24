@@ -120,6 +120,7 @@ def main():
     check("无 NAT 溯源默认关闭（默认 NAT 模式）", core.cfg()["nat_mode"] == "nat")
     check("默认隧道协议 TCP", core.cfg()["proto"] == "tcp")
     check("默认 tun-mtu 1400", core.cfg()["tun_mtu"] == 1400)
+    check("默认 mssfix 1360（大包超时修复）", core.cfg()["mssfix"] == 1360)
     check("默认不再有内网网段概念", core.cfg()["lan_nets"] == [])
     core.gen_pki()
     ca = open(os.path.join(core.DATA, "ca.crt")).read()
@@ -148,6 +149,8 @@ def main():
     check("server.conf 写 topology subnet", "\ntopology subnet\n" in conf)
     check("server.conf 显式推送 topology subnet", 'push "topology subnet"' in conf)
     check("company.ovpn 写 topology subnet", "\ntopology subnet\n" in ovpn)
+    check("server.conf 钳制 TCP MSS（mssfix 1360）", "\nmssfix 1360\n" in conf)
+    check("company.ovpn 同步钳制 TCP MSS", "\nmssfix 1360\n" in ovpn)
     # VPN 网段必须自动出现在推送路由里，且只出现一次（不能走两处各写一遍）
     vpn_net = core.vpn_network(core.cfg())
     vpn_gw = str(vpn_net.network_address + 1)
@@ -604,6 +607,11 @@ def main():
     section("配置指纹与更新闸门")
     fp1 = core.config_fingerprint(core.cfg())
     check("改端口后指纹变化", core.config_fingerprint(dict(core.cfg(), port=1195)) != fp1)
+    check("改 mssfix 会触发客户端重发",
+          core.config_fingerprint(dict(core.cfg(), mssfix=1300)) != fp1)
+    check("mssfix=0 时不写 mssfix 指令",
+          "mssfix" not in core.render_server_conf(dict(core.cfg(), mssfix=0))
+          and "mssfix" not in core.render_ovpn(dict(core.cfg(), mssfix=0)))
     _cfg = dict(core.cfg(), public_addr="vpn.example.com")
     check("未设对外端口时客户端用服务端口", "remote vpn.example.com 1194" in core.render_ovpn(_cfg))
     _mapped = dict(_cfg, public_port=11940)
@@ -637,7 +645,7 @@ def main():
     section("Web API（安装向导 / 设置 / 日志 / 自检）")
     params = {"public_addr": "vpn.example.com", "port": 1194, "proto": "tcp",
               "vpn_cidr": "10.8.0.0/24", "extra_routes": ["10.10.0.0/16"],
-              "dns": ["10.10.0.53"], "ntp": ["10.10.0.123"], "tun_mtu": 1400,
+              "dns": ["10.10.0.53"], "ntp": ["10.10.0.123"], "tun_mtu": 1400, "mssfix": 1360,
               "compress": "off", "data_ciphers": "AES-256-GCM:CHACHA20-POLY1305",
               "tls_min": "1.2", "pool_enabled": False,
               "pool_start": "10.8.0.2", "pool_end": "10.8.0.9"}
@@ -1330,6 +1338,10 @@ def main():
         _ok_tls = dict(_scfg)
         _ok_tls["tls_min"] = _v
         check("validate_cfg 接受合法 tls_min %s" % _v, not core.validate_cfg(_ok_tls))
+    for _bad in (-1, 1700, 1400, "1360\nup /bin/sh", "abc"):
+        check("validate_cfg 拒绝非法 mssfix %r" % _bad,
+              any("mssfix" in e for e in core.validate_cfg(dict(_scfg, mssfix=_bad))),
+              core.validate_cfg(dict(_scfg, mssfix=_bad)))
     try:
         core.render_server_conf(_bad_tls)
         check("render_server_conf 对脏 tls_min 拒绝生成（fail-closed）", False)
