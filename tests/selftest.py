@@ -686,6 +686,9 @@ def main():
     core.set_meta("nat_mode", "no-nat")
     check("切换网络模式不改配置指纹（ovpn 不用重发）", core.config_fingerprint(core.cfg()) == fp1)
     check("开启溯源后要求回程路由", core.route_guide()["required"] is True)
+    ik = core.route_guide()["ikuai"]
+    check("爱快教程含静态路由+两条NAT过滤+验证+排障", all(ik.get(x) for x in ("intro", "route", "nat1", "nat2", "verify", "trouble")))
+    check("爱快 NAT 过滤目的地址跟随 VPN 网段", dict(ik["nat1"]).get("目的地址") == core.route_guide()["vpn_net"])
     nr = core.render_rules(core.cfg())
     check("无 NAT 模式不做地址转换", "-j SNAT --to-source" not in nr and "-j MASQUERADE" not in nr)
     check("无 NAT 模式仍清理裸 NAT 规则", "nat -D POSTROUTING" in nr)

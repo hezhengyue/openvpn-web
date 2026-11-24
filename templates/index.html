@@ -126,6 +126,11 @@ td{font-variant-numeric:tabular-nums}
 tr:last-child td{border-bottom:0}
 tbody tr{transition:background .1s}
 tbody tr:hover td{background:oklch(.976 .006 255)}
+/* 配置填写表：参数名固定宽度、值允许换行，长网关/网段不会撑破卡片 */
+.ikv{margin:8px 0 0;border:1px solid var(--border);border-radius:var(--r-md);overflow:hidden}
+.ikv table{font-size:12.5px}
+.ikv th{width:26%;white-space:normal;background:var(--muted)}
+.ikv td{white-space:normal;word-break:break-word;font-variant-numeric:normal}
 .tag{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:var(--r-sm);font-size:11.5px;font-weight:500;
  background:var(--muted);color:oklch(.42 .015 250);white-space:nowrap}
 .tag.ok{background:oklch(.96 .04 155);color:oklch(.45 .12 155)}
@@ -1261,7 +1266,8 @@ async function pgLogs(){const j=await get('/api/logs?kind='+LK);
   ${tbl(cols,rows,null,'logs',20,'pgLogs')}</div>`}
 
 /* ---------------- 回程路由 / 自检 ---------------- */
-async function pgRoute(){const r=await get('/api/route-guide'),s=await get('/api/selfcheck');
+function ikv(rows){return '<div class="ikv"><table><tbody>'+(rows||[]).map(x=>'<tr><th>'+esc(x[0])+'</th><td>'+esc(x[1])+'</td></tr>').join('')+'</tbody></table></div>'}
+async function pgRoute(){const r=await get('/api/route-guide'),s=await get('/api/selfcheck'),k=r.ikuai||{};
  $('#page').innerHTML=`<div class="card"><h3>回程静态路由 <small>${r.required?'硬前提，交给网络管理员在机房网关配':'当前 NAT 模式下不需要执行'}</small></h3>
  <div class="hint ${r.required?'err':''}">${r.required
   ?'不做这一步，客户端能连上隧道但 ping 不通任何内网服务器。'
@@ -1269,6 +1275,21 @@ async function pgRoute(){const r=await get('/api/route-guide'),s=await get('/api
  ${[['Linux 网关',r.linux],['H3C / 华为',r.h3c],['Cisco',r.cisco],['网关改不了时：每台内网服务器都加',r.per_host]].map(x=>
   `<div style="margin-top:10px"><b>${esc(x[0])}</b><pre>${esc(x[1])}</pre></div>`).join('')}
  <h3 style="margin-top:18px">检查清单</h3><ul>${r.checklist.map(x=>'<li>'+esc(x)+'</li>').join('')}</ul></div>
+ <div class="card"><h3>网关是爱快（iKuai） <small>无 NAT 溯源必看 · NAT 模式下不用配</small></h3>
+  <div class="hint ${r.required?'warn':''}">${esc(k.intro||'')}</div>
+  <h3 style="margin-top:16px">步骤一 · 回程静态路由</h3>
+  <div class="muted" style="margin:6px 0">${esc(k.path_route||'')}</div>
+  ${ikv(k.route)}
+  <h3 style="margin-top:16px">步骤二 · NAT 过滤规则 <small style="color:#dc2626">关键，别漏</small></h3>
+  <div class="muted" style="margin:6px 0">${esc(k.path_nat||'')}</div>
+  <div style="font-weight:600;margin-top:10px">${esc(k.nat1_title||'')}</div>${ikv(k.nat1)}
+  <div style="font-weight:600;margin-top:12px">${esc(k.nat2_title||'')}</div>${ikv(k.nat2)}
+  <div class="hint warn" style="margin-top:10px">${esc(k.nat2_note||'')}</div>
+  <h3 style="margin-top:16px">步骤三 · 验证</h3>
+  <ol style="line-height:1.9;padding-left:20px;margin:6px 0">${(k.verify||[]).map(x=>'<li>'+esc(x)+'</li>').join('')}</ol>
+  <h3 style="margin-top:16px">排障对照</h3>
+  ${tbl(['现象','可能原因','处理'],(k.trouble||[]).map(x=>x.map(v=>esc(v))),null,'ikuai',10,'pgRoute')}
+  <div class="hint" style="margin-top:10px">${esc(k.advanced||'')}</div></div>
  <div class="card"><h3>自检 <small>库里该是什么 vs 系统里实际是什么</small></h3>
   <div class="bar"><button class="btn" onclick="pgRoute()">重新自检</button></div>
   ${tbl(['检查项','结果','说明'],s.items.map(i=>[esc(i.name),i.ok?badge('正常','ok'):badge('异常','err'),esc(i.detail)]),null,'selfcheck',10,'pgRoute')}</div>`}

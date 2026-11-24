@@ -57,7 +57,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "2.6.4"
+WEB_VERSION = "2.6.5"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -3133,9 +3133,59 @@ def route_guide():
     else:
         checklist = [
             "不配这一步，客户端能连上但 ping 不通任何内网服务器",
+            "网关是爱快（iKuai）时，只配回程路由不够，必须再配 NAT 过滤规则（见下方教程）",
             "网关改不了时，给每台内网服务器加主机路由（命令见下）",
             "配好后内网日志的源 IP 应是账号固定 IP；仍是服务器自己说明有 NAT 残留",
         ] + common
+    # 爱快 iKuai 专用教程：无 NAT 溯源下「ping 通但 TCP 断」的完整配置方法。
+    # 数据跟随当前 VPN 网段与探测到的本机内网 IP，页面直接渲染成表单，不用手抄 README。
+    ikuai = {
+        "intro": (
+            "爱快默认会对命中静态路由的非直连网段（%s）做 SNAT，把回程 TCP 数据包的源 IP 改写成网关 IP。"
+            "conntrack 对 ICMP 与 TCP SYN-ACK 跳过 NAT、只对建连后的数据触发，"
+            "于是出现「ping 通、大包不丢，但 HTTPS 卡在 Trying 超时、SSH 连上后立刻 10053 断开」。"
+            "只配回程路由不够，必须再配 NAT 过滤规则。" % net
+        ),
+        "path_route": "爱快后台 → 网络设置 → 静态路由 → 添加",
+        "route": [
+            ["线路", "lan1（OpenVPN 服务器所在内网口，按实际选）"],
+            ["目的地址", str(net.network_address)],
+            ["子网掩码", "%s（/%d，与 OpenVPN server 网段一致）" % (str(net.netmask), net.prefixlen)],
+            ["网关", gw + "（OpenVPN 服务器内网 IP）"],
+            ["优先级", "默认（0）"],
+            ["备注", "OpenVPN 回程路由"],
+        ],
+        "path_nat": "爱快后台 → 网络设置 → NAT规则 → 添加（两条规则的「动作」都选 过滤，不需要改全局上网模式）",
+        "nat1_title": "规则 1：回程流量跳过 NAT（必配）",
+        "nat1": [
+            ["动作", "过滤"], ["进接口", "任意"], ["出接口", "任意"],
+            ["源地址", "留空（表示任意）"], ["目的地址", str(net)], ["协议", "任意"],
+        ],
+        "nat2_title": "规则 2：去程流量跳过 NAT（推荐）",
+        "nat2": [
+            ["动作", "过滤"], ["进接口", "任意"], ["出接口", "任意"],
+            ["源地址", str(net)], ["目的地址", "留空"], ["协议", "任意"],
+        ],
+        "nat2_note": (
+            "上表按「只访问内网 / 分流模式」填写。本项目 server.conf 刻意不加 redirect-gateway，通常照填即可。"
+            "若另外开了全局上网：规则 2 的出接口只选内网口（如 lan1，勿选 WAN），目的地址填内网私有网段（如 192.168.0.0/16），"
+            "不要把 WAN 出口的 NAT 也过滤掉，否则客户端上不了公网。规则保存后立即生效，无需重启路由。"
+        ),
+        "verify": [
+            "ping 内网服务器正常无丢包；curl -v https://<内网服务器IP> 与 SSH 不再超时 / 秒断",
+            "看目标服务器 access.log / secure，来源 IP 应是账号固定 IP（%s 段），不是 VPN 服务器或爱快网关 IP" % net,
+        ],
+        "trouble": [
+            ["ping 和 TCP 都不通", "静态路由没配，或 ip_forward / FORWARD 被拦", "查步骤一网关是否指向本机；查 net.ipv4.ip_forward=1 与 FORWARD 链"],
+            ["ping 通、HTTPS 超时 / SSH 10053", "没配 NAT 过滤，回程 TCP 被 SNAT 成网关 IP", "查步骤二规则 1 是否启用、目的地址是否为 %s" % net],
+            ["日志记的是 VPN 服务器 IP", "服务器侧仍有 SNAT 残留", "点「重建规则」，由 OVPNWEB_NAT 链自管"],
+            ["同网段正常、跨网段显示网关 IP", "没配规则 2，去程跨网段被 SNAT", "补步骤二的规则 2"],
+        ],
+        "advanced": (
+            "若 OpenVPN 服务器与业务服务器在同一二层网段，路径是「去程二层直连、回程经爱快转发」的非对称路由，"
+            "配完 NAT 过滤后通常就稳定；生产环境想彻底消除非对称隐患，可把 OpenVPN 服务器划到独立网段 / VLAN（网关仍在爱快），让来回流量都对称经过爱快。"
+        ),
+    }
     return {
         "vpn_net": str(net), "gateway_hint": gw, "nat_mode": nat,
         "required": nat == "no-nat",
@@ -3144,6 +3194,7 @@ def route_guide():
         "cisco": "ip route %s %s %s" % (str(net.network_address), str(net.netmask), gw),
         "per_host": "ip route add %s via %s   # 网关改不了时，每台内网服务器都加" % (net, gw),
         "checklist": checklist,
+        "ikuai": ikuai,
     }
 
 
