@@ -164,6 +164,14 @@ def main():
     check("company.ovpn 写 topology subnet", "\ntopology subnet\n" in ovpn)
     check("server.conf 钳制 TCP MSS（mssfix 1360）", "\nmssfix 1360\n" in conf)
     check("company.ovpn 同步钳制 TCP MSS", "\nmssfix 1360\n" in ovpn)
+    # link-mtu：默认不写（让 OpenVPN 推算）；排障时两端写死同一个值以消除
+    # 「客户端 1600 / 服务端 1768」的帧长口径不一致。
+    check("默认不写 link-mtu", "link-mtu " not in conf and "link-mtu " not in ovpn)
+    _lm = dict(core.cfg(), link_mtu=1500)
+    check("显式 link-mtu 同时写入 server.conf 与 ovpn",
+          "\nlink-mtu 1500\n" in core.render_server_conf(_lm)
+          and "\nlink-mtu 1500\n" in core.render_ovpn(_lm))
+    check("link-mtu 纳入配置指纹", core.config_fingerprint(_lm) != core.config_fingerprint(core.cfg()))
     # DCO 会绕过用户态 mssfix，且 Windows DCO 驱动大流量下会 reset 连接冲垮隧道：
     # 两端都必须显式 disable-dco（见 2.4.1 修复），否则 RDP 仍会超时。
     check("server.conf 禁用 DCO", "\ndisable-dco\n" in conf)

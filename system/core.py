@@ -57,7 +57,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "2.4.2"
+WEB_VERSION = "2.4.3"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -84,6 +84,10 @@ DEFAULT_CFG = {
     # 物理 MTU 1500，被分片/丢弃，表现就是「能 ping 通但 RDP 一直转圈超时」。
     # 1360 = 1400 - 40（IPv4 + TCP 头），给 OpenVPN 封装留出余量；0 = 不下发该指令。
     "mssfix": 1360,
+    # 显式链路 MTU（0 = 不写，让 OpenVPN 自己推算）。排障用：2.6 客户端与服务端
+    # 各自推算出的 link-mtu 可能不一致（实测客户端 1600 / 服务端按 1768 收包），
+    # RDP 大流量下触发 "Bad encapsulated packet length"。两端写死同一个值即可对齐。
+    "link_mtu": 0,
     "compress": "off",              # off / lz4-v2 / lzo（改这个必须重新分发 company.ovpn）
     # data-ciphers 是「协商顺序表」不是「同时开多个」：每条连接最终只用协商出来的那一个。
     # 默认两个足够覆盖 AES-NI 服务器与无 AES 加速的 ARM 手机端，少一个是少一次协商分支。
@@ -781,6 +785,10 @@ def validate_cfg(c):
             errs.append("mssfix 需在 0~1600 之间（0 = 关闭，推荐 tun-mtu - 40）")
         elif mssfix and mssfix > mtu - 40:
             errs.append("mssfix 不能大于 tun-mtu - 40（%s），否则起不到钳制作用" % (mtu - 40))
+        # 0 = 不写；非 0 时限制在物理链路合理范围，避免注入非法指令
+        link_mtu = int(c.get("link_mtu", 0) or 0)
+        if link_mtu < 0 or link_mtu > 2000:
+            errs.append("link-mtu 需在 0~2000 之间（0 = 不写）")
     except Exception:
         errs.append("tun-mtu / mssfix 必须是数字")
     # 动态地址池：要么不开，开了就必须是网段内的合法一段，且不能把地址全吃掉
@@ -2377,6 +2385,12 @@ def render_server_conf(c):
         ("cipher %s" % _first_dc) if _non_aead else "data-ciphers-fallback AES-256-CBC",
         "tls-version-min %s" % c["tls_min"],
         "tun-mtu %s" % c["tun_mtu"],
+    ]
+    if int(c.get("link_mtu", 0) or 0) > 0:
+        # 两端显式写死同一链路 MTU，避免 2.6 客户端/服务端各自推算不一致
+        # （实测 1600 vs 1768，RDP 大流量触发 Bad encapsulated packet length）
+        L.append("link-mtu %s" % int(c["link_mtu"]))
+    L += [
         # DCO（Data Channel Offload）把数据通道下沉到内核，会绕过用户态的
         # mssfix/TCP MSS 钳制；一旦客户端 DCO 驱动有 bug（ovpn-dco-win 1.3.0
         # 及更早版本存在已知问题），TCP 大流量会触发连接 reset、隧道反复重连。
@@ -2428,6 +2442,11 @@ def render_ovpn(c):
         "remote-cert-tls server",
         "tls-version-min %s" % c["tls_min"],
         "tun-mtu %s" % c["tun_mtu"],
+    ]
+    if int(c.get("link_mtu", 0) or 0) > 0:
+        # 必须与服务端完全一致：否则两端按各自的推算值封装，帧长错位
+        L.append("link-mtu %s" % int(c["link_mtu"]))
+    L += [
         # 关键：Windows 客户端 2.6 默认启用 DCO，数据通道下沉内核会绕过用户态
         # mssfix，且 ovpn-dco-win 1.3.0 及更早版本有已知连接稳定性问题。
         # 实测 RDP 大流量会触发 "Bad encapsulated packet length" 并让隧道反复重连。
@@ -2489,6 +2508,8 @@ def config_fingerprint(c):
         # 换网段只需要账号地址跟着改，不需要全员重发 ovpn。
         "routes": routes,
         "ciphers": c["data_ciphers"], "tls_min": c["tls_min"], "mtu": c["tun_mtu"],
+        # link_mtu 写进两端 ovpn/server.conf，改了必须让全员重发
+        "link_mtu": int(c.get("link_mtu", 0) or 0),
         # tls-crypt 开/关会改变 ovpn 内容（有无 <tls-crypt> 块），必须纳入指纹
         "tls_crypt": bool(c.get("tls_crypt", True)),
         # mssfix 写进 ovpn，改了必须让全员重发客户端配置，否则新旧客户端行为不一致
