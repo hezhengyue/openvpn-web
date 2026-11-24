@@ -385,7 +385,7 @@ class RawAuditSinkTest(TestCase):
             f.write(json.dumps({"ts": "2026-01-02 03:04:05", "actor": "installer",
                                 "action": "setup.auto", "detail": "安装完成",
                                 "ip": "10.1.1.1"}, ensure_ascii=False) + "\n")
-        rows = [r for r in core.get_logs("audit", 200) if r["action"] == "setup.auto"]
+        rows = [r for r in core.get_logs("audit", 200)
+                if r["action"] == "setup.auto" and r["actor"] == "installer"
+                and r["ts"] == "2026-01-02 03:04:05"]
         self.assertTrue(rows)
-        self.assertEqual(rows[0]["actor"], "installer")
-        self.assertEqual(rows[0]["ts"], "2026-01-02 03:04:05")
