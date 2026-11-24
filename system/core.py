@@ -88,6 +88,11 @@ DEFAULT_CFG = {
     # data-ciphers 是「协商顺序表」不是「同时开多个」：每条连接最终只用协商出来的那一个。
     # 默认两个足够覆盖 AES-NI 服务器与无 AES 加速的 ARM 手机端，少一个是少一次协商分支。
     "data_ciphers": "AES-256-GCM:CHACHA20-POLY1305",
+    # tls-crypt 在数据通道外包一层 HMAC；个别链路/驱动组合下会出现
+    # "Bad encapsulated packet length from peer" 的封装错位。关掉后退回
+    # 纯证书 + 用户密码认证（与 iKuai 等朴素实现一致）。默认保持开启，
+    # 只有排障时显式设为 False。
+    "tls_crypt": True,
     "tls_min": "1.2",
     # 动态地址池（ifconfig-pool）：默认关闭。
     # 本系统每个账号都由 ccd 的 ifconfig-push 固定下发 IP，池子是给「没台账的临时连接」
@@ -2359,7 +2364,10 @@ def render_server_conf(c):
         "cert %s" % os.path.join(DATA, "server.crt"),
         "key %s" % os.path.join(DATA, "server.key"),
         "dh none",
-        "tls-crypt %s" % os.path.join(DATA, "ta.key"),
+    ]
+    if c.get("tls_crypt", True):
+        L.append("tls-crypt %s" % os.path.join(DATA, "ta.key"))
+    L += [
         "data-ciphers %s" % c["data_ciphers"],
         "data-ciphers-fallback AES-256-CBC",
         "tls-version-min %s" % c["tls_min"],
@@ -2437,10 +2445,13 @@ def render_ovpn(c):
         "<ca>",
         pki["ca"].strip(),
         "</ca>",
-        "<tls-crypt>",
-        pki["ta"].strip(),
-        "</tls-crypt>",
     ]
+    if c.get("tls_crypt", True):
+        L += [
+            "<tls-crypt>",
+            pki["ta"].strip(),
+            "</tls-crypt>",
+        ]
     return "\n".join(L) + "\n"
 
 
@@ -2458,6 +2469,8 @@ def config_fingerprint(c):
         # 换网段只需要账号地址跟着改，不需要全员重发 ovpn。
         "routes": routes,
         "ciphers": c["data_ciphers"], "tls_min": c["tls_min"], "mtu": c["tun_mtu"],
+        # tls-crypt 开/关会改变 ovpn 内容（有无 <tls-crypt> 块），必须纳入指纹
+        "tls_crypt": bool(c.get("tls_crypt", True)),
         # mssfix 写进 ovpn，改了必须让全员重发客户端配置，否则新旧客户端行为不一致
         "mssfix": int(c.get("mssfix", 1360) or 0),
         # disable-dco 从 2.4.1 起写进 ovpn；老客户端没有它会在 RDP 大流量下冲垮隧道，

@@ -168,6 +168,13 @@ def main():
     # 两端都必须显式 disable-dco（见 2.4.1 修复），否则 RDP 仍会超时。
     check("server.conf 禁用 DCO", "\ndisable-dco\n" in conf)
     check("company.ovpn 禁用 DCO（修复 RDP 隧道崩溃）", "\ndisable-dco\n" in ovpn)
+    # tls-crypt 开关：默认开（有 tls-crypt / <tls-crypt>）；关掉后两端都不写。
+    # 用于对齐 iKuai 朴素实现排查 RDP/封装错位问题，指纹必须随之变化。
+    check("默认启用 tls-crypt", "tls-crypt " in conf and "<tls-crypt>" in ovpn)
+    _no_tls = dict(core.cfg(), tls_crypt=False)
+    check("关闭 tls-crypt 后 server.conf 不写 tls-crypt", "tls-crypt " not in core.render_server_conf(_no_tls))
+    check("关闭 tls-crypt 后 ovpn 无 <tls-crypt> 块", "<tls-crypt>" not in core.render_ovpn(_no_tls))
+    check("tls-crypt 开关纳入配置指纹", core.config_fingerprint(_no_tls) != core.config_fingerprint(core.cfg()))
     # VPN 网段必须自动出现在推送路由里，且只出现一次（不能走两处各写一遍）
     vpn_net = core.vpn_network(core.cfg())
     vpn_gw = str(vpn_net.network_address + 1)
