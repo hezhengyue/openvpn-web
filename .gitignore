@@ -6,6 +6,19 @@ dist/
 tests/node_modules/
 staticfiles/
 
+# 构建期大文件（约 46M，仅本地保留，不进 GitHub）
+# 这些都能用仓库内的脚本从上游重新生成，见 BUILD-FROM-SOURCE.md：
+#   bin/openvpn、bin/openssl  ← build/build-static-openvpn.sh 编译
+#   vendor/src/*.tar.gz       ← vendor/fetch.sh 拉取（SHA256SUMS 校验）
+#   vendor/wheels/*.whl       ← ./start.sh wheel:download 或 vendor/fetch.sh
+#   vendor/static/prefix.tar.gz ← build/build-static-openvpn.sh 产出
+# 本地留存这些文件可直接打包/部署；CI 或新 clone 按指南第一步补齐即可。
+bin/openvpn
+bin/openssl
+vendor/src/*.tar.gz
+vendor/wheels/*.whl
+vendor/static/prefix.tar.gz
+
 # 离线 wheel 仓库（由 ./start.sh wheel:download 生成）
 wheelhouse/
 

@@ -2,9 +2,13 @@
 
 目标：**构建机尽量不联网**。能本地就本地，链接换了也不慌。
 
+> **GitHub clone 里没有 `src/`、`static/`、`wheels/` 下的大文件**（约 37M，已被 .gitignore 排除）。
+> 跑一次 `./vendor/fetch.sh` 即可按下面「补件」章节从上游补齐并校验；完整流程见根目录
+> [BUILD-FROM-SOURCE.md](../BUILD-FROM-SOURCE.md)。本地开发机保留这些文件可离线直构。
+
 ```
 vendor/
-├── src/                 静态 OpenVPN 的源码包（15M，随仓库走）
+├── src/                 静态 OpenVPN 的源码包（15M，本地保留；由 fetch.sh 拉取）
 │   ├── openssl-3.0.16.tar.gz
 │   ├── lzo-2.10.tar.gz
 │   ├── lz4-1.9.4.tar.gz

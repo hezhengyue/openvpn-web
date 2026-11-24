@@ -4,6 +4,8 @@
 
 > 交付定稿：x86_64 离线静态二进制、**Django 5.2 裸机便携模式（Waitress WSGI + SQLite WAL + WhiteNoise，零 Docker / 零外部服务）**、账号密码认证、全员一个 `company.ovpn`、ACL 默认拒绝 + 观察模式起步、**网络模式默认 NAT（无 NAT 溯源默认关闭、可一键开启）**、客户端互访走内核 FORWARD、手动上传更新。
 
+> **从 GitHub clone 后想打包运行？先读 [BUILD-FROM-SOURCE.md](BUILD-FROM-SOURCE.md)。** 仓库刻意不含 `bin/openvpn`、`runtime/` 便携 Python、`vendor/` 大文件与 `dist/` 交付包（共约 500MB，均可由随仓库的脚本从零生成）；本页第 4 节是构建原理与细节，从零准备手把手步骤在那份指南里。如果你拿到的已经是完整交付包（`dist/openvpn-web-x86_64.tar.gz`），直接从第 5 节部署开始即可。
+
 ---
 
 ## 0. 技术底座：Django 双模式底座（standalone）
@@ -221,9 +223,10 @@ chroot /opt/c7 /bin/bash -lc 'VENDOR_ONLY=1 PREFIX_OUT=/out/prefix.tar.gz \
 | Django 全家桶 / openpyxl | — | `vendor/wheels/*.whl`（`pip --no-index`） | PyPI |
 | 静态 OpenVPN | `bin/openvpn` 已存在则直接用 | `vendor/src/*.tar.gz`（带 sha256 校验） | 各上游镜像按序回退，下到后**回填 vendor/src** |
 
-所以日常路径是：**仓库自带 `python/` + `vendor/` 里 18M 源码和 wheel → 构建机连网线都不用插**。
+所以日常路径是：**本地保留的 `python/` + `vendor/` 里 18M 源码和 wheel → 构建机连网线都不用插**。
+（GitHub clone 不带这些大文件，按 [BUILD-FROM-SOURCE.md](BUILD-FROM-SOURCE.md) 第 1、2 步补齐后即可达到同样状态。）
 
-**而且现在连构建都不是必须的**：仓库已带编好的 `bin/openvpn`（2.6.23 静态）和装好依赖的 `python/`，
+**而且拿到完整交付包后连构建都不是必须的**：本地已编好的 `bin/openvpn`（2.6.23 静态）和装好依赖的 `python/`，
 `./build/build-offline.sh` 检测到 `bin/openvpn` 会直接复用、跳过编译（想重编：`FORCE_BUILD_OPENVPN=1 ./build/build-offline.sh`），
 只做「拷文件 + 离线装 wheel + 打包」，几十秒出 `dist/openvpn-web-x86_64.tar.gz`。
 
