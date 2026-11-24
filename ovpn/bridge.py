@@ -31,7 +31,7 @@ from django.contrib.auth import get_user_model
 ROOT = str(getattr(settings, 'PROJECT_ROOT', '') or
            os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# 业务门面：纯逻辑继承自 system/core.py，数据访问全部是 Django ORM（django/ 内零裸 SQL）。
+# 业务门面：纯逻辑继承自 system/core.py，数据访问全部是 Django ORM（源码根内零裸 SQL）。
 from .services import core                      # noqa: E402
 from .services import backup as fullbackup      # noqa: E402
 

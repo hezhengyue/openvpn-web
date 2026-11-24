@@ -20,12 +20,17 @@ from urllib.parse import quote_plus
 import environ
 from django.core.exceptions import ImproperlyConfigured
 
-# BASE_DIR = django/（Django 项目根：manage.py、config/、core/、ovpn/ 所在层）
+# BASE_DIR = 源码根（manage.py、config/、core/、ovpn/ 所在层）。
+# 2.6 起源码与交付同构为「项目根即 Django 根」，BASE_DIR 就是安装根；
+# 仍兼容 base 模板的 django/ 子目录布局（那时 BASE_DIR=django/，安装根是其父）。
 BASE_DIR = Path(__file__).resolve().parent.parent
 # PROJECT_ROOT = 安装根（data/、bin/、system/、vendor/ 所在层）。
-# 交付包里 install.sh 会把 django/ 的内容平铺到安装根，此时两者重合；
-# 源码布局下它们是父子关系。
-PROJECT_ROOT = BASE_DIR.parent
+# 用 system/ 这个特权层标志判断：谁持有 system/，谁就是安装根。
+# 根布局下 BASE_DIR 与 PROJECT_ROOT 重合；django/ 子目录布局下父目录才是安装根。
+if (BASE_DIR / "system").is_dir():
+    PROJECT_ROOT = BASE_DIR
+else:
+    PROJECT_ROOT = BASE_DIR.parent
 
 env = environ.Env()
 # 优先级：进程环境变量 > 项目根目录 .env > 代码默认值
@@ -306,7 +311,12 @@ CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_TIME_LIMIT = 300
-SESSION_COOKIE_AGE = env.int('SESSION_COOKIE_AGE', default=1200)
+# 会话时长：默认 1 小时，与前端「无操作 1 小时自动退出」保持一致。
+# SESSION_SAVE_EVERY_REQUEST 让每次请求滑动续期（真正实现「无操作超时」而非「登录后固定 1 小时」）：
+# 前端 60 秒 /api/session 轮询不算用户操作，但会刷新后端 session，所以真正的空闲判定在前端，
+# 后端这个时长是兜底（防止前端被绕过时会话永不过期）。
+SESSION_COOKIE_AGE = env.int('SESSION_COOKIE_AGE', default=3600)
+SESSION_SAVE_EVERY_REQUEST = True
 
 
 # ===================== 🔐 密码校验 & Axes 防爆破 =====================

@@ -30,10 +30,13 @@ done
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
 # 双位置兼容：包根的 ./install.sh 与 system/install.sh 是同一份内容，
-# 但「安装源」必须是含 django/ 与 python/ 的那一层。脚本万一被从 system/
-# 里直接调用，就自动上跳一级，避免把 system/ 当成整个包来铺。
-if [ ! -d "$SRC/django" ] && [ -d "$SRC/../django" ]; then
+# 但「安装源」必须是含 Django 项目（manage.py + config/）的那一层。脚本万一被从
+# system/ 里直接调用，就自动上跳一级，避免把 system/ 当成整个包来铺。
+# 2.6 起源码与交付同构为根布局（manage.py 在根）；仍兼容 django/ 子目录布局。
+if [ ! -f "$SRC/manage.py" ] && [ -f "$SRC/../manage.py" ]; then
     SRC="$(cd "$SRC/.." && pwd)"
+elif [ ! -f "$SRC/manage.py" ] && [ -f "$SRC/django/manage.py" ]; then
+    SRC="$SRC"   # django/ 子目录布局：当前层就是安装源
 fi
 UNIT="/etc/systemd/system/openvpn-web.service"
 SUDOERS="/etc/sudoers.d/openvpn-web"
@@ -41,6 +44,12 @@ USER="ovpnweb"
 ETC="${OVPN_WEB_ETC:-/etc/openvpn-web}"
 PORT="${OVPN_WEB_PORT:-8800}"
 PY=""
+# manage.py 位置：2.6 根布局在安装根；旧 django/ 子目录布局在 django/ 下。
+if [ -f "$DEST/manage.py" ]; then
+    MGMT="$DEST/manage.py"
+else
+    MGMT="$DEST/django/manage.py"
+fi
 
 say() { printf '%s\n' "$*"; }
 step() { printf '\n==> %s\n' "$*"; }
@@ -304,13 +313,15 @@ chmod 755 "$DEST/bin" 2>/dev/null || true
 chmod 755 "$DEST/bin"/* 2>/dev/null || true
 chown root:root "$DEST" "$DEST"/*.py "$DEST"/*.html 2>/dev/null || true
 chmod 644 "$DEST"/*.py "$DEST"/*.html 2>/dev/null || true
-# system/ 与 django/ 里的代码同样 root 所有、Web 不可写；只有 data/ 归服务用户。
+# system/ 与 Django 代码目录同样 root 所有、Web 不可写；只有 data/ 归服务用户。
 # 任何「下次会以 root 执行」的代码都不能被 Web 进程改。
 chown -R root:root "$DEST/system" 2>/dev/null || true
 chmod 644 "$DEST/system"/*.py 2>/dev/null || true
 chmod 755 "$DEST/system"/*.sh 2>/dev/null || true
 chmod 700 "$DEST/system/install-code.sh" 2>/dev/null || true
-for d in django/config django/core django/common django/audit django/jobs django/ovpn django/templates django/static scripts; do
+# 2.6 起源码与交付同构：config/core/common/audit/jobs/ovpn/templates 直接在安装根。
+# 兼容旧的 django/ 子目录布局（升级场景可能还残留）。
+for d in config core common audit jobs ovpn templates static scripts django/config django/core django/common django/audit django/jobs django/ovpn django/templates django/static; do
     [ -d "$DEST/$d" ] || continue
     chown -R root:root "$DEST/$d" 2>/dev/null || true
     find "$DEST/$d" -type f -name '*.py' -exec chmod 644 {} + 2>/dev/null || true
@@ -330,7 +341,7 @@ done
 # WhiteNoise 从 STATIC_ROOT 提供资源，安装时以 root 收集一次；Web 只需读。
 # settings 在生产模式要求非空 SECRET_KEY，这里直接复用 serve.py 会用的同一个文件，
 # 没有就先生成一份（与 serve.py 规则一致，之后重启沿用同一把，会话不会失效）。
-if [ -f "$DEST/django/manage.py" ]; then
+if [ -f "$MGMT" ]; then
     SKF="$DEST/data/web.secret"
     if [ ! -s "$SKF" ]; then
         "$PY" -c "import secrets,sys;open(sys.argv[1],'w').write(secrets.token_urlsafe(48))" "$SKF" || true
@@ -339,7 +350,7 @@ if [ -f "$DEST/django/manage.py" ]; then
     fi
     if ! SECRET_KEY="$(tr -d '\r\n' < "$SKF")" OVPN_WEB_ROOT="$DEST" \
          STANDALONE=True HOSTS="localhost,127.0.0.1" \
-         "$PY" "$DEST/django/manage.py" collectstatic --noinput \
+         "$PY" "$MGMT" collectstatic --noinput \
          >/dev/null 2>"$DEST/logs/collectstatic.err"; then
         say "      警告: collectstatic 失败，见 $DEST/logs/collectstatic.err"
         tail -3 "$DEST/logs/collectstatic.err" 2>/dev/null | sed 's/^/        /' || true
@@ -468,10 +479,10 @@ step "[9/9] 启动 Web 服务"
 # 迁移放在起服务之前：这样「迁移失败」会当场报出来，而不是变成 systemd 无限重启。
 # --fake-initial 用于接管「旧版 core.py 用裸 SQL 建过表」的库：只标记初始迁移，
 # 不重建表、不动数据；全新库上它的行为与普通 migrate 完全一致。
-if [ -f "$DEST/django/manage.py" ]; then
+if [ -f "$MGMT" ]; then
     if ! SECRET_KEY="$(tr -d '\r\n' < "$DEST/data/web.secret" 2>/dev/null || echo)" \
          OVPN_WEB_ROOT="$DEST" STANDALONE=True HOSTS="localhost,127.0.0.1" \
-         "$PY" "$DEST/django/manage.py" migrate --fake-initial --noinput \
+         "$PY" "$MGMT" migrate --fake-initial --noinput \
          >/dev/null 2>"$DEST/logs/migrate.err"; then
         say "      错误: 数据库迁移失败，见 $DEST/logs/migrate.err"
         tail -5 "$DEST/logs/migrate.err" 2>/dev/null | sed 's/^/        /' || true

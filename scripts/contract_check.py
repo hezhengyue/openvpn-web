@@ -33,7 +33,15 @@ IGNORED_DIRS = {
     "build", "dist", ".git", "migrations",
     # 便携运行时与离线依赖、运行期数据目录，不属于源码
     "runtime", "vendor", "data", "staticfiles", "media", "logs",
+    # 根布局下这些是 Django 源码根之外的目录（特权脚本/测试/运维脚本/AI 工具数据），不属于 Web 进程代码。
+    # system/ 用裸 SQL 是特权层设计使然；tests/ 的夹具、.workbuddy/tmp 的探针会被误判。
+    # 子目录布局下它们本就不在 django/ 内。
+    "system", "tests", "scripts", ".workbuddy", ".codebuddy",
 }
+
+# 根布局下位于项目根、但属于「启动/CLI 边界」而非 Web app 的 .py，不参与业务代码扫描。
+# serve.py 的 cursor.execute 是迁移历史兼容（accounts→core relabel），与 system/ 同性质。
+IGNORED_ROOT_FILES = {"serve.py"}
 
 CONNECT_MODULES = {
     "sqlite3", "pymysql", "psycopg2", "psycopg", "mysql.connector",
@@ -99,6 +107,40 @@ class Report:
         if self.warns:
             return "COMPLIANT_WITH_NOTES"
         return "COMPLIANT"
+
+
+# --------------------------------------------------------------------------
+# 布局探测：同时支持「项目根即 Django 根」与「django/ 子目录」两种布局
+# --------------------------------------------------------------------------
+LAYOUT_DJANGO_DIR = "django-dir"
+LAYOUT_FLAT = "flat"
+
+
+def detect_layout(root: Path) -> tuple[Path, str]:
+    """返回 (源码根, 布局名)。
+
+    只认显式标志，不做模糊猜测：
+      - root/django/manage.py 存在 -> 子目录布局（base 模板默认）
+      - root/manage.py 存在        -> 根布局（本项目 2.6 起：源码与交付同构）
+      - 都不存在                   -> 回落到 django/ 子目录，保持 FAIL 行为
+    """
+    if (root / "django" / "manage.py").exists():
+        return root / "django", LAYOUT_DJANGO_DIR
+    if (root / "manage.py").exists():
+        return root, LAYOUT_FLAT
+    return root / "django", LAYOUT_DJANGO_DIR
+
+
+def django_code_prefixes(root: Path) -> set[str]:
+    """外部边界不得落在这些位置：它们属于 Django 进程自己的代码。"""
+    src_root, layout = detect_layout(root)
+    if layout == LAYOUT_DJANGO_DIR:
+        return {"django"}
+    prefixes = {"manage.py", "config", "common"}
+    for entry in src_root.iterdir():
+        if entry.is_dir() and ((entry / "apps.py").exists() or (entry / "models.py").exists()):
+            prefixes.add(entry.name)
+    return prefixes
 
 
 # --------------------------------------------------------------------------
@@ -184,14 +226,17 @@ def dotted_name(node: ast.AST) -> str:
 
 
 def iter_python_files(root: Path) -> list[tuple[str, Path, ast.Module]]:
-    """遍历 django/ 下可扫描的 .py（项目根相对路径, 绝对路径, AST）。"""
-    src_root = root / "django"
+    """遍历源码根下可扫描的 .py（项目根相对路径, 绝对路径, AST）。"""
+    src_root, _ = detect_layout(root)
     if not src_root.is_dir():
         return []
     files: list[tuple[str, Path, ast.Module]] = []
     for path in sorted(src_root.rglob("*.py")):
         rel = path.relative_to(root).as_posix()
         parts = Path(rel).parts
+        # 根布局下 src_root == root，需按文件名排除启动/CLI 边界脚本
+        if len(parts) == 1 and path.name in IGNORED_ROOT_FILES:
+            continue
         if any(p in IGNORED_DIRS for p in parts):
             continue
         if any(p.startswith(".venv") or p == "venv" for p in parts):
@@ -300,13 +345,14 @@ def scan_raw_sql(root: Path) -> list[str]:
       - .raw() / .extra() 仅命中 objects / _default_manager / qs / queryset 链、
         SQL 字面量首参或 extra(select=.../where=.../tables=...) 等 ORM 形态；
       - client.raw()、parser.extra() 等普通业务方法不算裸 SQL。
-    内置豁免严格按文件：
-      - django/common/apps.py 的 PRAGMA 连接初始化
-      - django/config/urls.py 的 SELECT 1 健康检查（大小写不敏感）
+    内置豁免严格按文件（相对项目根，按布局动态计算）：
+      - 源码根/common/apps.py 的 PRAGMA 连接初始化
+      - 源码根/config/urls.py 的 SELECT 1 健康检查（大小写不敏感）
     业务对象上的 runner.execute('install') 之类不算裸 SQL。
     """
-    apps_rel = "django/common/apps.py"
-    health_rel = "django/config/urls.py"
+    _src, _layout = detect_layout(root)
+    apps_rel = (_src / "common" / "apps.py").relative_to(root).as_posix()
+    health_rel = (_src / "config" / "urls.py").relative_to(root).as_posix()
     hits: list[str] = []
     for rel, _path, tree in iter_python_files(root):
         for node in ast.walk(tree):
@@ -385,7 +431,8 @@ def scan_csrf_exempt(root: Path) -> list[str]:
 
 
 def has_orm_models(root: Path) -> bool:
-    tree, _ = parse_python(root / "django" / "core" / "models.py")
+    src_root, _ = detect_layout(root)
+    tree, _ = parse_python(src_root / "core" / "models.py")
     if tree is None:
         return False
     for node in ast.walk(tree):
@@ -400,7 +447,8 @@ def has_orm_models(root: Path) -> bool:
 
 def check_urls_security(root: Path) -> bool:
     """urls.py 必须同时含 SELECT 1 健康检查与 staff_member_required 媒体视图。"""
-    tree, _ = parse_python(root / "django" / "config" / "urls.py")
+    src_root, _ = detect_layout(root)
+    tree, _ = parse_python(src_root / "config" / "urls.py")
     if tree is None:
         return False
     has_select = any(
@@ -443,8 +491,9 @@ def check_middleware_order(middleware_seq: list[str] | None) -> bool:
 
 def has_audit_module(root: Path) -> bool:
     """独立 audit app：models.py 定义 AuditLog，services.py 定义 audit_log。"""
-    model_tree, _ = parse_python(root / "django" / "audit" / "models.py")
-    service_tree, _ = parse_python(root / "django" / "audit" / "services.py")
+    src_root, _ = detect_layout(root)
+    model_tree, _ = parse_python(src_root / "audit" / "models.py")
+    service_tree, _ = parse_python(src_root / "audit" / "services.py")
     if model_tree is None or service_tree is None:
         return False
 
@@ -464,7 +513,8 @@ def has_audit_module(root: Path) -> bool:
 
 def has_audit_append_only(root: Path) -> bool:
     """v2.1：models.py 必须定义 AuditLogQuerySet 与 AuditLogImmutable。"""
-    tree, _ = parse_python(root / "django" / "audit" / "models.py")
+    src_root, _ = detect_layout(root)
+    tree, _ = parse_python(src_root / "audit" / "models.py")
     if tree is None:
         return False
     classes = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
@@ -477,13 +527,15 @@ def scan_audit_direct_writes(root: Path) -> list[str]:
     覆盖两类绕过：
       1. AuditLog.objects.{create,bulk_create,update,bulk_update,delete}
       2. AuditLog(...).save() / instance.save() / instance.delete()（对象级入口）
-    排除 django/audit/ 自身（服务层、清理通道、测试）与所有测试文件，
+    排除源码根/audit/ 自身（服务层、清理通道、测试）与所有测试文件，
     避免检查器把底座自己的实现与测试夹具判为违规。
     """
+    _src, _layout = detect_layout(root)
+    audit_prefix = (_src / "audit").relative_to(root).as_posix() + "/"
     manager_methods = {"create", "bulk_create", "update", "bulk_update", "delete"}
     hits: list[str] = []
     for rel, _path, tree in iter_python_files(root):
-        if rel.startswith("django/audit/") or is_test_file(rel):
+        if rel.startswith(audit_prefix) or is_test_file(rel):
             continue
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
@@ -554,9 +606,10 @@ def check_external_boundaries(root: Path, marker: dict, tier: int) -> list[str]:
             if ".." in parts:
                 problems.append(f"external_boundaries[{idx}].path 不得包含 ..：{path}")
             stripped = normalized.lstrip("/")
-            if stripped == "django" or stripped.startswith("django/"):
+            code_heads = django_code_prefixes(root)
+            if Path(stripped).parts and Path(stripped).parts[0] in code_heads:
                 problems.append(
-                    f"external_boundaries[{idx}].path 不得落在 django/ 内：{path}"
+                    f"external_boundaries[{idx}].path 不得落在 Django 代码目录内：{path}"
                 )
             if not (root / path).is_file():
                 problems.append(f"external_boundaries[{idx}].path 不存在或不是文件：{path}")
@@ -599,7 +652,7 @@ def check_project(root: Path) -> Report:
     tier = marker.get("tier") if marker.get("tier") in VALID_TIERS else 2
     report = Report(root, marker, tier)
 
-    src_root = root / "django"
+    src_root, _layout = detect_layout(root)
     settings_path = src_root / "config" / "settings.py"
     settings_tree, settings_source = parse_python(settings_path)
     apps = list_sequence(settings_tree, "INSTALLED_APPS") or []
@@ -607,12 +660,13 @@ def check_project(root: Path) -> Report:
     backends = list_sequence(settings_tree, "AUTHENTICATION_BACKENDS") or []
 
     # ================= 第 1 层：底座强制统一 =================
+    prefix = "" if src_root == root else src_root.relative_to(root).as_posix() + "/"
     required_layout = ["manage.py", "config", "core", "common"]
     missing_layout = [p for p in required_layout if not (src_root / p).exists()]
     report.check(
         not missing_layout, "FAIL", 1, "layout_django_dir",
-        "保留标准 django/ 目录结构（manage.py / config / core / common）",
-        "缺失或改名：" + ", ".join("django/" + p for p in missing_layout),
+        "保留标准 Django 目录结构（源码根下 manage.py / config / core / common）",
+        "缺失或改名：" + ", ".join(prefix + p for p in missing_layout),
     )
 
     wsgi_tree, wsgi_source = parse_python(src_root / "config" / "wsgi.py")
@@ -621,7 +675,7 @@ def check_project(root: Path) -> Report:
         wsgi_tree is not None and wsgi_node is not None
         and "get_wsgi_application" in (wsgi_source or ""),
         "FAIL", 1, "entry_wsgi",
-        "统一入口 django/config/wsgi.py 暴露 application",
+        "统一入口 config/wsgi.py 暴露 application",
         "保留模板的 config.wsgi:application，不要改用自定义 server 入口",
     )
 
@@ -650,12 +704,12 @@ def check_project(root: Path) -> Report:
     )
     report.check(
         has_audit_module(root), "FAIL", 1, "audit_service",
-        "django/audit/ 定义 AuditLog 模型与 audit_log() 统一入口",
+        "源码根/audit/ 定义 AuditLog 模型与 audit_log() 统一入口",
         "不得引入第三方审计插件，也不得把审计代码散落在业务模块",
     )
     report.check(
         has_audit_append_only(root), "FAIL", 1, "audit_append_only",
-        "django/audit/models.py 定义 AuditLogQuerySet 与 AuditLogImmutable（只追加）",
+        "源码根/audit/models.py 定义 AuditLogQuerySet 与 AuditLogImmutable（只追加）",
         "业务不得绕过只追加约束直接改审计记录",
     )
     direct_writes = scan_audit_direct_writes(root)
@@ -686,7 +740,7 @@ def check_project(root: Path) -> Report:
     csrf_bypass = scan_csrf_bypass(root)
     report.check(
         not csrf_bypass, "FAIL", 1, "no_csrf_bypass",
-        "django/ 内无 _dont_enforce_csrf_checks 绕过",
+        "源码根内无 _dont_enforce_csrf_checks 绕过",
         "发现位置：" + ", ".join(csrf_bypass) if csrf_bypass else "",
     )
 
@@ -722,7 +776,7 @@ def check_project(root: Path) -> Report:
     raw_sql = scan_raw_sql(root)
     report.check(
         not raw_sql, "FAIL", 1, "no_raw_sql_in_django",
-        "django/ 内无业务裸 SQL（仅内置豁免 SELECT 1 / PRAGMA）",
+        "源码根内无业务裸 SQL（仅内置豁免 SELECT 1 / PRAGMA）",
         "命中：" + ", ".join(raw_sql) if raw_sql else "",
     )
 

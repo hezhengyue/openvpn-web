@@ -57,7 +57,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "2.5.0"
+WEB_VERSION = "2.6.0"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -79,12 +79,11 @@ DEFAULT_CFG = {
     "extra_routes": [],
     "dns": [],
     "ntp": [],
-    # MTU/MSS 回归 OpenVPN 默认（1500，不钳制）：早期为排查「RDP 大流量隧道重置」
-    # 加过 tun-mtu 1400 / mssfix 1360，后来证实根因是 VPN 服务器与目标电脑同机的
-    # 流量回环，换独立服务器即恢复。极简客户端不再写这些指令，服务端也统一用默认，
-    # 两端口径一致，避免 IV_MTU 错位（Bad encapsulated packet length）。
-    "tun_mtu": 1500,
-    "mssfix": 0,                    # 0 = 不钳制 TCP MSS（极简默认）
+    # tun-mtu 默认 1400（公网链路的经验值，避免封装后超过 1500 物理 MTU）。
+    # 极简客户端不写这些指令，服务端也统一用默认，两端口径一致，避免 IV_MTU 错位
+    # （Bad encapsulated packet length）。mssfix 字段已移除：极简方案两端都不写它，
+    # 留着只会让人误以为填了就生效；需要时可在 server_extra 里手写 mssfix。
+    "tun_mtu": 1400,
     # 显式链路 MTU（0 = 不写，让 OpenVPN 自己推算）。仅排障时按需在服务端单独下发；
     # 极简客户端永远不写，保证一份 ovpn 通吃 2.4~2.6。
     "link_mtu": 0,
@@ -777,19 +776,12 @@ def validate_cfg(c):
         mtu = int(c.get("tun_mtu", 1400))
         if not (576 <= mtu <= 1600):
             errs.append("tun-mtu 需在 576~1600 之间（公网推荐 1400，局域网可 1500）")
-        # mssfix 0 = 关闭钳制；否则必须留够 IPv4+TCP 头（40 字节），
-        # 大于 mtu-40 就形同虚设，还会让用户以为大包问题已经修了。
-        mssfix = int(c.get("mssfix", 1360))
-        if mssfix < 0 or mssfix > 1600:
-            errs.append("mssfix 需在 0~1600 之间（0 = 关闭，推荐 tun-mtu - 40）")
-        elif mssfix and mssfix > mtu - 40:
-            errs.append("mssfix 不能大于 tun-mtu - 40（%s），否则起不到钳制作用" % (mtu - 40))
         # 0 = 不写；非 0 时限制在物理链路合理范围，避免注入非法指令
         link_mtu = int(c.get("link_mtu", 0) or 0)
         if link_mtu < 0 or link_mtu > 2000:
             errs.append("link-mtu 需在 0~2000 之间（0 = 不写）")
     except Exception:
-        errs.append("tun-mtu / mssfix 必须是数字")
+        errs.append("tun-mtu / link-mtu 必须是数字")
     # 动态地址池：要么不开，开了就必须是网段内的合法一段，且不能把地址全吃掉
     if c.get("pool_enabled"):
         try:
@@ -2431,8 +2423,6 @@ def render_ovpn(c):
     """
     pki = read_pki()
     L = [
-        "# OpenVPN Web 一体化管理系统 —— 全员共用这一个文件，不含任何个人凭据",
-        "# 极简通用配置：兼容 OpenVPN 2.4~2.6；加密由服务端协商、路由由服务端下发",
         "client",
         "dev tun",
         "proto %s" % _proto_name(c, "client"),

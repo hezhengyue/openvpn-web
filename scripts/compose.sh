@@ -150,8 +150,10 @@ MANAGE() {
         local base="${BASE_DIR:-$PWD}"
         local py
         py="$(python_bin)"
-        # 项目结构：manage.py 在 django/ 下（Django 项目根），运行时目录在安装根
-        (cd "$base/django" && "$py" manage.py "$@")
+        # 2.6 起源码与交付同构为根布局（manage.py 在 base 根）；兼容 django/ 子目录
+        local mgdir="$base"
+        [ -f "$base/manage.py" ] || mgdir="$base/django"
+        (cd "$mgdir" && "$py" manage.py "$@")
     fi
 }
 

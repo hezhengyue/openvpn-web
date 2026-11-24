@@ -6,7 +6,7 @@
     密码哈希……）与特权脚本共用的 SQLite 实现。**零 Django 依赖**，给
     `system/worker.py`、`system/auth-verify.py`、`system/setup.py` 用。
   * 本模块 —— 把纯逻辑整体继承过来，再**用 Django ORM 重新实现全部数据访问**，
-    供 Web 进程使用。`django/` 内不出现任何 `sqlite3.connect` 或业务 `cursor.execute`。
+    供 Web 进程使用。源码根内不出现任何 `sqlite3.connect` 或业务 `cursor.execute`。
 
 对外函数名、参数、返回结构与原 Flask 版 `core.py` 完全一致，`ovpn/views.py`
 和前端 `index.html` 一行都不用改。
@@ -57,7 +57,7 @@ _PREVIEW_TTL = 300
 def db():
     """原实现返回 sqlite3 连接。Web 侧已全部改走 ORM，这里显式拒绝，避免有人绕回来。"""
     raise RuntimeError(
-        "Web 侧不再直接持有数据库连接：请使用 django/ovpn/models.py 里的模型。"
+        "Web 侧不再直接持有数据库连接：请使用 ovpn/models.py 里的模型。"
         "特权脚本（system/）仍可用 system.core.db()。")
 
 

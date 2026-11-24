@@ -19,7 +19,8 @@ import sys
 _HERE = os.path.dirname(os.path.abspath(__file__))
 # serve.py 恒在安装根（与 bin/、system/、vendor/、data/ 同级）。
 ROOT = _HERE
-# Django 项目根：ROOT/django（源码与交付包同一套布局，不再平铺）。
+# Django 项目根：2.6 起源码与交付同构为「项目根即 Django 根」（config/ 在 ROOT 下），
+# 兼容 base 模板的 django/ 子目录布局（ROOT/django/config）。
 DJANGO_DIR = ROOT
 if os.path.isdir(os.path.join(ROOT, "django", "config")):
     DJANGO_DIR = os.path.join(ROOT, "django")

@@ -18,7 +18,7 @@ import tarfile
 from datetime import datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))        # tests/
-CODE = os.path.dirname(HERE)                             # 安装根（system/、django/、bin/ 所在层）
+CODE = os.path.dirname(HERE)                             # 安装根（system/、config/、bin/ 所在层）
 SYS = os.path.join(CODE, "system")
 DJANGO = os.path.join(CODE, "django") if os.path.isdir(os.path.join(CODE, "django")) else CODE
 TMP = tempfile.mkdtemp(prefix="ovpnweb-selftest-")
@@ -119,8 +119,8 @@ def main():
     check("默认 VPN 网段", core.cfg()["vpn_cidr"] == "10.8.0.0/24")
     check("无 NAT 溯源默认关闭（默认 NAT 模式）", core.cfg()["nat_mode"] == "nat")
     check("默认隧道协议 TCP", core.cfg()["proto"] == "tcp")
-    check("默认 tun-mtu 1500（回归 OpenVPN 默认）", core.cfg()["tun_mtu"] == 1500)
-    check("默认 mssfix 0（极简，不钳制）", core.cfg()["mssfix"] == 0)
+    check("默认 tun-mtu 1400（公网经验值）", core.cfg()["tun_mtu"] == 1400)
+    check("已移除 mssfix 字段（极简两端都不写）", "mssfix" not in core.cfg())
     check("默认 data-ciphers 为 AEAD 三件套",
           core.cfg()["data_ciphers"] == "AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305")
     check("默认关闭 tls-crypt（极简客户端不内嵌密钥）", core.cfg()["tls_crypt"] is False)
@@ -666,11 +666,11 @@ def main():
     section("配置指纹与更新闸门")
     fp1 = core.config_fingerprint(core.cfg())
     check("改端口后指纹变化", core.config_fingerprint(dict(core.cfg(), port=1195)) != fp1)
-    check("改 mssfix 不触发客户端重发（服务端内部调整）",
-          core.config_fingerprint(dict(core.cfg(), mssfix=1300)) == fp1)
-    check("mssfix=0 时不写 mssfix 指令",
-          "mssfix" not in core.render_server_conf(dict(core.cfg(), mssfix=0))
-          and "mssfix" not in core.render_ovpn(dict(core.cfg(), mssfix=0)))
+    check("改 tun-mtu 不触发客户端重发（服务端内部调整）",
+          core.config_fingerprint(dict(core.cfg(), tun_mtu=1300)) == fp1)
+    check("mssfix 字段移除后两端配置均不写该指令",
+          "mssfix" not in core.render_server_conf(core.cfg())
+          and "mssfix" not in core.render_ovpn(core.cfg()))
     check("改压缩方式不触发客户端重发（极简 ovpn 不含压缩）",
           core.config_fingerprint(dict(core.cfg(), compress="lzo")) == fp1)
     _cfg = dict(core.cfg(), public_addr="vpn.example.com")
@@ -706,7 +706,7 @@ def main():
     section("Web API（安装向导 / 设置 / 日志 / 自检）")
     params = {"public_addr": "vpn.example.com", "port": 1194, "proto": "tcp",
               "vpn_cidr": "10.8.0.0/24", "extra_routes": ["10.10.0.0/16"],
-              "dns": ["10.10.0.53"], "ntp": ["10.10.0.123"], "tun_mtu": 1500, "mssfix": 0,
+              "dns": ["10.10.0.53"], "ntp": ["10.10.0.123"], "tun_mtu": 1400,
               "compress": "off", "data_ciphers": "AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305",
               "tls_min": "1.2", "pool_enabled": False,
               "pool_start": "10.8.0.2", "pool_end": "10.8.0.9"}
@@ -1399,10 +1399,10 @@ def main():
         _ok_tls = dict(_scfg)
         _ok_tls["tls_min"] = _v
         check("validate_cfg 接受合法 tls_min %s" % _v, not core.validate_cfg(_ok_tls))
-    for _bad in (-1, 1700, 1500, "1360\nup /bin/sh", "abc"):
-        check("validate_cfg 拒绝非法 mssfix %r" % _bad,
-              any("mssfix" in e for e in core.validate_cfg(dict(_scfg, mssfix=_bad))),
-              core.validate_cfg(dict(_scfg, mssfix=_bad)))
+    for _bad in (-1, 1700, "1400\nup /bin/sh", "abc"):
+        check("validate_cfg 拒绝非法 tun-mtu %r" % _bad,
+              any("tun-mtu" in e for e in core.validate_cfg(dict(_scfg, tun_mtu=_bad))),
+              core.validate_cfg(dict(_scfg, tun_mtu=_bad)))
     try:
         core.render_server_conf(_bad_tls)
         check("render_server_conf 对脏 tls_min 拒绝生成（fail-closed）", False)
@@ -1583,8 +1583,8 @@ def main():
     _bop_py = os.path.join(CODE, "build", "build-offline.py")
     if os.path.isfile(_bop_py):
         _bop_src = open(_bop_py, encoding="utf-8").read()
-        check("Windows 打包把 django/ 与 system/ 整体收进交付包",
-              'copy_tree(os.path.join(src, "django")' in _bop_src
+        check("Windows 打包把 Django apps 与 system/ 整体收进交付包（根布局）",
+              'for d in ("config", "core", "common", "audit", "jobs", "ovpn", "templates", "static")' in _bop_src
               and 'copy_tree(os.path.join(src, "system")' in _bop_src)
 
     # Windows 上打包：不执行包内 Linux Python，只搬运 + 按规则写 tar

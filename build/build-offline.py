@@ -223,7 +223,14 @@ def main():
     out_dir = os.path.join(a.out, NAME)
     tar_path = os.path.join(a.out, NAME + ".tar.gz")
 
-    for p, why in ((os.path.join(src, "django"), "Django 项目"), (bin_, "预编译二进制"), (runtime, "离线 Python"),
+    # Django 项目存在性：2.6 根布局看 manage.py + config/，兼容旧 django/ 子目录
+    _dj_ok = (os.path.isfile(os.path.join(src, "manage.py"))
+              and os.path.isdir(os.path.join(src, "config"))) \
+             or os.path.isdir(os.path.join(src, "django"))
+    if not _dj_ok:
+        say("错误: 缺少 Django 项目（manage.py + config/ 或 django/）")
+        return 1
+    for p, why in ((bin_, "预编译二进制"), (runtime, "离线 Python"),
                    (vendor, "静态库/源码/wheel")):
         if not os.path.isdir(p):
             say("错误: 缺少 %s（%s）" % (p, why))
@@ -234,19 +241,28 @@ def main():
     say(" 模式: %s" % ("只出 tar.gz" if a.tar_only else "目录 + tar.gz"))
     say("=" * 60)
 
-    # 1) 程序文件：根级 serve.py + django/ 整个项目 + system/ 特权脚本 + tests/ 自检
-    # 交付包与源码布局保持一致（不再平铺），install.sh / serve.py / worker 的路径假设
-    # 因此只有一份，不会出现「源码一套、装机另一套」。
+    # 1) 程序文件：根级 serve.py/manage.py + Django 各 app + system/ 特权脚本 + tests/ 自检
+    # 2.6 起源码与交付同构为「项目根即 Django 根」：config/core/common/audit/jobs/ovpn/
+    # templates/static 与 manage.py 直接在根，整目录收进包，装机后布局完全一致。
+    # 兼容旧的 django/ 子目录布局（若还在，整目录照搬）。
     if os.path.isdir(out_dir):
         shutil.rmtree(out_dir)
     os.makedirs(os.path.join(out_dir, "bin"), exist_ok=True)
     n = 0
-    for fn in ("serve.py", "README.md"):
+    for fn in ("serve.py", "README.md", "manage.py", "requirements.txt",
+               "requirements-standalone.txt"):
         p = os.path.join(src, fn)
         if os.path.isfile(p):
             copy_file(p, os.path.join(out_dir, fn), eol_lf=True)
             n += 1
-    n += copy_tree(os.path.join(src, "django"), os.path.join(out_dir, "django"), eol_lf=True)
+    # 根布局：逐个 app 目录复制到包根
+    for d in ("config", "core", "common", "audit", "jobs", "ovpn", "templates", "static"):
+        p = os.path.join(src, d)
+        if os.path.isdir(p):
+            n += copy_tree(p, os.path.join(out_dir, d), eol_lf=True)
+    # 兼容旧 django/ 子目录布局
+    if os.path.isdir(os.path.join(src, "django")):
+        n += copy_tree(os.path.join(src, "django"), os.path.join(out_dir, "django"), eol_lf=True)
     n += copy_tree(os.path.join(src, "system"), os.path.join(out_dir, "system"), eol_lf=True)
     # scripts/：接入契约检查器。core/tests.py 的 ContractCheckTest 按
     # <项目根>/scripts/contract_check.py 定位它，装机后跑 manage.py test 要用；
@@ -262,7 +278,7 @@ def main():
         copy_file(os.path.join(src, ".contract.json"), os.path.join(out_dir, ".contract.json"), eol_lf=True)
         n += 1
     # install.sh 的正身在 system/，但「解包后直接 ./install.sh」是既有使用习惯，
-    # 包根再放一份同内容副本；脚本自身会向上找到含 django/ 的那一层作为安装源。
+    # 包根再放一份同内容副本；脚本自身会找到含 manage.py 的那一层作为安装源。
     inst = os.path.join(src, "system", "install.sh")
     if os.path.isfile(inst):
         copy_file(inst, os.path.join(out_dir, "install.sh"), eol_lf=True)
@@ -273,7 +289,7 @@ def main():
         if os.path.isfile(p):
             copy_file(p, os.path.join(out_dir, "tests", fn), eol_lf=True)
             n += 1
-    say("[1/5] 程序文件 + django/ + system/ %d 个" % n)
+    say("[1/5] 程序文件 + Django apps + system/ %d 个" % n)
 
     # 2) 二进制
     for fn in sorted(os.listdir(bin_)):

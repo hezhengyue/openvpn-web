@@ -3,7 +3,7 @@
   "tier": 3,
   "project": "openvpn-web",
   "role": "business",
-  "notes": "承载模式项目。Django 项目本体在 django/（manage.py、config、core、common、jobs、ovpn），业务数据已全部迁到 django/ovpn/models.py 的 ORM 模型，django/ 内零裸 SQL；前端 index.html/self_page.html 与 /api/* 路径、字段保持与 Flask 版完全兼容。物理上无法由 Web 进程承担的组件——安装与内核配置、一次性安装码、OpenVPN 二进制准备、救场重置口令、以 root 执行的特权动作、拨号认证钩子、安装前预检——集中在 system/，逐项登记于 external_boundaries。",
+  "notes": "承载模式项目。2.6 起源码与交付同构：项目根即 Django 根（manage.py、config、core、common、jobs、ovpn、audit 直接在根），业务数据已全部迁到 ovpn/models.py 的 ORM 模型，源码根内零裸 SQL；前端 index.html/self_page.html 与 /api/* 路径、字段保持与 Flask 版完全兼容。物理上无法由 Web 进程承担的组件——安装与内核配置、一次性安装码、OpenVPN 二进制准备、救场重置口令、以 root 执行的特权动作、拨号认证钩子、安装前预检——集中在 system/，逐项登记于 external_boundaries。",
   "external_boundaries": [
     {
       "path": "system/install.sh",

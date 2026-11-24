@@ -44,9 +44,14 @@ rm -rf "$OUT"; mkdir -p "$OUT"/{bin,data}
 # 从 Windows/zip 中转过来的文件会丢可执行位，先补回来，否则会被误判成"没有二进制"而去重编
 [ -d "$ROOT/bin" ] && chmod +x "$ROOT"/bin/* 2>/dev/null || true
 chmod +x "$ROOT"/build/*.sh "$ROOT"/system/*.sh 2>/dev/null || true
-# 程序按 django/ + system/ 两个目录整体进包，与源码布局完全一致（不再平铺）
-cp -f "$ROOT/serve.py" "$ROOT/README.md" "$OUT"/ 2>/dev/null || true
-cp -a "$ROOT/django" "$OUT"/ 2>/dev/null || true
+# 2.6 起源码与交付同构为「项目根即 Django 根」：manage.py + 各 app 直接在根，
+# 与 system/ 特权脚本一起整体进包（兼容旧 django/ 子目录布局）。
+cp -f "$ROOT/serve.py" "$ROOT/README.md" "$ROOT/manage.py" \
+      "$ROOT/requirements.txt" "$ROOT/requirements-standalone.txt" "$OUT"/ 2>/dev/null || true
+for d in config core common audit jobs ovpn templates static; do
+    [ -d "$ROOT/$d" ] && cp -a "$ROOT/$d" "$OUT"/ 2>/dev/null || true
+done
+[ -d "$ROOT/django" ] && cp -a "$ROOT/django" "$OUT"/ 2>/dev/null || true
 cp -a "$ROOT/system" "$OUT"/ 2>/dev/null || true
 mkdir -p "$OUT/tests"
 cp -f "$ROOT/tests/selftest.py" "$ROOT/tests/selftest_django.py" "$OUT/tests/" 2>/dev/null || true

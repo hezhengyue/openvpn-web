@@ -254,7 +254,7 @@ def audit_log(**kwargs):
     def setUpClass(cls):
         super().setUpClass()
         path = (
-            Path(__file__).resolve().parent.parent.parent
+            Path(__file__).resolve().parent.parent
             / 'scripts' / 'contract_check.py'
         )
         spec = importlib.util.spec_from_file_location('contract_check_under_test', path)
@@ -265,7 +265,7 @@ def audit_log(**kwargs):
 
     @property
     def repo_root(self):
-        return Path(__file__).resolve().parent.parent.parent
+        return Path(__file__).resolve().parent.parent
 
     def make_project(self, settings_text=None, tier=2, notes='', boundaries=None):
         tmp = tempfile.TemporaryDirectory()
@@ -592,8 +592,8 @@ def audit_log(**kwargs):
             self.codes_at(self.checker.check_project(other), 'FAIL'),
         )
 
-    def test_flat_layout_is_not_accepted(self):
-        """平铺布局不再兼容：项目根有 manage.py 也不替代 django/ 结构。"""
+    def test_flat_layout_is_accepted(self):
+        """2.6 起源码与交付同构：项目根即 Django 根，应被识别为合法布局。"""
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
@@ -605,9 +605,10 @@ def audit_log(**kwargs):
             'contract': 'v2.3', 'tier': 2, 'project': 'flat', 'role': 'project',
             'notes': '', 'external_boundaries': [],
         }), encoding='utf-8')
-        codes = self.codes_at(self.checker.check_project(root), 'FAIL')
-        self.assertIn('layout_django_dir', codes)
-        self.assertIn('settings_parse', codes)
+        report = self.checker.check_project(root)
+        # 布局检查通过（manage.py/config/core/common 齐全）；settings.py 缺失仍单独 FAIL
+        self.assertNotIn('layout_django_dir', self.codes_at(report, 'FAIL'))
+        self.assertIn('settings_parse', self.codes_at(report, 'FAIL'))
 
     def test_external_boundary_must_be_a_real_relative_file(self):
         root = self._tier3_project()

@@ -274,6 +274,21 @@ pre::-webkit-scrollbar-thumb{background:oklch(.45 .02 250);background-clip:conte
    浏览器若缓存了旧 HTML（标签页常开不重载、或中间层缓存），靠这个跟服务端版本比对来自愈。 */
 const PAGE_VERSION='{{ page_version }}';
 const S={csrf:'',logged:false,cfg:null,page:'overview',task:null};
+/* 会话空闲超时：无任何真实操作满 1 小时自动退出并刷新到登录页。
+   只认点击/键盘/滚动/触摸这类用户动作；60 秒 /api/session 轮询与 CSRF 重试是
+   fetch，不触发这些事件，因此不会让会话「假活跃」而永不超时。 */
+const IDLE_MS=60*60*1000;
+let lastActive=Date.now();
+function markActive(){lastActive=Date.now()}
+['click','mousedown','keydown','scroll','touchstart'].forEach(function(ev){
+  document.addEventListener(ev,markActive,{passive:true});
+});
+setInterval(function(){
+  if(S.logged && (Date.now()-lastActive)>=IDLE_MS){
+    lastActive=Date.now();
+    post('/api/logout').catch(function(){}).finally(function(){location.reload()});
+  }
+},15000);
 const $=s=>document.querySelector(s);
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function toast(m,t){const d=document.createElement('div');d.className='tst '+(t||'');d.textContent=m;$('#toast').appendChild(d);setTimeout(()=>d.remove(),3600)}
@@ -306,7 +321,7 @@ function downloadText(name,text){
  document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},500)}
 function showLogin(){$('#login').style.display='flex';$('#force').style.display='none';$('#app').style.display='none'}
 function showForce(){$('#login').style.display='none';$('#force').style.display='flex';$('#app').style.display='none'}
-function showApp(){$('#login').style.display='none';$('#force').style.display='none';$('#app').style.display='block'}
+function showApp(){markActive();$('#login').style.display='none';$('#force').style.display='none';$('#app').style.display='block'}
 async function doLogin(){
   try{const j=await api('/api/login',{method:'POST',body:{username:$('#lu').value.trim(),password:$('#lp').value}});
     S.csrf=j.csrf;S.logged=true;$('#lp').value='';
@@ -513,8 +528,7 @@ async function pgWizard(){
     <div id="witems">${tbl(['检查项','结果','说明'],W.items.map(i=>[esc(i.name),i.ok?badge('通过','ok'):badge(i.fatal?'不通过':'注意',i.fatal?'err':'warn'),esc(i.detail)]),'点【重新检测】开始')}</div></div>
   <div class="card"><h3>第 2 步 · 放置 openvpn 静态二进制 <small>≥ 2.6.23，glibc 2.17 ABI</small></h3>
     <div class="hint">包内已自带 <span class="mono">bin/openvpn</span>；缺失时可在此上传，校验项与自动编译一致。
-     <br>替换二进制等于把一个外部程序装成 root 服务，所以要填<b>一次性安装码</b>：在服务器上执行
-     <span class="mono">sudo /opt/openvpn-web/install-code.sh</span> 拿码（默认 15 分钟有效；安装完成时打印的是 2 小时的）；一码一次，填错 5 次作废。</div>
+     <br>替换二进制需填<b>一次性安装码</b>：在服务器执行 <span class="mono">sudo /opt/openvpn-web/install-code.sh</span> 获取（一码一次，15 分钟内有效）。</div>
     <div class="bar"><input id="wcode" placeholder="安装码（8 位）" maxlength="12" style="width:150px;letter-spacing:1px"><input type="file" id="wbin"><button class="btn pri" onclick="wUpload()">上传并校验</button><span id="wver" class="muted">${esc(W.ver)}</span></div></div>
   <div class="card"><h3>第 3 步 · 参数</h3>${cfgForm()}
    <label class="f" style="margin-top:8px"><span>网络模式</span><select id="w_nat">
@@ -557,9 +571,8 @@ function cfgForm(c){c=c||S.cfg||{};const v=(k,d)=>esc(c[k]==null?(d||''):c[k]);
   <label class="f"><span>隧道协议</span><select id="c_proto"><option value="tcp" ${(c.proto||'tcp')==='tcp'?'selected':''}>TCP（默认，穿透性最好）</option><option value="udp" ${c.proto==='udp'?'selected':''}>UDP（延迟低，被限 UDP 时不通）</option></select></label>
   <label class="f"><span>VPN 网段</span><input id="c_vpn_cidr" value="${v('vpn_cidr','10.8.0.0/24')}"></label>
   <label class="f"><span>tun-mtu</span><input type="number" id="c_tun_mtu" value="${v('tun_mtu',1400)}"></label>
-  <label class="f"><span>mssfix（TCP MSS）</span><input type="number" id="c_mssfix" value="${v('mssfix',1360)}"></label>
  </div>
- <div class="hint" style="margin:-6px 0 12px">mssfix 把 TCP 最大报文段钳制到 <b>1360</b>（tun-mtu 1400 − 40 字节 IP/TCP 头），避免隧道封装后超过物理 MTU，造成「能 ping 通但远程桌面／大文件传输超时」；填 <b>0</b> 表示关闭。</div>
+ <div class="hint" style="margin:-6px 0 12px">tun-mtu 默认 <b>1400</b>，避免隧道封装后超过物理 MTU；极简客户端不写这个值，改它无需重发客户端。</div>
  <div style="margin:0 0 14px">
   <div class="sub">附加推送路由 <span style="opacity:.7">· 回车加入，可粘贴多行</span></div>
   ${tagHtml('extra_routes','例如 10.20.0.0/16')}
@@ -637,7 +650,7 @@ function readCfg(){const g=id=>($('#'+id)||{}).value?$('#'+id).value.trim():'';
   public_port:g('c_public_port')?parseInt(g('c_public_port')):0,
   proto:g('c_proto'),vpn_cidr:g('c_vpn_cidr'),
   extra_routes:(TAGS.extra_routes||[]).slice(),dns:lst('c_dns'),ntp:lst('c_ntp'),
-  tun_mtu:parseInt(g('c_tun_mtu')),mssfix:g('c_mssfix')?parseInt(g('c_mssfix')):0,compress:g('c_compress'),data_ciphers:ck.join(':'),
+  tun_mtu:parseInt(g('c_tun_mtu')),compress:g('c_compress'),data_ciphers:ck.join(':'),
   tls_min:g('c_tls_min'),
   pool_enabled:!!($('#c_pool_on')&&$('#c_pool_on').checked),
   pool_start:g('c_pool_start'),pool_end:g('c_pool_end')}}
@@ -1071,7 +1084,7 @@ async function pgUpdate(){const v=await get('/api/version'),
    <button class="btn sm" onclick="recheckBuildEnv()">重新检测</button></div>
   <div class="muted" style="font-size:12px;margin-bottom:6px">安装完成与服务启动时已自动检查${be.checked_at?'，最近一次：'+esc(be.checked_at):''}。补装工具后点【重新检测】即可刷新，无需重启。</div>
   ${be.ok?`<div class="bar"><input id="upcode" placeholder="安装码（8 位）" maxlength="12" style="width:150px;letter-spacing:1px">
-   <span class="muted" style="font-size:12px">在服务器上执行 <span class="mono">sudo /opt/openvpn-web/install-code.sh</span> 拿码 · 一码一次</span></div>
+   <span class="muted" style="font-size:12px">安装码：服务器执行 <span class="mono">sudo /opt/openvpn-web/install-code.sh</span> 获取（一码一次）</span></div>
    <div class="bar"><input type="file" id="upsrc" accept=".gz,.tgz"></div>
    <div class="bar"><label style="font-size:12px"><input type="checkbox" id="upsrcmajor"> 允许跨大版本</label>
     <button class="btn pri" onclick="upSource()">编译并更新</button></div><div id="uptask2"></div>`

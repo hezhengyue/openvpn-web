@@ -882,7 +882,7 @@ def api_restart(request):
 
 # =========================================================== 前端页面
 def index(request):
-    """单页前端：django/templates/index.html
+    """单页前端：templates/index.html
 
     走 Django 模板引擎只是为了把版本号从 `core.WEB_VERSION` 注入进去——页面里
     其余 116KB 是纯 HTML/JS，一个 `{{ }}` / `{% %}` 都没有，所以渲染结果与原文件

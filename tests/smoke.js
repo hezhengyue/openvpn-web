@@ -169,8 +169,8 @@ async function waitUp() {
       const cfg = w.readCfg();
       if (!Array.isArray(cfg.extra_routes) || cfg.extra_routes.length !== 3) errors.push('readCfg 没读到路由标签');
       if (cfg.tun_mtu !== 1400) errors.push('readCfg tun_mtu=' + cfg.tun_mtu);
-      if (cfg.mssfix !== 1360) errors.push('readCfg mssfix=' + cfg.mssfix);
-      if (cfg.data_ciphers !== 'AES-256-GCM:CHACHA20-POLY1305') errors.push('readCfg 加密套件=' + cfg.data_ciphers);
+      if ('mssfix' in cfg) errors.push('readCfg 不应再返回 mssfix 字段');
+      if (cfg.data_ciphers !== 'AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305') errors.push('readCfg 加密套件=' + cfg.data_ciphers);
       if (!w.document.querySelector('#c_public_port')) errors.push('设置页缺少对外映射端口输入框');
       if (cfg.public_port !== 0) errors.push('readCfg 默认对外端口应为 0（同服务端口），实际=' + cfg.public_port);
       // 本机监听端口与对外映射端口必须在同一行，改动时才看得清对应关系
