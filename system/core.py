@@ -2314,9 +2314,18 @@ def render_server_conf(c):
     # 当成对端 IP，Windows 上直接 fatal（"local and remote endpoints must exist within
     # the same 255.255.255.252 subnet"）。
     L.append('push "topology subnet"')
+    # 推送的每条 route 都必须带下一跳。本系统用手工 mode server + ifconfig（不是
+    # --server 宏），OpenVPN 不会自动下发 route-gateway；ccd 里给的又是
+    # "ifconfig-push <ip> <掩码>"（subnet 拓扑，没有对端 IP）。Windows 客户端
+    # （尤其 2.4.x）收到不带网关的 --route 会报
+    # "needs a gateway parameter for a --route option ..."，TEST ROUTES 变成 0/0，
+    # 连 VPN 网段自己的路由都加不上，附加推送路由自然也不通。
+    # 这里既显式下发全局 route-gateway，又给每条 route 带上网关，双保险。
+    L.append('push "route-gateway %s"' % local)
     # VPN 网段与附加推送路由统一由 push_targets 给出，避免两处各自拼一份、漏掉一条
     for nw in push_targets(c):
-        L.append('push "route %s %s"' % (str(nw.network_address), str(nw.netmask)))
+        L.append('push "route %s %s %s"' % (
+            str(nw.network_address), str(nw.netmask), local))
     # 不推送 redirect-gateway：不接管客户端默认网关
     L += [
         "client-config-dir %s" % CCD,

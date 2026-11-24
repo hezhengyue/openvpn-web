@@ -150,9 +150,18 @@ def main():
     check("company.ovpn 写 topology subnet", "\ntopology subnet\n" in ovpn)
     # VPN 网段必须自动出现在推送路由里，且只出现一次（不能走两处各写一遍）
     vpn_net = core.vpn_network(core.cfg())
-    vpn_push = 'push "route %s %s"' % (vpn_net.network_address, vpn_net.netmask)
-    check("server.conf 自动推送 VPN 网段", vpn_push in conf)
+    vpn_gw = str(vpn_net.network_address + 1)
+    vpn_push = 'push "route %s %s %s"' % (vpn_net.network_address, vpn_net.netmask, vpn_gw)
+    check("server.conf 自动推送 VPN 网段（带网关）", vpn_push in conf)
     check("VPN 网段只推送一次（没有重复）", conf.count(vpn_push) == 1)
+    # Windows 老客户端（2.4.x）在 subnet 拓扑下，若 push 的 route 不带网关会解析失败，
+    # TEST ROUTES 变 0/0，连 VPN 网段自己都加不上。必须显式下发 route-gateway。
+    check("显式下发 route-gateway（Windows 2.4.x 兼容）",
+          'push "route-gateway %s"' % vpn_gw in conf)
+    _extra = [n for n in core.push_targets(core.cfg(), include_vpn=False)]
+    check("所有附加推送路由都带网关",
+          all('push "route %s %s %s"' % (n.network_address, n.netmask, vpn_gw) in conf
+              for n in _extra))
     check("push_targets 含 VPN 网段", vpn_net in core.push_targets(core.cfg()))
     check("指纹口径不含 VPN 网段（避免无故要求重发 ovpn）",
           vpn_net not in core.push_targets(core.cfg(), include_vpn=False))
