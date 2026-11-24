@@ -169,10 +169,11 @@ pre::-webkit-scrollbar-thumb{background:oklch(.45 .02 250);background-clip:conte
 .mbox .foot{display:flex;justify-content:flex-end;gap:8px;margin-top:20px;padding-top:16px;border-top:1px solid var(--border)}
 #toast{position:fixed;top:18px;left:50%;transform:translateX(-50%);z-index:99;display:flex;flex-direction:column;gap:10px;align-items:center;
  width:min(92vw,520px);pointer-events:none}
-.tst{background:oklch(.28 .015 255);color:#fff;padding:10px 16px;border-radius:var(--r-md);font-size:12.5px;
+.tst{background:#1f2937;color:#fff;padding:10px 16px;border-radius:var(--r-md);font-size:12.5px;
  box-shadow:var(--shadow-md);animation:toastin .24s cubic-bezier(.2,.8,.3,1);max-width:100%;line-height:1.55;
  pointer-events:auto;text-align:center}
-.tst.ok{background:oklch(.48 .13 155)}.tst.err{background:oklch(.52 .19 25)}.tst.warn{background:oklch(.55 .14 70)}
+/* 用 hex 固定底色+白字：oklch 在部分内置浏览器/WebView 不生效时会出现白底白字 */
+.tst.ok{background:#146c43}.tst.err{background:#a91d1d}.tst.warn{background:#8a5300}
 @keyframes toastin{from{opacity:0;transform:translateY(-12px)}to{opacity:1;transform:none}}
 /* 关键操作结果用醒目大卡片：带图标、可点关闭、停留更久 */
 .tst.big{width:100%;max-width:none;text-align:left;padding:14px 16px;display:flex;gap:12px;align-items:flex-start;
