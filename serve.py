@@ -26,22 +26,23 @@ if os.path.isdir(os.path.join(ROOT, "django", "config")):
     DJANGO_DIR = os.path.join(ROOT, "django")
 sys.path.insert(0, ROOT)          # 让 system/ 包可导入（特权脚本边界）
 sys.path.insert(0, DJANGO_DIR)    # 让 config/、core/、ovpn/ 可导入
+# 先把 .env 读进进程环境，再做下面的 setdefault 和端口/线程解析：django-environ
+# 的优先级是进程环境变量 > .env > 代码默认，若先 setdefault 再让 settings 读 .env，
+# 用户写在 .env 里的域名/密钥会被默认值占坑（典型后果：HOSTS 配了域名仍 400）。
+# 端口/线程同理——读 env 晚于 PORT/THREADS 解析时，.env 的 OVPN_WEB_PORT /
+# OVPN_WEB_THREADS 永远不生效。read_env 默认 overwrite=False，systemd/命令行
+# 注入的环境变量依旧优先级最高。
+try:
+    import environ
+    environ.Env.read_env(os.path.join(ROOT, ".env"))
+except Exception as e:
+    print("[serve] 读取 .env 失败（继续用环境变量）: %s" % e)
 PORT = int(os.environ.get("OVPN_WEB_PORT", "8800"))
 try:
     THREADS = max(1, min(64, int(os.environ.get("OVPN_WEB_THREADS", "8"))))
 except ValueError:
     THREADS = 8
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
-# 先把 .env 读进进程环境，再做下面的 setdefault：django-environ 的优先级是
-# 进程环境变量 > .env > 代码默认，若先 setdefault("USE_HTTPS"/"HOSTS"/"SECRET_KEY")
-# 再让 settings 读 .env，用户写在 .env 里的域名/密钥会被这里的默认值占坑，
-# 典型后果是 .env 配了 HOSTS=vpn.example.com 却仍然 400 DisallowedHost。
-# read_env 默认 overwrite=False，systemd/命令行注入的环境变量依旧优先级最高。
-try:
-    import environ
-    environ.Env.read_env(os.path.join(ROOT, ".env"))
-except Exception as e:
-    print("[serve] 读取 .env 失败（继续用环境变量）: %s" % e)
 # 这是单机便携交付：强制裸机模式（SQLite + WhiteNoise + Waitress，零外部服务）。
 # 不读 .env 的 STANDALONE 开关——交付形态固定，避免误配成 Docker 模式连不上库。
 os.environ["STANDALONE"] = "True"

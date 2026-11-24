@@ -140,6 +140,13 @@ def create(tag="手动", keep=10, kind="manual"):
                 except sqlite3.Error:
                     pass  # 老库没有这张表
             dst.commit()
+            # DELETE 只把页标记为可复用，原字节仍在文件里，strings 一下就能看到
+            # 刚删掉的活跃会话和密码哈希。VACUUM 物理重写备份副本，彻底抹除
+            # 残留并顺带缩小包体积；必须在事务外执行。
+            try:
+                dst.execute("VACUUM")
+            except sqlite3.Error:
+                pass
         finally:
             dst.close()
             src.close()

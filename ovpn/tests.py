@@ -496,6 +496,62 @@ class ReviewFixRegressionTest(TestCase):
         self.assertIn("expired-one", core.take_expired_users())
         self.assertEqual(core.take_expired_users(), [])
 
+    def test_expire_side_effects_run_once_and_skip_kick_when_vpn_down(self):
+        """到期名单先扫描后消费一次；OpenVPN 没跑时不做无谓的 7505 重试。"""
+        from unittest import mock
+        from datetime import date
+        from django.http import HttpResponse
+        from django.test import RequestFactory
+        from . import bridge, middleware as mw
+
+        past = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+        core.set_meta("vpn_cidr", "10.8.0.0/24")
+        core.add_user("expire-once", expires_at=past)
+        core.take_expired_users()
+        req = RequestFactory().get("/")
+        guard = mw.OvpnGuardMiddleware(lambda r: HttpResponse("ok"))
+
+        with mock.patch.object(core, "client_allowed", return_value=True), \
+             mock.patch.object(core, "audit_ctx_set"), \
+             mock.patch.object(mw, "_EXPIRE_LAST", 0), \
+             mock.patch.object(core, "write_all_config") as rewrite, \
+             mock.patch.object(core, "_vpn_alive", return_value=True), \
+             mock.patch.object(bridge, "MOCK", True), \
+             mock.patch.object(bridge, "sudo_worker") as kick:
+            guard(req)
+            # 扫描产生的待办必须在本轮被消费掉，不能留到下一个请求重跑
+            self.assertEqual(core.take_expired_users(), [])
+            self.assertEqual(rewrite.call_count, 1)
+            self.assertEqual(kick.call_count, 1)
+            guard(req)  # 60 秒节流窗口内再来一个请求
+            self.assertEqual(rewrite.call_count, 1)
+            self.assertEqual(kick.call_count, 1)
+
+    def test_expire_skips_kick_when_openvpn_not_running(self):
+        from unittest import mock
+        from datetime import date
+        from django.http import HttpResponse
+        from django.test import RequestFactory
+        from . import bridge, middleware as mw
+
+        past = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+        core.set_meta("vpn_cidr", "10.8.0.0/24")
+        core.add_user("expire-offline", expires_at=past)
+        core.take_expired_users()
+        with mock.patch.object(core, "client_allowed", return_value=True), \
+             mock.patch.object(core, "audit_ctx_set"), \
+             mock.patch.object(mw, "_EXPIRE_LAST", 0), \
+             mock.patch.object(core, "write_all_config") as rewrite, \
+             mock.patch.object(core, "_vpn_alive", return_value=False), \
+             mock.patch.object(bridge, "MOCK", False), \
+             mock.patch.object(bridge, "sudo_worker") as kick:
+            mw.OvpnGuardMiddleware(lambda r: HttpResponse("ok"))(
+                RequestFactory().get("/"))
+            # ccd 仍要重建，但不踢没有进程可连的 7505，也不放回待办重试
+            self.assertEqual(rewrite.call_count, 1)
+            kick.assert_not_called()
+            self.assertEqual(core.take_expired_users(), [])
+
     def test_reset_admin_disables_extra_superusers_in_place(self):
         import os
         from django.contrib.auth import get_user_model

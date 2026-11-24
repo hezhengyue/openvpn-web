@@ -334,18 +334,10 @@ def pubip_get(force=False):
 def startup_maintenance():
     """服务启动一次的维护动作，等价原 app.main() 里的启动段。"""
     core.init_db()
+    # 与日常特权动作共用同一套清理逻辑：去重，并顺手刷新 _MAINT_LAST，
+    # 避免启动后的第一次 sudo_worker 立刻再扫一遍同样的目录/日志。
     try:
-        if core.rotate_openvpn_log():
-            print("[启动维护] openvpn.log 超过 20MB，已转存为 openvpn.log.1 并截断原文件")
-        n = core.prune_tasks(days=7)
-        if n:
-            print("[启动维护] 清理了 %d 个过期任务日志" % n)
-        for fn in ("ops-audit.jsonl", "auth.jsonl", "deny.jsonl"):
-            if core.rotate_jsonl(os.path.join(core.STATE, fn)):
-                print("[启动维护] %s 超过 10MB，已转存为 %s.1" % (fn, fn))
-        n = core.prune_auth_logs(keep=5000)
-        if n:
-            print("[启动维护] 清理了 %d 条过期认证日志" % n)
+        periodic_maintenance(force=True)
     except Exception as e:
         print("[启动维护] 跳过: %s" % e)
     try:

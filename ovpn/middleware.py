@@ -127,16 +127,21 @@ class OvpnGuardMiddleware:
                 allow=core.allow_list())
 
         # 到期的账号自动停用 + 补做副作用。
-        # expire_users() 可能被 list_users() 等视图先触发，那时它已经把名单放进
-        # core 的待办集合；这里每次请求先消费待办，再合并扫描结果，确保 60 秒
-        # 节流窗口内也不会漏掉「删 ccd + 踢下线」。
+        # 先扫描（expire_users() 会把新停用的名字写进 core 的待办集合），再一次
+        # 性 take 干净；反过来先 take 会把本轮新停用的名字留在待办里，下个请求
+        # 又重跑一遍 write_all_config + kick-user。list_users() 等视图先触发的
+        # 停用也会进同一个待办集合，因此这里统一消费一次即可。
         expired = []
         try:
-            expired = list(dict.fromkeys(core.take_expired_users() + _expire_due_users()))
+            _expire_due_users()
+            expired = list(dict.fromkeys(core.take_expired_users()))
             if expired:
                 core.write_all_config()
-                for name in expired:
-                    bridge.sudo_worker(uuid.uuid4().hex, "kick-user", {"username": name})
+                # OpenVPN 没在跑（排障停服 / 安装向导阶段）时不存在在线连接，
+                # 踢人只会连 7505 超时再把名单放回待办，让后续每个请求都卡 3 秒。
+                if bridge.MOCK or core._vpn_alive():
+                    for name in expired:
+                        bridge.sudo_worker(uuid.uuid4().hex, "kick-user", {"username": name})
         except Exception:
             # 写配置/踢人失败时放回待办，下次请求重试，绝不因节流而永久漏处理
             try:
