@@ -57,7 +57,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "2.4.0"
+WEB_VERSION = "2.4.1"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -2364,6 +2364,11 @@ def render_server_conf(c):
         "data-ciphers-fallback AES-256-CBC",
         "tls-version-min %s" % c["tls_min"],
         "tun-mtu %s" % c["tun_mtu"],
+        # DCO（Data Channel Offload）把数据通道下沉到内核，会绕过用户态的
+        # mssfix/TCP MSS 钳制；一旦客户端 DCO 驱动有 bug（ovpn-dco-win 1.3.0
+        # 及更早版本存在已知问题），TCP 大流量会触发连接 reset、隧道反复重连。
+        # 强制走用户态通道，保证 mssfix 生效、规避 DCO 驱动差异。
+        "disable-dco",
     ]
     if int(c.get("mssfix", 1360) or 0) > 0:
         # 钳制 TCP MSS，避免 tun-mtu + OpenVPN 封装后超过物理 MTU 1500：
@@ -2410,6 +2415,11 @@ def render_ovpn(c):
         "remote-cert-tls server",
         "tls-version-min %s" % c["tls_min"],
         "tun-mtu %s" % c["tun_mtu"],
+        # 关键：Windows 客户端 2.6 默认启用 DCO，数据通道下沉内核会绕过用户态
+        # mssfix，且 ovpn-dco-win 1.3.0 及更早版本有已知连接稳定性问题。
+        # 实测 RDP 大流量会触发 "Bad encapsulated packet length" 并让隧道反复重连。
+        # 强制禁用 DCO，退回用户态通道，mssfix 才能生效。
+        "disable-dco",
     ]
     if int(c.get("mssfix", 1360) or 0) > 0:
         # 与服务端一致：客户端也要钳制出方向的 TCP MSS，
@@ -2450,6 +2460,9 @@ def config_fingerprint(c):
         "ciphers": c["data_ciphers"], "tls_min": c["tls_min"], "mtu": c["tun_mtu"],
         # mssfix 写进 ovpn，改了必须让全员重发客户端配置，否则新旧客户端行为不一致
         "mssfix": int(c.get("mssfix", 1360) or 0),
+        # disable-dco 从 2.4.1 起写进 ovpn；老客户端没有它会在 RDP 大流量下冲垮隧道，
+        # 纳入指纹确保全员重发（用常量钉死，后续不再因升级本身反复变化）。
+        "dco_policy": "disabled",
         "compress": c.get("compress", "off"),
         "ca": hashlib.sha256(pki["ca"].encode()).hexdigest(),
         "ta": hashlib.sha256(pki["ta"].encode()).hexdigest(),

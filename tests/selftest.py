@@ -164,6 +164,10 @@ def main():
     check("company.ovpn 写 topology subnet", "\ntopology subnet\n" in ovpn)
     check("server.conf 钳制 TCP MSS（mssfix 1360）", "\nmssfix 1360\n" in conf)
     check("company.ovpn 同步钳制 TCP MSS", "\nmssfix 1360\n" in ovpn)
+    # DCO 会绕过用户态 mssfix，且 Windows DCO 驱动大流量下会 reset 连接冲垮隧道：
+    # 两端都必须显式 disable-dco（见 2.4.1 修复），否则 RDP 仍会超时。
+    check("server.conf 禁用 DCO", "\ndisable-dco\n" in conf)
+    check("company.ovpn 禁用 DCO（修复 RDP 隧道崩溃）", "\ndisable-dco\n" in ovpn)
     # VPN 网段必须自动出现在推送路由里，且只出现一次（不能走两处各写一遍）
     vpn_net = core.vpn_network(core.cfg())
     vpn_gw = str(vpn_net.network_address + 1)
