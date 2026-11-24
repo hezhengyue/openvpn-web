@@ -191,8 +191,12 @@ class LogTest(TestCase):
         core.log_auth("alice", "1.2.3.4", "OK", "通过")
         audit = core.get_logs("audit", 10)
         auth = core.get_logs("auth", 10)
-        self.assertEqual(audit[0]["action"], "unit.test")
-        self.assertEqual(audit[0]["actor"], "tester")
+        # 安装期会往 JSONL 写真实 setup.auto 审计，不能假设自己写的在第一行；
+        # 按 action + actor 精确定位本用例写入的那条。
+        mine = [r for r in audit if r["action"] == "unit.test" and r["actor"] == "tester"]
+        self.assertTrue(mine)
+        self.assertEqual(mine[0]["action"], "unit.test")
+        self.assertEqual(mine[0]["actor"], "tester")
         self.assertTrue(any(r["username"] == "alice" for r in auth))
 
     def test_task_record_lifecycle(self):
