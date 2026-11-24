@@ -32,7 +32,9 @@ IGNORED_DIRS = {
     "__pycache__", "site-packages", "dist-packages", "node_modules",
     "build", "dist", ".git", "migrations",
     # 便携运行时与离线依赖、运行期数据目录，不属于源码
-    "runtime", "vendor", "data", "staticfiles", "media", "logs",
+    # python/ 是交付包的便携 Python 运行时（含标准库 sqlite3 源码），源码开发用 .venv/；
+    # 不排除会在交付包布局下把标准库 sqlite3.connect()/execute() 误判为业务裸 SQL。
+    "runtime", "python", "vendor", "data", "staticfiles", "media", "logs",
     # 根布局下这些是 Django 源码根之外的目录（特权脚本/测试/运维脚本/AI 工具数据），不属于 Web 进程代码。
     # system/ 用裸 SQL 是特权层设计使然；tests/ 的夹具、.workbuddy/tmp 的探针会被误判。
     # 子目录布局下它们本就不在 django/ 内。
