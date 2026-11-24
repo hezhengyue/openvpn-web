@@ -150,9 +150,9 @@ MANAGE() {
         local base="${BASE_DIR:-$PWD}"
         local py
         py="$(python_bin)"
-        # 2.6 起源码与交付同构为根布局（manage.py 在 base 根）；兼容 django/ 子目录
-        local mgdir="$base"
-        [ -f "$base/manage.py" ] || mgdir="$base/django"
+        # 3.0 起 Django 源码在 django/ 下；兼容历史平铺布局（manage.py 在 base 根）
+        local mgdir="$base/django"
+        [ -f "$mgdir/manage.py" ] || mgdir="$base"
         (cd "$mgdir" && "$py" manage.py "$@")
     fi
 }

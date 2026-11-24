@@ -495,18 +495,31 @@ def action_restore_snapshot(p):
     log("已恢复备份 %s" % path)
 
 
-# Web 救场更新包：2.6 起源码根就是 Django 项目根，按「相对路径 + 扩展名」白名单
+# Web 救场更新包：3.0 起 Django 源码在 django/ 下，按「相对路径 + 扩展名」白名单
 # 保留原目录结构写入安装根。system/（root 执行体）、bin/、data/、python/、vendor/
 # 以及 *.sh 一律不在名单里，避免借「更新 Web」把外部代码装成 root 服务。
-WEB_UPDATE_DIRS = ("ovpn/", "core/", "jobs/", "common/", "templates/", "static/", "config/")
+WEB_UPDATE_DIRS = ("ovpn/", "accounts/", "jobs/", "common/", "audit/",
+                   "templates/", "static/", "config/")
+# 只允许单独更新的入口文件（不含 .py 之外的扩展名，也不给 system/ 任何机会）
+WEB_UPDATE_FILES = ("serve.py", "manage.py")
 WEB_UPDATE_EXT = (".py", ".html", ".css", ".js", ".json", ".txt")
+# 兼容 2.6 的平铺更新包（无 django/ 前缀，含当时还叫 core 的用户 app）
+LEGACY_WEB_DIRS = WEB_UPDATE_DIRS + ("core/",)
 
 
 def _web_update_target(name):
     """返回允许写入安装根的相对路径；不在白名单返回空串，非法路径直接拒绝。"""
     if not name or name.startswith("/") or "\\" in name or ".." in name.split("/"):
         raise RuntimeError("更新包含非法路径: %s" % name)
-    if name.startswith(WEB_UPDATE_DIRS) and name.endswith(WEB_UPDATE_EXT):
+    if name.startswith("django/"):
+        rest = name[len("django/"):]
+        if rest in WEB_UPDATE_FILES:
+            return name
+        if rest.startswith(WEB_UPDATE_DIRS) and rest.endswith(WEB_UPDATE_EXT):
+            return name
+        return ""
+    # 历史平铺包：仍按安装根写入，保持旧包的可用性
+    if name.startswith(LEGACY_WEB_DIRS) and name.endswith(WEB_UPDATE_EXT):
         return name
     return ""
 
@@ -519,7 +532,7 @@ def action_update_web(p):
         targets = [(info.filename, info) for info in z.infolist()
                    if not info.is_dir() and _web_update_target(info.filename)]
         if not targets:
-            raise RuntimeError("更新包里没有可更新的 Django 项目文件（ovpn/ templates/ 等）")
+            raise RuntimeError("更新包里没有可更新的 Django 项目文件（django/ovpn/ 等）")
         for name, info in targets:
             # 先全部校验再写入，避免写一半才发现后半个文件非法
             out = os.path.join(ROOT, *name.split("/"))

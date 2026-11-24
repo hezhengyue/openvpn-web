@@ -1,9 +1,9 @@
 {
-  "contract": "v2.3",
+  "contract": "v3.0",
   "tier": 3,
   "project": "openvpn-web",
   "role": "business",
-  "notes": "承载模式项目。2.6 起源码与交付同构：项目根即 Django 根（manage.py、config、core、common、jobs、ovpn、audit 直接在根），业务数据已全部迁到 ovpn/models.py 的 ORM 模型，源码根内零裸 SQL；前端 index.html/self_page.html 与 /api/* 路径、字段保持与 Flask 版完全兼容。物理上无法由 Web 进程承担的组件——安装与内核配置、一次性安装码、OpenVPN 二进制准备、救场重置口令、以 root 执行的特权动作、拨号认证钩子、安装前预检——集中在 system/，逐项登记于 external_boundaries。",
+  "notes": "承载模式项目。3.0 起按 django-web-base v3.0 规范收敛目录：Django 源码全部在 django/（manage.py、serve.py、config、accounts、common、audit、jobs、ovpn、templates 随 app、static、requirements*），项目根只保留 system/ 特权层、build/、vendor/、bin/、scripts/、tests/、docs/ 与运行数据。用户模型为 accounts.User（app 曾用名 core，db_table 保持 core_user 以免历史库迁移）。业务数据全部在 ovpn/models.py 的 ORM 模型里，源码根内零裸 SQL；前端 index.html/self_page.html 已归位到 ovpn/templates/ovpn/，/api/* 路径与字段保持与 Flask 版完全兼容。物理上无法由 Web 进程承担的组件——安装与内核配置、一次性安装码、OpenVPN 二进制准备、救场重置口令、以 root 执行的特权动作、拨号认证钩子、安装前预检——集中在 system/，逐项登记于 external_boundaries。",
   "external_boundaries": [
     {
       "path": "system/install.sh",
@@ -27,7 +27,7 @@
       "path": "system/reset-admin.sh",
       "privilege": "root",
       "reason": "管理口令无法登录时的救场通道，直接访问数据库重置；Web 进程按设计改不动以 root 执行的文件",
-      "interface": "CLI 执行，操作 data/db.sqlite3"
+      "interface": "CLI 执行，经 django/manage.py ovpn_cli 操作 data/db.sqlite3"
     },
     {
       "path": "system/worker.py",

@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 # scripts/contract_check.py
-"""接入契约 v2.3 的机器可读检查器（CONTRACT.md 的判定实现）。
+"""接入契约 v3.0 的机器可读检查器（CONTRACT.md 的判定实现）。
+
+v3.0 相对 v2.3 的变更：
+  * 用户模型固定为 `accounts.User`（原 core.User），`core` app 改名 `accounts`；
+  * 源码根统一为 `django/`（保留根布局兼容），因此新增 `app_config` 与
+    `layering` 两项检查：自研 app 必须用完整 AppConfig 路径，且底座层
+    （common/accounts/audit/jobs）不得反向 import 业务层 `ovpn`；
+  * INSTALLED_APPS / MIDDLEWARE 支持四段式拼接（`A + B + [...]`、`+=`、`.append()`）。
 
 只用标准库 + AST 读源码，绝不 import Django settings：
   - 不触发 import 阶段的目录创建 / 环境变量校验
@@ -18,7 +25,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-CONTRACT_VERSION = "v2.3"
+CONTRACT_VERSION = "v3.0"
 VALID_TIERS = (1, 2, 3)
 
 TIER_TITLES = {
@@ -42,8 +49,15 @@ IGNORED_DIRS = {
 }
 
 # 根布局下位于项目根、但属于「启动/CLI 边界」而非 Web app 的 .py，不参与业务代码扫描。
-# serve.py 的 cursor.execute 是迁移历史兼容（accounts→core relabel），与 system/ 同性质。
-IGNORED_ROOT_FILES = {"serve.py"}
+# serve.py 的 cursor.execute 是历史迁移兼容（core→accounts 的 app_label relabel），
+# 与 system/ 同性质。3.0 起它在 django/ 下，按项目相对路径豁免。
+IGNORED_FILES = {"serve.py", "django/serve.py"}
+
+# 底座层 app：可以对 audit/common 有依赖，但绝不能反向依赖业务层 ovpn。
+BASE_LAYER_APPS = ("accounts", "common", "audit", "jobs")
+BUSINESS_LAYER_APPS = ("ovpn",)
+# 自研 app 必须写完整 AppConfig 路径（避免依赖 default_app_config 的历史行为）
+SELF_APPS = BASE_LAYER_APPS + BUSINESS_LAYER_APPS
 
 CONNECT_MODULES = {
     "sqlite3", "pymysql", "psycopg2", "psycopg", "mysql.connector",
@@ -217,6 +231,68 @@ def assignment_node(tree: ast.Module | None, name: str) -> ast.AST | None:
     return None
 
 
+def _literal_strings(value: ast.AST) -> list[str] | None:
+    if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+        return [
+            elt.value for elt in value.elts
+            if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+        ]
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        return [value.value]
+    return None
+
+
+def _resolve_expr(value: ast.AST, tree: ast.Module, depth: int = 0) -> list[str]:
+    """展开一个表达式里的字符串常量：支持 `A + B` 拼接与 Name 引用。"""
+    if depth > 6:
+        return []
+    literal = _literal_strings(value)
+    if literal is not None:
+        return literal
+    if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
+        return (_resolve_expr(value.left, tree, depth + 1)
+                + _resolve_expr(value.right, tree, depth + 1))
+    if isinstance(value, ast.Name):
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == value.id for t in node.targets
+            ):
+                return _resolve_expr(node.value, tree, depth + 1)
+    return []
+
+
+def resolve_string_list(tree: ast.Module | None, name: str) -> list[str] | None:
+    """按源码顺序解析模块级字符串列表，支持四段式分组写法。
+
+    覆盖：`NAME = [...]`、`NAME = A + B + [...]`、`NAME += [...]`、
+    `NAME.append('x')` / `NAME.extend([...])`。
+    返回 None 表示该变量没有模块级赋值；空列表表示有赋值但解析不到字符串。
+    """
+    if tree is None:
+        return None
+    found: list[str] | None = None
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            if any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
+                found = _resolve_expr(node.value, tree)
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name) and node.target.id == name:
+                found = _resolve_expr(node.value, tree)
+        elif isinstance(node, ast.AugAssign):
+            if isinstance(node.target, ast.Name) and node.target.id == name:
+                found = (found or []) + _resolve_expr(node.value, tree)
+        elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            call = node.value
+            func = call.func
+            if (isinstance(func, ast.Attribute) and func.attr in ("append", "extend")
+                    and isinstance(func.value, ast.Name) and func.value.id == name):
+                if found is None:
+                    found = []
+                if call.args:
+                    found += _resolve_expr(call.args[0], tree) or []
+    return found
+
+
 def dotted_name(node: ast.AST) -> str:
     """把 Name / Attribute 链还原成点分字符串，失败返回空串。"""
     if isinstance(node, ast.Name):
@@ -236,8 +312,8 @@ def iter_python_files(root: Path) -> list[tuple[str, Path, ast.Module]]:
     for path in sorted(src_root.rglob("*.py")):
         rel = path.relative_to(root).as_posix()
         parts = Path(rel).parts
-        # 根布局下 src_root == root，需按文件名排除启动/CLI 边界脚本
-        if len(parts) == 1 and path.name in IGNORED_ROOT_FILES:
+        # 启动/CLI 边界脚本不参与业务扫描（根布局 serve.py、子目录 django/serve.py）
+        if rel in IGNORED_FILES:
             continue
         if any(p in IGNORED_DIRS for p in parts):
             continue
@@ -434,7 +510,7 @@ def scan_csrf_exempt(root: Path) -> list[str]:
 
 def has_orm_models(root: Path) -> bool:
     src_root, _ = detect_layout(root)
-    tree, _ = parse_python(src_root / "core" / "models.py")
+    tree, _ = parse_python(src_root / "accounts" / "models.py")
     if tree is None:
         return False
     for node in ast.walk(tree):
@@ -470,8 +546,53 @@ def check_auth_user_model(settings_tree: ast.Module | None) -> bool:
     return (
         isinstance(node, (ast.Assign, ast.AnnAssign))
         and isinstance(node.value, ast.Constant)
-        and node.value.value == "core.User"
+        and node.value.value == "accounts.User"
     )
+
+
+def check_app_configs(apps: list[str]) -> list[str]:
+    """自研 app 必须用完整 AppConfig 路径，且不得缺项。
+
+    裸 `'ovpn'` 也让 Django 能跑，但会依赖 default_app_config 的历史行为、
+    verbose_name 不生效，也无法在 ready() 里做受控初始化。统一要求
+    `'ovpn.apps.OvpnConfig'` 形式。
+    """
+    problems: list[str] = []
+    for label in SELF_APPS:
+        matches = [a for a in apps if a == label or a.startswith(label + ".")]
+        if not matches:
+            problems.append(f"{label} 未注册")
+        elif not any(".apps." in m and m.endswith("Config") for m in matches):
+            problems.append(f"{label} 应写完整 AppConfig 路径（如 {label}.apps.XxxConfig）")
+    return problems
+
+
+def scan_layering(root: Path) -> list[str]:
+    """底座层不得反向依赖业务层：common/accounts/audit/jobs 不 import ovpn。
+
+    只检查绝对导入（`import ovpn...` / `from ovpn... import`）。测试文件同样纳入，
+    因为「业务模型」出现在底座测试里也说明分层被穿透了。
+    """
+    src_root, layout = detect_layout(root)
+    hits: list[str] = []
+    for rel, _path, tree in iter_python_files(root):
+        parts = Path(rel).parts
+        if layout == LAYOUT_DJANGO_DIR and parts and parts[0] == "django":
+            parts = parts[1:]
+        app = parts[0] if parts else ""
+        if app not in BASE_LAYER_APPS:
+            continue
+        for node in ast.walk(tree):
+            modules: list[str] = []
+            if isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                modules = [node.module]
+            for module in modules:
+                if any(module == b or module.startswith(b + ".")
+                       for b in BUSINESS_LAYER_APPS):
+                    hits.append(f"{rel}:{node.lineno} ({module})")
+    return sorted(set(hits))
 
 
 def check_middleware_order(middleware_seq: list[str] | None) -> bool:
@@ -657,18 +778,34 @@ def check_project(root: Path) -> Report:
     src_root, _layout = detect_layout(root)
     settings_path = src_root / "config" / "settings.py"
     settings_tree, settings_source = parse_python(settings_path)
-    apps = list_sequence(settings_tree, "INSTALLED_APPS") or []
-    middleware = list_sequence(settings_tree, "MIDDLEWARE") or []
-    backends = list_sequence(settings_tree, "AUTHENTICATION_BACKENDS") or []
+    # 四段式分组后 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + ...，
+    # 必须展开变量引用才能看到真实注册项。
+    apps = resolve_string_list(settings_tree, "INSTALLED_APPS") or []
+    middleware = resolve_string_list(settings_tree, "MIDDLEWARE") or []
+    backends = resolve_string_list(settings_tree, "AUTHENTICATION_BACKENDS") or []
 
     # ================= 第 1 层：底座强制统一 =================
     prefix = "" if src_root == root else src_root.relative_to(root).as_posix() + "/"
-    required_layout = ["manage.py", "config", "core", "common"]
+    required_layout = ["manage.py", "config", "accounts", "common"]
     missing_layout = [p for p in required_layout if not (src_root / p).exists()]
     report.check(
         not missing_layout, "FAIL", 1, "layout_django_dir",
-        "保留标准 Django 目录结构（源码根下 manage.py / config / core / common）",
+        "保留标准 Django 目录结构（源码根下 manage.py / config / accounts / common）",
         "缺失或改名：" + ", ".join(prefix + p for p in missing_layout),
+    )
+
+    app_config_problems = check_app_configs(apps)
+    report.check(
+        not app_config_problems, "FAIL", 1, "app_config",
+        "自研 app 使用完整 AppConfig 路径（accounts/common/audit/jobs/ovpn）",
+        "；".join(app_config_problems),
+    )
+
+    layering_hits = scan_layering(root)
+    report.check(
+        not layering_hits, "FAIL", 1, "layering",
+        "底座层（common/accounts/audit/jobs）不反向依赖业务层 ovpn",
+        "命中：" + ", ".join(layering_hits) if layering_hits else "",
     )
 
     wsgi_tree, wsgi_source = parse_python(src_root / "config" / "wsgi.py")
@@ -689,8 +826,8 @@ def check_project(root: Path) -> Report:
 
     report.check(
         check_auth_user_model(settings_tree), "FAIL", 1, "auth_user_model",
-        "AUTH_USER_MODEL 显式固定为 'core.User'",
-        "业务附属账号另建业务 App 模型，不得替换 core.User",
+        "AUTH_USER_MODEL 显式固定为 'accounts.User'",
+        "业务附属账号另建业务 App 模型，不得替换 accounts.User",
     )
 
     report.check("django.contrib.auth" in apps, "FAIL", 1, "auth_app",
@@ -772,7 +909,7 @@ def check_project(root: Path) -> Report:
     report.check(
         has_orm_models(root) and any(src_root.glob("*/migrations/0*.py")),
         "FAIL", 1, "orm_and_migrations",
-        "core/models.py 使用 ORM 且存在 migrations/0*.py",
+        "accounts/models.py 使用 ORM 且存在 migrations/0*.py",
     )
 
     raw_sql = scan_raw_sql(root)
@@ -789,7 +926,10 @@ def check_project(root: Path) -> Report:
     )
 
     # ================= 第 2 层：底座可选能力（软报告） =================
-    report.info("jobs" in apps, 2, "jobs_app", "jobs 已启用")
+    report.info(
+        any(a == "jobs" or a.startswith("jobs.") for a in apps),
+        2, "jobs_app", "jobs 已启用",
+    )
     report.info("STANDALONE" in (settings_source or ""), 2, "dual_mode", "保留双模式开关")
     report.info(
         any(is_test_file(rel) for rel, _path, _tree in iter_python_files(root)),

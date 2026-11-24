@@ -1,4 +1,4 @@
-# django-web-base 接入契约 v2.3
+# django-web-base 接入契约 v3.0
 
 凡从本模板派生的 Django 项目，均按本文件对齐。`./start.sh contract:check` 是它的机器可读形式；文档与检查器输出不一致时，以检查器为准。
 
@@ -18,10 +18,12 @@
 
 | 编号 | 约束 | 机器判定 |
 | --- | --- | --- |
-| `layout_django_dir` | 保留标准目录结构 | 源码根下 `manage.py`、`config/`、`core/`、`common/` 均存在；源码根默认为 `django/`，项目根存在 `manage.py` 时即为项目根（本项目 2.6 起为此布局）；禁止把 app 摊平而缺 `config/`、`core/`、`common/` |
+| `layout_django_dir` | 保留标准目录结构 | 源码根默认为 `django/`（项目根下 `django/manage.py` 存在即为子目录布局）；源码根下 `manage.py`、`config/`、`accounts/`、`common/` 均存在；项目根存在 `manage.py` 时按根布局检查（兼容历史项目）。禁止把 app 摊平而缺 `config/`、`accounts/`、`common/` |
+| `app_config` | 自研 app 用完整 AppConfig | `INSTALLED_APPS`（含四段式拼接、`+=`、`.append()`）中 `accounts` / `common` / `audit` / `jobs` / `ovpn` 必须以 `<app>.apps.<Xxx>Config` 形式登记，且不得缺项 |
+| `layering` | 底座层不反向依赖业务 | `common` / `accounts` / `audit` / `jobs` 内不得出现 `import ovpn` 或 `from ovpn... import`（测试文件同样计入） |
 | `entry_wsgi` | 统一入口 `config.wsgi:application` | 源码根 `config/wsgi.py` 存在、AST 可解析，模块级定义 `application = get_wsgi_application()` |
 | `settings_parse` | 配置可被静态解析 | 源码根 `config/settings.py` 存在且 AST 可解析 |
-| `auth_user_model` | 用户模型固定在 `core.User` | settings 模块级显式 `AUTH_USER_MODEL = 'core.User'`；业务附属账号另建业务 App 模型，不得替换 `core.User` |
+| `auth_user_model` | 用户模型固定在 `accounts.User` | settings 模块级显式 `AUTH_USER_MODEL = 'accounts.User'`；业务附属账号另建业务 App 模型，不得替换 `accounts.User` |
 | `auth_app` / `auth_middleware` | Django Auth 是唯一认证体系 | `django.contrib.auth` 在 INSTALLED_APPS，`AuthenticationMiddleware` 在 MIDDLEWARE |
 | `admin_app` | Admin 纳入底座 | `django.contrib.admin` 在 INSTALLED_APPS（由 v1 第 2 层升格） |
 | `audit_app` / `audit_service` | 统一审计纳入底座 | `audit.apps.AuditConfig` 在 INSTALLED_APPS，源码根 `audit/models.py` 定义 `AuditLog`、`audit/services.py` 定义 `audit_log()`；禁止第三方审计插件 |
@@ -35,9 +37,9 @@
 | `login_url` | 登录跳转显式声明 | settings 模块级显式给 `LOGIN_URL` 赋值 |
 | `secret_key_literal` | 密钥不硬编码 | settings 存在 `SECRET_KEY` 赋值且不是 `django-insecure...` 字面量 |
 | `health_and_media_urls` | 健康检查与媒体鉴权就位 | 源码根 `config/urls.py` 存在含 `SELECT 1` 字面量的函数，且引用 `staff_member_required` 视图 |
-| `orm_and_migrations` | 数据访问走 ORM | 源码根 `core/models.py` 使用 Django ORM 模型，源码根下存在 `migrations/0*.py` |
+| `orm_and_migrations` | 数据访问走 ORM | 源码根 `accounts/models.py` 使用 Django ORM 模型，源码根下存在 `migrations/0*.py` |
 | `no_raw_sql_in_django` | Web 进程内禁止裸 SQL | 源码根内不得调用 `sqlite3/pymysql/psycopg2/psycopg/mysql.connector` 的 `connect()`；不得调用 `executemany` / `executescript`；游标/连接对象上的 `execute` 或首参为 SQL 语句字面量的 `execute` 同样禁止；ORM 逃生舱 `RawSQL()` / `expressions.RawSQL()` 也禁止；`.raw()` / `.extra()` 仅在 ORM 形态（`objects` / `_default_manager` / `qs` / `queryset` 链、SQL 字面量首参、`extra(select=.../where=.../tables=...)` 等）命中（`client.raw()`、`parser.extra()` 等普通业务方法不算）。AST 判定，内置豁免**仅限** 源码根 `config/urls.py` 的 `SELECT 1` 与 `common/apps.py` 的 `PRAGMA` 初始化；**不提供业务白名单** |
-| `contract_marker` | 契约登记合法 | 项目根 `.contract.json` 合法，`contract == "v2.3"`，`tier` 属于 1/2/3 |
+| `contract_marker` | 契约登记合法 | 项目根 `.contract.json` 合法，`contract == "v3.0"`，`tier` 属于 1/2/3 |
 
 自己写登录、自己起 server、改目录结构、在源码根内直连数据库 —— 一律不合规。
 
@@ -57,7 +59,7 @@
 
 | 字段 | 含义 |
 | --- | --- |
-| `path` | 相对项目根路径，不得落在 Django 代码目录内（子目录布局为 `django/`，根布局为 `config/`、`core/`、`ovpn/` 等 app 目录）、不得包含 `..`，且必须是真实存在的文件（不是仅登记目录名） |
+| `path` | 相对项目根路径，不得落在 Django 代码目录内（子目录布局为 `django/`，根布局为 `config/`、`accounts/`、`ovpn/` 等 app 目录）、不得包含 `..`，且必须是真实存在的文件（不是仅登记目录名） |
 | `privilege` | 运行特权，如 `root` / `daemon` / `unprivileged` |
 | `reason` | 为何不能进 Django 进程 |
 | `interface` | 与 Django 的通信方式 |
@@ -79,7 +81,7 @@
 
 ```json
 {
-  "contract": "v2.3",
+  "contract": "v3.0",
   "tier": 2,
   "project": "django-web-base",
   "role": "reference",
@@ -92,4 +94,7 @@ v1 的 `raw_sql_allowlist` 已取消：源码根内裸 SQL 一律 FAIL，只有�
 
 ## 版本演进
 
-`contract` 值与本文件头部版本一致。**新增或收紧检查项升次版本**（v1 → v2 → v2.1 → v2.2 → v2.3），已登记项目不会因模板升级被静默判为不合规；措辞与示例修正不升版本。v2.3 收紧了 `RawSQL` 属性链与审计链式删除检测，同时修正 `.raw()` / `.extra()` 对普通业务方法的误报。
+`contract` 值与本文件头部版本一致。**新增或收紧检查项升次版本**（v1 → v2 → v2.1 → v2.2 → v2.3 → v3.0），已登记项目不会因模板升级被静默判为不合规；措辞与示例修正不升版本。
+
+- v2.3：收紧 `RawSQL` 属性链与审计链式删除检测，修正 `.raw()` / `.extra()` 对普通业务方法的误报。
+- **v3.0（主版本）**：用户 app 由 `core` 改名 `accounts`，`AUTH_USER_MODEL` 固定为 `accounts.User`（`db_table` 保持 `core_user`，不动历史数据）；源码根统一为 `django/` 子目录布局；新增 `app_config`（自研 app 必须写完整 AppConfig 路径）与 `layering`（底座层不得反向 import `ovpn`）两项强制检查；`INSTALLED_APPS` / `MIDDLEWARE` 支持四段式拼接解析。v2.x 的 `core.User` 项目升级时需同步改名或保留根布局兼容分支。

@@ -8,20 +8,24 @@ set -e
 DEST="$(cd "$(dirname "$0")" && pwd)"
 PY="$DEST/python/bin/python3"
 USER="ovpnweb"
+# 3.0 起 Django 源码在 django/；兼容历史平铺布局
+MGMT="$DEST/django/manage.py"
+[ -f "$MGMT" ] || MGMT="$DEST/manage.py"
 
 [ "$(id -u)" -eq 0 ] || { echo "请用 root 执行：sudo bash $0" >&2; exit 1; }
 [ -x "$PY" ] || PY="$(command -v python3 || true)"
-[ -n "$PY" ] || { echo "找不到 Python，请在 $DEST 下手动执行 python3 app.py --reset-admin" >&2; exit 1; }
+[ -n "$PY" ] || { echo "找不到 Python，请在 $DEST 下手动执行 python3 $MGMT ovpn_cli reset-admin" >&2; exit 1; }
+[ -f "$MGMT" ] || { echo "找不到 $MGMT，请确认安装目录完整" >&2; exit 1; }
 
 echo "== 重置 OpenVPN Web 管理凭据 =="
 export DJANGO_SETTINGS_MODULE=config.settings
 # Django management command 会写 data/ 下的数据库与凭据文件，必须以 ovpnweb 身份跑，避免属主变成 root
 if id "$USER" >/dev/null 2>&1 && command -v runuser >/dev/null 2>&1; then
-    cd "$DEST" && runuser -u "$USER" -- "$PY" "$DEST/manage.py" ovpn_cli reset-admin
+    cd "$DEST" && runuser -u "$USER" -- "$PY" "$MGMT" ovpn_cli reset-admin
 elif id "$USER" >/dev/null 2>&1; then
-    cd "$DEST" && su -s /bin/sh "$USER" -c "cd '$DEST' && '$PY' '$DEST/manage.py' ovpn_cli reset-admin"
+    cd "$DEST" && su -s /bin/sh "$USER" -c "cd '$DEST' && '$PY' '$MGMT' ovpn_cli reset-admin"
 else
-    cd "$DEST" && "$PY" "$DEST/manage.py" ovpn_cli reset-admin
+    cd "$DEST" && "$PY" "$MGMT" ovpn_cli reset-admin
 fi
 
 echo

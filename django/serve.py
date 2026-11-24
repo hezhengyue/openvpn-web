@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+OpenVPN Web (Django 版) 服务入口 —— systemd ExecStart 指向本文件。
+
+单进程 + 线程池的 waitress 跑 Django WSGI（config.wsgi:application）。
+与旧版保持一致：同一份进程内状态（公网 IP 缓存 / 二进制版本缓存 / 任务节流）
+只有一份，SQLite 只有一个写入者，避免多进程抢锁。
+
+环境变量：
+  OVPN_WEB_PORT   监听端口，默认 8800
+  OVPN_WEB_THREADS 线程数，默认 8
+  OVPN_WEB_HTTPS   =1 时 session cookie 走 Secure
+  OVPN_WEB_ROOT   安装根（core.py 数据目录）
+"""
+import os
+import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+# serve.py 在 django/ 里，安装根是它的父目录（bin/、system/、vendor/、data/ 同级）。
+ROOT = os.path.dirname(_HERE)
+# Django 项目根：django/ 子目录布局下是 serve.py 所在层；
+# 兼容历史上「项目根即 Django 根」的平铺布局（那时 serve.py 在安装根）。
+DJANGO_DIR = _HERE
+if not os.path.isdir(os.path.join(DJANGO_DIR, "config")):
+    DJANGO_DIR = ROOT
+sys.path.insert(0, ROOT)          # 让 system/ 包可导入（特权脚本边界）
+sys.path.insert(0, DJANGO_DIR)    # 让 config/、accounts/、ovpn/ 可导入
+# 先把 .env 读进进程环境，再做下面的 setdefault 和端口/线程解析：django-environ
+# 的优先级是进程环境变量 > .env > 代码默认，若先 setdefault 再让 settings 读 .env，
+# 用户写在 .env 里的域名/密钥会被默认值占坑（典型后果：HOSTS 配了域名仍 400）。
+# 端口/线程同理——读 env 晚于 PORT/THREADS 解析时，.env 的 OVPN_WEB_PORT /
+# OVPN_WEB_THREADS 永远不生效。read_env 默认 overwrite=False，systemd/命令行
+# 注入的环境变量依旧优先级最高。
+try:
+    import environ
+    environ.Env.read_env(os.path.join(ROOT, ".env"))
+except Exception as e:
+    print("[serve] 读取 .env 失败（继续用环境变量）: %s" % e)
+PORT = int(os.environ.get("OVPN_WEB_PORT", "8800"))
+try:
+    THREADS = max(1, min(64, int(os.environ.get("OVPN_WEB_THREADS", "8"))))
+except ValueError:
+    THREADS = 8
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
+# 这是单机便携交付：强制裸机模式（SQLite + WhiteNoise + Waitress，零外部服务）。
+# 不读 .env 的 STANDALONE 开关——交付形态固定，避免误配成 Docker 模式连不上库。
+os.environ["STANDALONE"] = "True"
+# README 承诺「反代 HTTPS 时设 OVPN_WEB_HTTPS=1 下发 Secure Cookie」，但底座实际
+# 读的是下面三个开关——此前这个变量只是注释，设了也不生效。集中在此映射一次，
+# 保证 /api 的 cookie、CSRF origin 与 HSTS 判定口径一致。
+if os.environ.get("OVPN_WEB_HTTPS") == "1":
+    os.environ["STANDALONE_USE_HTTPS"] = "true"
+    os.environ["USE_HTTPS"] = "true"
+    os.environ["TRUST_LOCAL_PROXY"] = "true"
+os.environ.setdefault("USE_HTTPS", "false")
+# 生产默认关 DEBUG；只有源码调试时显式设 OVPN_WEB_DEBUG=1 才打开。
+# 这里同样用 setdefault，避免覆盖 .env 里显式配的 DEBUG。
+if os.environ.get("OVPN_WEB_DEBUG") == "1":
+    os.environ["DEBUG"] = "true"
+else:
+    os.environ.setdefault("DEBUG", "false")
+
+# SECRET_KEY：优先环境变量（.env / systemd 注入）；否则自动生成并持久化到 data/web.secret，
+# 保证「拷过去即用」——首次启动随机生成，之后重启沿用同一把，会话不会失效。
+# web.secret 必须与 system/core.py / settings.py 的可写区解析顺序一致，否则项目根
+# 只读、运维用 DATA_DIR/RUNTIME_DIR 重定向后，这里会往只读目录写而启动失败。
+if not os.environ.get("SECRET_KEY"):
+    _data_dir = (os.environ.get("DATA_DIR") or "").strip()
+    if _data_dir:
+        _secret_dir = os.path.abspath(_data_dir)
+    else:
+        _runtime_dir = (os.environ.get("RUNTIME_DIR") or "").strip()
+        _secret_dir = (os.path.join(os.path.abspath(_runtime_dir), "data")
+                       if _runtime_dir
+                       else os.path.join(os.environ.get("OVPN_WEB_ROOT") or ROOT, "data"))
+    secret_file = os.path.join(_secret_dir, "web.secret")
+    try:
+        os.makedirs(os.path.dirname(secret_file), exist_ok=True)
+        if os.path.exists(secret_file):
+            with open(secret_file, "rb") as f:
+                key = f.read().decode("ascii", "replace").strip()
+        else:
+            import secrets
+            key = secrets.token_urlsafe(48)
+            with open(secret_file, "w", encoding="ascii") as f:
+                f.write(key)
+            os.chmod(secret_file, 0o600)
+        if key:
+            os.environ["SECRET_KEY"] = key
+    except Exception as e:
+        print("[serve] 生成 SECRET_KEY 失败: %s" % e)
+
+# ALLOWED_HOSTS：把本机所有网卡 IPv4 + 端口都加进去，拷到任意机器用任意网卡 IP
+# 都能访问管理页（Django 默认只信 ALLOWED_HOSTS，不配会 400）。
+# 用户也可在 .env 里显式设 HOSTS 覆盖（settings 会读进程环境变量优先）。
+if not os.environ.get("HOSTS"):
+    hosts = ["localhost", "127.0.0.1"]
+    try:
+        import socket
+        hn = socket.gethostname()
+        hosts.append(hn)
+        for info in socket.getaddrinfo(hn, None, socket.AF_INET):
+            ip = info[4][0]
+            if ip not in hosts and not ip.startswith("127."):
+                hosts.append(ip)
+        # 直接枚举本机所有全局 IPv4：getaddrinfo(hostname) 在 Ubuntu 上常只返回
+        # 127.0.1.1，而 udp connect 在无默认路由的离线机房拿不到地址，多网卡时也
+        # 只能拿到一个出口。全部列入后，从任意管理口访问都不会触发 DisallowedHost。
+        import subprocess
+        try:
+            r = subprocess.run(["ip", "-4", "-o", "addr", "show", "scope", "global"],
+                               capture_output=True, text=True, timeout=5)
+            for line in r.stdout.splitlines():
+                parts = line.split()
+                ip = parts[3].split("/")[0] if len(parts) >= 4 else ""
+                if ip and not ip.startswith("127.") and ip not in hosts:
+                    hosts.append(ip)
+        except Exception:
+            pass
+        # udp connect 兜底：老系统没有 ip 命令时仍能取到默认出口 IP
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            if ip not in hosts:
+                hosts.append(ip)
+        except Exception:
+            pass
+        finally:
+            s.close()
+    except Exception:
+        pass
+    os.environ["HOSTS"] = ",".join(h + ":" + str(PORT) for h in hosts)
+
+def _relabel_legacy_auth_app():
+    """历史库的 Auth app 曾叫 core（`db_table` 一直是 `core_user`），3.0 起改回 accounts。
+
+    升级时 django_migrations 里留着 `core.0001_initial`，新代码却按 `accounts`
+    找迁移，于是报「admin.0001 先于 accounts.0001 应用」的历史不一致。表结构没变，
+    把迁移记录与 content type 的 app_label 改成新名字即可，不重建任何表。
+    只改这两个登记表，业务数据一行不动。
+    """
+    from django.db import connection
+    with connection.cursor() as cur:
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='django_migrations'")
+        if not cur.fetchone():
+            return False
+        cur.execute("SELECT 1 FROM django_migrations WHERE app='core'")
+        if not cur.fetchone():
+            return False
+        # 已经是 accounts 的库（3.0 全新安装）不做任何改写，避免重复执行时报主键冲突
+        cur.execute("SELECT 1 FROM django_migrations WHERE app='accounts'")
+        if cur.fetchone():
+            return False
+        cur.execute("UPDATE django_migrations SET app='accounts' WHERE app='core'")
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='django_content_type'")
+        if cur.fetchone():
+            cur.execute("UPDATE django_content_type SET app_label='accounts' WHERE app_label='core'")
+    return True
+
+
+def _migrate():
+    """迁移，并兼容三种历史库：
+
+    1) 老库把 Auth app 记成 core（3.0 起叫 accounts）→ 历史不一致；
+    2) 老库的业务表是 core.py 用裸 SQL 建的，ORM 首次迁移会撞「表已存在」。
+       这种正是 --fake-initial 的用途：只把初始迁移标记为已应用，不重建表。
+    """
+    from django.core.management import call_command
+    try:
+        call_command("migrate", "--noinput", verbosity=0)
+    except Exception as exc:
+        name = type(exc).__name__
+        msg = str(exc)
+        if name == "InconsistentMigrationHistory" and _relabel_legacy_auth_app():
+            print("[serve] 检测到旧版 core 迁移记录，已改名 accounts 后重试")
+            call_command("migrate", "--noinput", verbosity=0)
+            return
+        if "already exists" in msg:
+            print("[serve] 业务表已存在（旧版裸 SQL 建的），改用 --fake-initial 对齐")
+            call_command("migrate", "--fake-initial", "--noinput", verbosity=0)
+            return
+        raise
+
+
+def main():
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+    # 迁移 + Django 管理员引导（幂等）：确保拷过去装完就有可用后台
+    import django
+    django.setup()
+    from django.core.management import call_command
+    _migrate()
+    call_command("ovpn_init", verbosity=0)
+
+    from config.wsgi import application
+    from waitress import serve
+    print("=" * 60)
+    print(" OpenVPN Web (Django) 监听 0.0.0.0:%s，waitress %d 线程" % (PORT, THREADS))
+    print("=" * 60)
+    serve(application, host="0.0.0.0", port=PORT, threads=THREADS,
+          ident="openvpn-web", clear_untrusted_proxy_headers=True,
+          max_request_body_size=80 * 1024 * 1024)
+
+
+if __name__ == "__main__":
+    main()

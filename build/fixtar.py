@@ -4,7 +4,7 @@
 规则：
   openvpn-web-*/bin/*             -> 755   （openvpn / openssl 等静态二进制）
   openvpn-web-*/python/bin/*      -> 755   （python3.12 解释器；软链本身保持 777）
-  openvpn-web-*/ 顶层的 *.sh/*.py -> 755   （install.sh / serve.py ...）
+  openvpn-web-*/ 顶层的 *.sh -> 755      （install.sh；serve.py 在 django/ 下不在此列）
   openvpn-web-*/system/*.sh|*.py  -> 755   （worker.py / setup.py / auth-verify.py ...）
   system/install-code.sh          -> 700   （能造安装码，只给 root）
   其余保持不变。

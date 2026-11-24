@@ -52,7 +52,7 @@ run_local_dev() {
 
     log_info "安装 Python 依赖"
     PIP install -q --upgrade pip
-    PIP install -q -r requirements.txt
+    PIP install -q -r "$BASE_DIR/django/requirements.txt"
     PIP install -q watchdog
 
     run_migrations
@@ -107,8 +107,8 @@ download_standalone_wheels() {
     local py wheels req pyver impl abi platform
     py="$(host_python_bin)"
     wheels="$(standalone_wheel_dir)"
-    # 平铺布局：requirements-standalone.txt 就在项目根
-    req="$BASE_DIR/requirements-standalone.txt"
+    # Django 源码在 django/ 下（3.0 起）；requirements 跟着源码走
+    req="$BASE_DIR/django/requirements-standalone.txt"
     pyver="${WHEEL_PYTHON:-3.12}"
     impl="${WHEEL_IMPL:-cp}"
     abi="${WHEEL_ABI:-cp${pyver//./}}"
@@ -181,8 +181,8 @@ install_standalone() {
     local py wheels req
     py="$(require_python_bin)"
     wheels="$(standalone_wheel_dir)"
-    # 平铺布局：requirements-standalone.txt 就在项目根
-    req="$BASE_DIR/requirements-standalone.txt"
+    # Django 源码在 django/ 下（3.0 起）；requirements 跟着源码走
+    req="$BASE_DIR/django/requirements-standalone.txt"
     export PIP_DISABLE_PIP_VERSION_CHECK=1
 
     log_info "使用解释器：$py"
@@ -223,7 +223,11 @@ run_standalone() {
     local py
     py="$(require_python_bin)"
 
-    cd "$BASE_DIR" || exit 1
+    # Waitress 直接托管 config.wsgi:application，必须在 Django 源码根运行；
+    # 3.0 起是 django/，兼容历史平铺布局（manage.py 在安装根）。
+    local dj="$BASE_DIR/django"
+    [ -f "$dj/manage.py" ] || dj="$BASE_DIR"
+    cd "$dj" || exit 1
 
     local host="${STANDALONE_HOST:-0.0.0.0}"
     local port="${STANDALONE_PORT:-8800}"

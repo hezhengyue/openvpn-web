@@ -30,13 +30,15 @@ done
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
 # 双位置兼容：包根的 ./install.sh 与 system/install.sh 是同一份内容，
-# 但「安装源」必须是含 Django 项目（manage.py + config/）的那一层。脚本万一被从
-# system/ 里直接调用，就自动上跳一级，避免把 system/ 当成整个包来铺。
-# 2.6 起源码与交付同构为根布局（manage.py 在根）；仍兼容 django/ 子目录布局。
-if [ ! -f "$SRC/manage.py" ] && [ -f "$SRC/../manage.py" ]; then
+# 但「安装源」必须是含 Django 项目（django/manage.py + config/）的那一层。脚本万一
+# 被从 system/ 里直接调用，就自动上跳一级，避免把 system/ 当成整个包来铺。
+# 3.0 起 Django 源码在 django/ 子目录；兼容历史平铺布局（manage.py 在根）。
+if [ -f "$SRC/django/manage.py" ]; then
+    SRC="$SRC"
+elif [ -f "$SRC/../django/manage.py" ]; then
     SRC="$(cd "$SRC/.." && pwd)"
-elif [ ! -f "$SRC/manage.py" ] && [ -f "$SRC/django/manage.py" ]; then
-    SRC="$SRC"   # django/ 子目录布局：当前层就是安装源
+elif [ ! -f "$SRC/manage.py" ] && [ -f "$SRC/../manage.py" ]; then
+    SRC="$(cd "$SRC/.." && pwd)"   # 兼容 2.6 起的平铺布局
 fi
 UNIT="/etc/systemd/system/openvpn-web.service"
 SUDOERS="/etc/sudoers.d/openvpn-web"
@@ -44,11 +46,11 @@ USER="ovpnweb"
 ETC="${OVPN_WEB_ETC:-/etc/openvpn-web}"
 PORT="${OVPN_WEB_PORT:-8800}"
 PY=""
-# manage.py 位置：2.6 根布局在安装根；旧 django/ 子目录布局在 django/ 下。
-if [ -f "$DEST/manage.py" ]; then
-    MGMT="$DEST/manage.py"
-else
+# manage.py 位置：3.0 起在安装根的 django/ 下；兼容历史平铺布局。
+if [ -f "$DEST/django/manage.py" ]; then
     MGMT="$DEST/django/manage.py"
+else
+    MGMT="$DEST/manage.py"
 fi
 
 say() { printf '%s\n' "$*"; }
@@ -313,22 +315,23 @@ find "$DEST/data" -print0 | xargs -0 -r chown -h "$USER:$USER"
 chown -R root:root "$DEST/bin" 2>/dev/null || true
 chmod 755 "$DEST/bin" 2>/dev/null || true
 chmod 755 "$DEST/bin"/* 2>/dev/null || true
-chown root:root "$DEST" "$DEST"/*.py "$DEST"/*.html 2>/dev/null || true
-chmod 644 "$DEST"/*.py "$DEST"/*.html 2>/dev/null || true
-# system/ 与 Django 代码目录同样 root 所有、Web 不可写；只有 data/ 归服务用户。
+chown root:root "$DEST" 2>/dev/null || true
+chmod 755 "$DEST"
+# system/ 与 Django 代码目录（django/）同样 root 所有、Web 不可写；只有 data/ 归服务用户。
 # 任何「下次会以 root 执行」的代码都不能被 Web 进程改。
 chown -R root:root "$DEST/system" 2>/dev/null || true
 chmod 644 "$DEST/system"/*.py 2>/dev/null || true
 chmod 755 "$DEST/system"/*.sh 2>/dev/null || true
 chmod 700 "$DEST/system/install-code.sh" 2>/dev/null || true
-# 2.6 起源码与交付同构：config/core/common/audit/jobs/ovpn/templates 直接在安装根。
-# 兼容旧的 django/ 子目录布局（升级场景可能还残留）。
-for d in config core common audit jobs ovpn templates static scripts django/config django/core django/common django/audit django/jobs django/ovpn django/templates django/static; do
+# 3.0 起 Django 源码集中在 django/；其余根级目录是历史平铺布局残留（升级场景会有）。
+for d in django scripts config core accounts common audit jobs ovpn templates static; do
     [ -d "$DEST/$d" ] || continue
     chown -R root:root "$DEST/$d" 2>/dev/null || true
     find "$DEST/$d" -type f -name '*.py' -exec chmod 644 {} + 2>/dev/null || true
     find "$DEST/$d" -type d -exec chmod 755 {} + 2>/dev/null || true
 done
+# Django 入口脚本需可执行（systemd 用 $PY 调用，执行位只为运维手工启动）
+[ -f "$DEST/django/serve.py" ] && chmod 755 "$DEST/django/serve.py" 2>/dev/null || true
 # Django 运行期目录：config/settings.py 在 import 时会尝试 mkdir(STATIC_ROOT/MEDIA_ROOT/static)。
 # 项目根必须保持 root 所有（Web 不能改下次会以 root 执行的代码），所以这里预先建好这些
 # 子目录并交给服务用户，mkdir(exist_ok=True) 就不会因父目录不可写而 PermissionError。
@@ -403,7 +406,7 @@ WorkingDirectory=$DEST
 Environment=OVPN_WEB_ROOT=$DEST
 Environment=OVPN_WEB_PORT=$PORT
 Environment=DJANGO_SETTINGS_MODULE=config.settings
-ExecStart=$PY $DEST/serve.py
+ExecStart=$PY $DEST/django/serve.py
 Restart=always
 RestartSec=3
 LimitNOFILE=65535

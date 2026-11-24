@@ -223,11 +223,15 @@ case "${1:-help}" in
         ;;
 
     clean:pycache)
-        # 2.6 起源码在根；逐个 Django app 目录清理（不碰 runtime/vendor）
-        for d in config core common audit jobs ovpn; do
-            [ -d "./$d" ] && clean_pycache "./$d"
-        done
-        [ -d "./django" ] && clean_pycache ./django   # 兼容旧布局
+        # 3.0 起 Django 源码集中在 django/（不碰 runtime/vendor/dist）
+        if [ -d "./django" ]; then
+            clean_pycache ./django
+        else
+            # 兼容历史平铺布局
+            for d in config accounts core common audit jobs ovpn; do
+                [ -d "./$d" ] && clean_pycache "./$d"
+            done
+        fi
         ;;
 
     help|--help|-h|*)

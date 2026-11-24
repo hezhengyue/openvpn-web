@@ -1601,8 +1601,8 @@ def main():
     _bop_py = os.path.join(CODE, "build", "build-offline.py")
     if os.path.isfile(_bop_py):
         _bop_src = open(_bop_py, encoding="utf-8").read()
-        check("Windows 打包把 Django apps 与 system/ 整体收进交付包（根布局）",
-              'for d in ("config", "core", "common", "audit", "jobs", "ovpn", "templates", "static")' in _bop_src
+        check("Windows 打包把 django/ 与 system/ 整体收进交付包",
+              'copy_tree(dj, os.path.join(out_dir, "django")' in _bop_src
               and 'copy_tree(os.path.join(src, "system")' in _bop_src)
 
     # Windows 上打包：不执行包内 Linux Python，只搬运 + 按规则写 tar
@@ -1621,10 +1621,19 @@ def main():
           "vendor/wheels" in _inst and "--find-links" in _inst)
 
     # 闸门做在 worker 里，但用户得能在界面上把码填进来，否则这功能等于没有
-    _html = open(os.path.join(DJANGO, "templates", "index.html"), encoding="utf-8").read()
+    # 模板随 ovpn app 走（3.0 起 django/ovpn/templates/ovpn/）
+    _html = open(os.path.join(DJANGO, "ovpn", "templates", "ovpn", "index.html"), encoding="utf-8").read()
     check("向导第 2 步与升级页都有安装码输入框",
           'id="wcode"' in _html and 'id="upcode"' in _html)
-    _viewsrc = open(os.path.join(_code_root, "ovpn", "views.py"), encoding="utf-8").read()
+    # 3.0 起视图拆成 ovpn/views/ 包；兼容历史单文件 views.py
+    _views_dir = os.path.join(_code_root, "ovpn", "views")
+    if os.path.isdir(_views_dir):
+        _viewsrc = "".join(
+            open(os.path.join(_views_dir, f), encoding="utf-8").read()
+            for f in sorted(os.listdir(_views_dir)) if f.endswith(".py")
+        )
+    else:
+        _viewsrc = open(os.path.join(_code_root, "ovpn", "views.py"), encoding="utf-8").read()
     check("三个上传接口都把安装码透传给 worker",
           _viewsrc.count('"install_code"') >= 3, _viewsrc.count('"install_code"'))
 
