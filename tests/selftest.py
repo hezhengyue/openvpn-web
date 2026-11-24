@@ -171,6 +171,10 @@ def main():
     check("显式 link-mtu 同时写入 server.conf 与 ovpn",
           "\nlink-mtu 1500\n" in core.render_server_conf(_lm)
           and "\nlink-mtu 1500\n" in core.render_ovpn(_lm))
+    # OpenVPN 不允许 --tun-mtu 与 --link-mtu 同时出现，否则启动直接 Options error
+    check("设了 link-mtu 就不再写 tun-mtu（OpenVPN 二选一）",
+          "tun-mtu " not in core.render_server_conf(_lm)
+          and "tun-mtu " not in core.render_ovpn(_lm))
     check("link-mtu 纳入配置指纹", core.config_fingerprint(_lm) != core.config_fingerprint(core.cfg()))
     # DCO 会绕过用户态 mssfix，且 Windows DCO 驱动大流量下会 reset 连接冲垮隧道：
     # 两端都必须显式 disable-dco（见 2.4.1 修复），否则 RDP 仍会超时。

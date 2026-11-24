@@ -2384,12 +2384,14 @@ def render_server_conf(c):
         # fallback 同步成同一算法，否则对端协商不过时会落到不同的 CBC。
         ("cipher %s" % _first_dc) if _non_aead else "data-ciphers-fallback AES-256-CBC",
         "tls-version-min %s" % c["tls_min"],
-        "tun-mtu %s" % c["tun_mtu"],
     ]
     if int(c.get("link_mtu", 0) or 0) > 0:
         # 两端显式写死同一链路 MTU，避免 2.6 客户端/服务端各自推算不一致
-        # （实测 1600 vs 1768，RDP 大流量触发 Bad encapsulated packet length）
+        # （实测 1600 vs 1768，RDP 大流量触发 Bad encapsulated packet length）。
+        # OpenVPN 不允许同时出现 --tun-mtu 与 --link-mtu，只能二选一。
         L.append("link-mtu %s" % int(c["link_mtu"]))
+    else:
+        L.append("tun-mtu %s" % c["tun_mtu"])
     L += [
         # DCO（Data Channel Offload）把数据通道下沉到内核，会绕过用户态的
         # mssfix/TCP MSS 钳制；一旦客户端 DCO 驱动有 bug（ovpn-dco-win 1.3.0
@@ -2441,11 +2443,13 @@ def render_ovpn(c):
         "persist-tun",
         "remote-cert-tls server",
         "tls-version-min %s" % c["tls_min"],
-        "tun-mtu %s" % c["tun_mtu"],
     ]
     if int(c.get("link_mtu", 0) or 0) > 0:
-        # 必须与服务端完全一致：否则两端按各自的推算值封装，帧长错位
+        # 必须与服务端完全一致：否则两端按各自的推算值封装，帧长错位。
+        # 同样二选一：OpenVPN 拒绝同时出现 --tun-mtu 和 --link-mtu。
         L.append("link-mtu %s" % int(c["link_mtu"]))
+    else:
+        L.append("tun-mtu %s" % c["tun_mtu"])
     L += [
         # 关键：Windows 客户端 2.6 默认启用 DCO，数据通道下沉内核会绕过用户态
         # mssfix，且 ovpn-dco-win 1.3.0 及更早版本有已知连接稳定性问题。
