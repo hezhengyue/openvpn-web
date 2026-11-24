@@ -3,6 +3,8 @@
 一个目录、一个 systemd 服务、单进程。把「装 OpenVPN 服务端、账号密码、固定 IP、按人限制能访问哪些服务器、可开关的无 NAT 溯源、客户端互访 P2P、Excel 台账、版本与更新」全部收进浏览器，机房断网也能装。
 
 > 交付定稿：x86_64 离线静态二进制、**Django 5.2 裸机便携模式（Waitress WSGI + SQLite WAL + WhiteNoise，零 Docker / 零外部服务）**、账号密码认证、全员一个 `company.ovpn`、ACL 默认拒绝 + 观察模式起步、**网络模式默认 NAT（无 NAT 溯源默认关闭、可一键开启）**、客户端互访走内核 FORWARD、手动上传更新。
+>
+> **运行模式边界**：底座代码保留 `STANDALONE=False` 的 Docker/PostgreSQL 能力，仅供底座自身开发测试；本项目正式运行**只允许 `STANDALONE=True` 的裸机 SQLite 模式**。特权层 `worker.py` / `auth-verify.py` / 备份恢复均固定读 `data/db.sqlite3`，切 PostgreSQL 会让 Web 台账、VPN 认证和规则下发看到不同的数据，属于明确不支持的部署形态。`.env.example` 与 `serve.py` 都已按此固定默认值。
 
 > **从 GitHub clone 后想打包运行？先读 [BUILD-FROM-SOURCE.md](BUILD-FROM-SOURCE.md)。** 仓库刻意不含 `bin/openvpn`、`runtime/` 便携 Python、`vendor/` 大文件与 `dist/` 交付包（共约 500MB，均可由随仓库的脚本从零生成）；本页第 4 节是构建原理与细节，从零准备手把手步骤在那份指南里。如果你拿到的已经是完整交付包（`dist/openvpn-web-x86_64.tar.gz`），直接从第 5 节部署开始即可。
 

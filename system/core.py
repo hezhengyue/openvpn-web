@@ -64,6 +64,8 @@ STAGING = os.path.join(DATA, "staging")
 BACKUPS = os.path.join(DATA, "backups")
 USER_BACKUP_KEEP = 200          # 台账自动备份保留份数（每次账号变更一份 xlsx）
 BIN = os.path.join(ROOT, "bin", "openvpn")
+# root 独占的可信目录：规则脚本、安装码都放这里，绝不放 Web 可写的 data/。
+ETC = os.environ.get("OVPN_WEB_ETC", "/etc/openvpn-web")
 WORKER = os.path.join(ROOT, "system", "worker.py")
 AUTH_VERIFY = os.path.join(ROOT, "system", "auth-verify.py")
 PY = os.environ.get("OVPN_WEB_PY") or (
@@ -72,7 +74,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "2.6.8"
+WEB_VERSION = "2.6.9"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -2686,11 +2688,42 @@ def _write_all_config():
         f.write(render_server_conf(c))
     with open(os.path.join(DATA, "company.ovpn"), "w") as f:
         f.write(render_ovpn(c))
+    # 注意：data/state/rules.sh 只用于页面预览/兼容旧包。root worker 和 systemd
+    # 定时器执行的是 write_root_rules() 生成的 root 独占副本，绝不执行这个 Web 可写文件。
     with open(os.path.join(STATE, "rules.sh"), "w") as f:
         f.write(render_rules(c))
     os.chmod(os.path.join(STATE, "rules.sh"), 0o750)
     n = rebuild_ccd()
     return {"ccd": n, "fingerprint": refresh_fingerprint(), "config": c}
+
+
+def root_rules_path():
+    """root 定时器/worker 唯一允许执行的规则脚本路径。"""
+    if MOCK:
+        # 自检跑在非 root、Windows 也能过；生产路径恒为 ETC 下的 root 独占文件。
+        return os.path.join(STATE, "rules.root.sh")
+    return os.path.join(ETC, "rules.sh")
+
+
+def write_root_rules():
+    """由 root 侧从数据库重新渲染规则脚本，落到 root 独占目录。
+
+    Web 进程能写 data/（因而能改 data/state/rules.sh），但改不了这里生成的
+    root:root 0700 文件。render_rules() 对进命令行的值做 fail-closed 校验，
+    避免被篡改的库把 shell 元字符带进脚本。
+    """
+    # 注意：这里不能套 validate_cfg()——它连 public_addr 等与 iptables 无关
+    # 的字段也校验，自检/老包会故意留空。render_rules() 自己已对每一个进
+    # 命令行的地址/端口/协议做 fail-closed 校验，脏值会直接抛错。
+    text = render_rules(cfg())
+    p = root_rules_path()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w") as f:
+        f.write(text)
+    os.chmod(p, 0o700)
+    if not MOCK:
+        os.chown(p, 0, 0)
+    return p
 
 
 # --------------------------------------------------------------------------- 快照 / 回滚

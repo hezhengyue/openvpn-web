@@ -1392,6 +1392,19 @@ def main():
           and 'OVPN_WEB_SELFTEST="1" if MOCK else "0"' in _bsrc)
     check("带副作用的 GET（logs/selfcheck）也纳入 CSRF 校验",
           'CSRF_GET_PATHS = ("/api/logs", "/api/selfcheck")' in _msrc)
+    _ssrc = open(os.path.join(SYS, "setup.py"), encoding="utf-8").read()
+    _sys_core = open(os.path.join(SYS, "core.py"), encoding="utf-8").read()
+    check("root 只执行 root 生成的规则脚本（不跑 Web 可写的 data/state/rules.sh）",
+          "core.write_root_rules()" in _wsrc and "core.write_root_rules()" in _ssrc
+          and "def write_root_rules()" in _sys_core
+          and 'os.path.join(STATE, "rules.sh")' not in _wsrc
+          and 'os.path.join(core.STATE, "rules.sh")' not in _ssrc)
+    check("worker 收尾 chown 不跟随软链（data/ 可写，软链可指向 /etc）",
+          "os.path.islink(p)" in _wsrc
+          and ("os.lchown" in _wsrc or "follow_symlinks=False" in _wsrc)
+          and "os.path.islink(p)" in _ssrc)
+    check("安装期把 data/ 交还 Web 用户时不跟随软链",
+          'chown -h "$USER:$USER"' in _isrc)
 
     # 回归：tls_min 曾是 validate_cfg 的盲区——带换行的字符串被原样写进以 root
     # 运行的 server.conf（tls-version-min 行），可注入 up/plugin 等任意指令，等于 root RCE。

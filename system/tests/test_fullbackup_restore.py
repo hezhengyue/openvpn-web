@@ -4,7 +4,12 @@
 放在 system/ 下是因为契约检查器禁止源码根（Web 进程代码）出现裸 SQL，
 而这些夹具必须用 sqlite3 构造两张结构不同的库来验证跨版本恢复。
 """
+import io
+import os
+import json
 import sqlite3
+import tarfile
+import tempfile
 import unittest
 
 from system import fullbackup
@@ -58,6 +63,49 @@ class RestoreBusinessTablesTest(unittest.TestCase):
         finally:
             src.close()
             tgt.close()
+
+
+class ManifestPathTest(unittest.TestCase):
+    """恢复时真正决定目标路径的是 manifest 的 rel，不是 tar 成员名。"""
+
+    def test_safe_rel_only_allows_known_files(self):
+        for block, rel in (
+            ("openvpn", "../../../etc/sudoers.d/pwned"),
+            ("openvpn", "ccd/../server.conf"),
+            ("openvpn", "ccd/x;touch /tmp/pwned"),
+            ("openvpn", "/etc/cron.d/pwned"),
+            ("web", "../web.secret"),
+            ("web", "evil.sh"),
+            ("web", ""),
+        ):
+            with self.subTest(block=block, rel=rel), self.assertRaises(ValueError):
+                fullbackup._safe_rel(block, rel)
+        self.assertEqual(fullbackup._safe_rel("openvpn", "ccd/alice"), "ccd/alice")
+        self.assertEqual(fullbackup._safe_rel("web", "web.secret"), "web.secret")
+
+    def test_preview_rejects_package_with_traversal_in_manifest(self):
+        """恶意 manifest 必须在恢复落地任何文件之前整包拒绝。"""
+        manifest = {
+            "kind": fullbackup.KIND,
+            "format": fullbackup.FORMAT,
+            "files": {
+                "openvpn": {
+                    "ca.crt": "0" * 64, "server.conf": "0" * 64, "ccd/alice": "0" * 64,
+                    "../../../etc/sudoers.d/pwned": "0" * 64,
+                },
+                "web": {"openvpn-web.db": "0" * 64},
+            },
+        }
+        raw = json.dumps(manifest).encode("utf-8")
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "evil.tar.gz")
+            with tarfile.open(p, "w:gz") as tf:
+                info = tarfile.TarInfo("manifest.json")
+                info.size = len(raw)
+                tf.addfile(info, io.BytesIO(raw))
+            with self.assertRaises(ValueError) as ctx:
+                fullbackup.preview(p)
+            self.assertIn("非法文件路径", str(ctx.exception))
 
 
 if __name__ == "__main__":

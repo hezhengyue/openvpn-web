@@ -18,6 +18,7 @@
 """
 import os
 import io
+import re
 import json
 import time
 import shutil
@@ -286,6 +287,47 @@ def _safe_member(name):
                  or name.startswith("openvpn/") or name.startswith("web/")))
 
 
+# manifest 里的 rel 才是恢复时真正用于「读包内文件」和「写目标目录」的路径。
+# 只校验 tar 成员名是不够的：manifest 可以写 ../../../etc/sudoers.d/x，
+# 而恢复进程是 root，sha256 自洽也不能证明目标路径安全（攻击者可自算哈希）。
+# 因此这里用固定白名单，绝不让备份包自行决定目标路径。
+WEB_BACKUP_FILES = ("openvpn-web.db", "web.secret", "admin_password.txt", "meta.json")
+# 用户名允许中文，ccd 文件名也会是中文；只挡路径分隔符和控制字符。
+CCD_REL_RE = re.compile(r"^ccd/[^/\\\x00-\x1f]{1,128}$")
+
+
+def _safe_rel(block, rel):
+    """校验 manifest 中的相对路径；非法直接抛错（整包拒绝，不写任何文件）。"""
+    if (not isinstance(rel, str) or not rel or "\\" in rel or "\x00" in rel
+            or rel.startswith("/") or ".." in rel.split("/")):
+        raise ValueError("备份包含非法文件路径: %r" % (rel,))
+    if block == "openvpn":
+        if rel in OVPN_FILES or rel == "openvpn.bin" or CCD_REL_RE.fullmatch(rel):
+            return rel
+    elif block == "web":
+        if rel in WEB_BACKUP_FILES:
+            return rel
+    raise ValueError("备份包含未授权的文件路径: %s/%s" % (block, rel))
+
+
+def _inside(path, base):
+    """realpath 双重确认，挡住软链/硬路径拼接造成的越界。"""
+    rp, rb = os.path.realpath(path), os.path.realpath(base)
+    return rp == rb or rp.startswith(rb + os.sep)
+
+
+def _checked_pair(block, rel, tmp, dest_base):
+    """(包内源, 目标) 双向校验，返回 realpath 后的两条路径。"""
+    rel = _safe_rel(block, rel)
+    src = os.path.realpath(os.path.join(tmp, block, rel))
+    if not _inside(src, os.path.join(tmp, block)):
+        raise ValueError("备份包含越界源文件: %s/%s" % (block, rel))
+    dst = os.path.realpath(os.path.join(dest_base, rel))
+    if not _inside(dst, dest_base):
+        raise ValueError("备份包目标路径越界: %s/%s" % (block, rel))
+    return src, dst
+
+
 def preview(path):
     """只读校验并给出摘要，不落地任何文件"""
     if not os.path.isfile(path):
@@ -307,8 +349,16 @@ def preview(path):
     if m.get("kind") != KIND or m.get("format") != FORMAT:
         raise ValueError("备份包版本不匹配（kind=%s format=%s）"
                          % (m.get("kind"), m.get("format")))
-    n_ov = len(m.get("files", {}).get("openvpn", {}))
-    n_web = len(m.get("files", {}).get("web", {}))
+    blocks = m.get("files")
+    if not isinstance(blocks, dict):
+        raise ValueError("备份包清单格式非法")
+    for block in ("openvpn", "web"):
+        rels = blocks.get(block)
+        if not isinstance(rels, dict):
+            raise ValueError("备份包清单缺少 %s 文件表" % block)
+        for rel in rels:
+            _safe_rel(block, rel)
+    n_ov, n_web = len(blocks["openvpn"]), len(blocks["web"])
     if n_ov < 3 or n_web < 1:
         raise ValueError("备份包内容不完整（openvpn %d 个文件 / web %d 个文件）" % (n_ov, n_web))
     return {"manifest": m, "openvpn_files": n_ov, "web_files": n_web,
@@ -347,11 +397,12 @@ def _restore(path, audit=True, protect=True, with_bin=False):
                 with open(out, "wb") as w:
                     shutil.copyfileobj(f, w)
 
-        # 逐个校验 sha256：包坏了 / 被改过就整包拒绝，绝不写一半
+        # 逐个校验 sha256：包坏了 / 被改过就整包拒绝，绝不写一半。
+        # 同时把 manifest 的 rel 再过一遍白名单+realpath，防止目录被软链替换后越界。
         for block in ("openvpn", "web"):
             base = os.path.join(tmp, block)
-            for rel, sha in (m.get("files", {}).get(block) or {}).items():
-                p = os.path.join(base, rel)
+            for rel, sha in m["files"][block].items():
+                p, _ = _checked_pair(block, rel, tmp, base)
                 if not os.path.isfile(p) or _sha256(p) != sha:
                     raise ValueError("备份包校验失败：%s/%s" % (block, rel))
 
@@ -371,16 +422,21 @@ def _restore(path, audit=True, protect=True, with_bin=False):
         # ---- 恢复 openvpn/：证书 + 配置 + ccd ----
         ov = os.path.join(tmp, "openvpn")
         for rel in sorted(m["files"]["openvpn"]):
-            src = os.path.join(ov, rel)
             if rel.startswith("ccd/") or rel == "openvpn.bin":
                 continue
-            shutil.copy2(src, os.path.join(core.DATA, rel))
+            src, dst = _checked_pair("openvpn", rel, tmp, core.DATA)
+            shutil.copy2(src, dst)
         # 二进制单独放回 ROOT/bin（老版本包没有这一项，跳过即可）
         binfile = os.path.join(ov, "openvpn.bin")
         bin_skipped = False
         if os.path.isfile(binfile):
+            _safe_rel("openvpn", "openvpn.bin")
+            if not _inside(os.path.realpath(binfile), ov):
+                raise ValueError("备份包二进制源文件越界")
             if with_bin:
                 os.makedirs(os.path.dirname(core.BIN), exist_ok=True)
+                if not _inside(os.path.realpath(core.BIN), os.path.dirname(core.BIN)):
+                    raise ValueError("二进制目标路径越界")
                 shutil.copy2(binfile, core.BIN)
             else:
                 bin_skipped = True     # 要换二进制走「版本与更新」+ 安装码
@@ -392,7 +448,9 @@ def _restore(path, audit=True, protect=True, with_bin=False):
         srcccd = os.path.join(ov, "ccd")
         if os.path.isdir(srcccd):
             for fn in os.listdir(srcccd):
-                shutil.copy2(os.path.join(srcccd, fn), os.path.join(core.CCD, fn))
+                rel = "ccd/" + fn
+                src, dst = _checked_pair("openvpn", rel, tmp, os.path.dirname(core.CCD))
+                shutil.copy2(src, os.path.join(core.CCD, os.path.basename(dst)))
 
         # ---- 恢复 web/：只回灌 ovpn 业务表，底座运行态与目标库表结构一律不碰 ----
         # 备份包里带的是整库文件，但 core_user / django_session / audit_auditlog /
@@ -409,9 +467,9 @@ def _restore(path, audit=True, protect=True, with_bin=False):
                 src.close()
                 tgt.close()
         for name in WEB_FILES:
-            p = os.path.join(web, name)
+            p, dst = _checked_pair("web", name, tmp, core.DATA)
             if os.path.isfile(p):
-                shutil.copy2(p, os.path.join(core.DATA, name))
+                shutil.copy2(p, dst)
 
         # 按目标机的 ROOT 重新生成 server.conf / company.ovpn，路径自动适配
         core.write_all_config()

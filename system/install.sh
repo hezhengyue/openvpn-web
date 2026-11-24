@@ -305,7 +305,9 @@ if ! id "$USER" >/dev/null 2>&1; then
     useradd -r -s /sbin/nologin -d "$DEST" "$USER" 2>/dev/null || \
     useradd -r -s /usr/sbin/nologin -d "$DEST" "$USER"
 fi
-chown -R "$USER:$USER" "$DEST/data"
+# -h：只改条目本身，不跟随软链。data/ 归 Web 可写，装/升级时若里面已有
+# 指向 /etc 的软链，普通 chown -R 会把目标文件一并改成 Web 属主。
+find "$DEST/data" -print0 | xargs -0 -r chown -h "$USER:$USER"
 # bin/ 不交给 Web 用户：二进制由 root 侧的 worker 落盘，Web 只要有可执行位就够了。
 # 万一 Web 进程被打穿，也改不了这个「下次启动会以 root 跑」的程序。
 chown -R root:root "$DEST/bin" 2>/dev/null || true

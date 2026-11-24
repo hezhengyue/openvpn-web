@@ -218,8 +218,17 @@ def fix_owner():
             return
         for base, dirs, files in os.walk(DATA):
             for n in dirs + files:
+                p = os.path.join(base, n)
+                # data/ 归 Web 可写：Web 可以放一个指向 /etc 的软链，等 root
+                # worker 收尾时把目标文件 chown 给 Web，造成主机级提权。
+                # 软链本身也不改（改的是链接属主，不是目标，但没必要动）。
+                if os.path.islink(p):
+                    continue
                 try:
-                    os.chown(os.path.join(base, n), uid, gid)
+                    if hasattr(os, "lchown"):
+                        os.lchown(p, uid, gid)
+                    else:
+                        os.chown(p, uid, gid, follow_symlinks=False)
                 except Exception:
                     pass
     except Exception:
@@ -237,9 +246,9 @@ def vpn_pid():
 
 
 def action_apply_rules(p):
-    script = safe_path(os.path.join(STATE, "rules.sh"))
-    if not os.path.exists(script):
-        raise RuntimeError("规则脚本不存在，请先在 Web 上保存一次配置")
+    # 绝不执行 data/ 下 Web 可写的 rules.sh：root 自己从库里重新渲染一份
+    # root:root 0700 的脚本再执行，阻断「改脚本→root 执行」的提权链。
+    script = core.write_root_rules()
     # IPv4 转发：路由模式与客户端互访（tun0 -> tun0）都依赖它，重启后也要生效
     if not MOCK:
         try:
@@ -304,7 +313,8 @@ def action_mask_system_unit(p):
 def action_install_timer(p):
     svc = "/etc/systemd/system/openvpn-web-replay.service"
     tim = "/etc/systemd/system/openvpn-web-replay.timer"
-    script = os.path.join(STATE, "rules.sh")
+    # 定时器只能跑 root 独占写的脚本，不能指向 Web 可写的 data/state/rules.sh。
+    script = core.write_root_rules()
     service = ("[Unit]\nDescription=Replay OpenVPN Web ACL rules\n"
                "[Service]\nType=oneshot\nExecStart=/bin/bash %s\n" % script)
     timer = ("[Unit]\nDescription=Replay OpenVPN Web ACL rules periodically\n"

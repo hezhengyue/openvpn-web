@@ -354,6 +354,23 @@ def startup_maintenance():
 
 
 # --------------------------------------------------------------------------- 方法分派
+def write_only(fn):
+    """有副作用的接口一律拒绝 GET/HEAD/OPTIONS（405）。
+
+    只靠前端用 POST 调用不够：管理员点开一个链接就能用 GET 触发重启、
+    删授权、重建 CA。这里在路由层兜底，新增写接口必须显式挂上这个包装。
+    CSRF 仍由外层中间件统一校验（所有非 GET 路径）。
+    """
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(request, *args, **kwargs):
+        if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
+            return jerr("该接口不接受 GET，请用 POST 提交", 405)
+        return fn(request, *args, **kwargs)
+    return wrapper
+
+
 def method_split(**views):
     """
     多个 HTTP 方法共用同一 URL 时按 method 分派（对应 Flask 同名路由多装饰器）。

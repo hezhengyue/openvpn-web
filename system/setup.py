@@ -137,10 +137,11 @@ def mask_units():
 def install_timer():
     svc = "/etc/systemd/system/openvpn-web-replay.service"
     tim = "/etc/systemd/system/openvpn-web-replay.timer"
+    # 定时器只能执行 root 独占的脚本；data/ 归 Web 可写，不能作为 root 执行源。
+    script = core.write_root_rules()
     with open(svc, "w") as f:
         f.write("[Unit]\nDescription=Replay OpenVPN Web ACL rules\n"
-                "[Service]\nType=oneshot\nExecStart=/bin/bash %s\n"
-                % os.path.join(core.STATE, "rules.sh"))
+                "[Service]\nType=oneshot\nExecStart=/bin/bash %s\n" % script)
     with open(tim, "w") as f:
         f.write("[Unit]\nDescription=Replay OpenVPN Web ACL rules periodically\n"
                 "[Timer]\nOnBootSec=2min\nOnUnitActiveSec=5min\nAccuracySec=1min\n"
@@ -193,8 +194,15 @@ def fix_owner():
             return
         for base, dirs, files in os.walk(core.DATA):
             for n in dirs + files:
+                p = os.path.join(base, n)
+                # 绝不跟随软链改目标属主：data/ 可写，软链是现成的提权跳板。
+                if os.path.islink(p):
+                    continue
                 try:
-                    os.chown(os.path.join(base, n), uid, gid)
+                    if hasattr(os, "lchown"):
+                        os.lchown(p, uid, gid)
+                    else:
+                        os.chown(p, uid, gid, follow_symlinks=False)
                 except Exception:
                     pass
     except Exception:
@@ -245,7 +253,7 @@ def main():
         print("[5/8] 跳过 iptables 下发")
     else:
         print("[5/8] 下发 NAT / ACL 规则")
-        sh(["/bin/bash", os.path.join(core.STATE, "rules.sh")], check=True)
+        sh(["/bin/bash", core.write_root_rules()], check=True)
         print("      已完成（%s 模式）" % c["nat_mode"])
 
     print("[6/8] 接管进程与规则重放")

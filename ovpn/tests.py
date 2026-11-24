@@ -496,6 +496,29 @@ class ReviewFixRegressionTest(TestCase):
         self.assertIn("expired-one", core.take_expired_users())
         self.assertEqual(core.take_expired_users(), [])
 
+    def test_destructive_endpoints_reject_get(self):
+        """有副作用的接口不能靠一个链接用 GET 触发（CSRF）。"""
+        from django.contrib.auth import get_user_model
+        from django.test import Client
+
+        core.set_meta("admin_must_change", 0)
+        u = get_user_model().objects.create_superuser("csrfboss", "", "Passw0rd!")
+        c = Client()
+        c.force_login(u)
+        paths = (
+            "/api/service/restart", "/api/wizard/execute", "/api/wizard/params",
+            "/api/peers/1", "/api/settings/rebuild", "/api/settings/reinit-ca",
+            "/api/settings/restore-default", "/api/network/nat", "/api/acl/mode",
+            "/api/full-backup/create", "/api/full-backup/restore",
+            "/api/backups/restore", "/api/login", "/api/password",
+        )
+        for p in paths:
+            with self.subTest(path=p):
+                r = c.get(p)
+                self.assertEqual(r.status_code, 405, (p, r.status_code, r.content[:160]))
+        # 只读接口不能被误伤
+        self.assertEqual(c.get("/api/state").status_code, 200)
+
     def test_expire_side_effects_run_once_and_skip_kick_when_vpn_down(self):
         """到期名单先扫描后消费一次；OpenVPN 没跑时不做无谓的 7505 重试。"""
         from unittest import mock
