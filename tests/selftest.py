@@ -1380,9 +1380,11 @@ def main():
           "if act in GATED and not SELFTEST:" in _wsrc
           and "GATED and not MOCK" not in _wsrc)
     _keep_lines = [ln for ln in _isrc.splitlines() if "env_keep" in ln and not ln.lstrip().startswith("#")]
-    check("sudoers 显式 env_reset 且 env_keep 只留 ROOT（不保留任何自检开关）",
+    check("sudoers 显式 env_reset 且 env_keep 只留安装/数据目录（不保留任何自检开关）",
           "Defaults:$USER env_reset" in _isrc
-          and any('env_keep += "OVPN_WEB_ROOT"' in ln for ln in _keep_lines)
+          and any("env_keep +=" in ln and "OVPN_WEB_ROOT" in ln for ln in _keep_lines)
+          # DATA_DIR / RUNTIME_DIR 必须传给 worker，否则特权脚本和 ORM 会读写两个库；
+          # 但任何能豁免安装码闸门的开关都不允许出现在 env_keep 里。
           and not any(("OVPN_WEB_MOCK" in ln or "OVPN_WEB_SELFTEST" in ln)
                       for ln in _keep_lines))
     check("bridge 把 MOCK/SELFTEST 都随 MOCK 标志设置（生产路径经 sudo 由 env_reset 清空）",

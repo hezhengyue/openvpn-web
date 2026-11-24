@@ -86,7 +86,7 @@ VPN 网段   : {vp}
   一键恢复（推荐）：
   - 同一台机器：后台「版本与更新 → 全备份与迁移 → 上传备份包 → 确认恢复」
   - 新机器：先跑 install.sh 装好同版本 Web，然后
-        python3 app.py --restore-full 本包路径
+        python3 manage.py ovpn_cli restore-full 本包路径
         systemctl restart openvpn-web
     恢复程序会用目标机的路径重新生成 server.conf / company.ovpn，
     所以目录变了也不用手改。
@@ -234,6 +234,53 @@ def _put_tables(con, data):
         con.executemany(q, rows)
 
 
+def _table_names(con):
+    return {r[0] for r in con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
+
+
+def _restore_business_tables(src, tgt):
+    """只把备份包里的 ovpn 业务表回灌到目标库，不覆盖表结构与底座运行态表。
+
+    旧实现用 src.backup(tgt) 整库覆盖再写回 PROTECTED_TABLES：一旦备份包来自
+    老版本（少表 / 少列），整库结构会被抹掉，紧接着的 _put_tables 就会报
+    no such table / no such column，数据库停在半恢复状态。这里改为在单个事务内
+    按「两边表结构的交集列」逐表DELETE+INSERT；目标库多出来的新表和列原样保留，
+    老包缺列时只有目标表新增的必填列会明确报错并整体回滚。
+    """
+    names = (_table_names(src) & _table_names(tgt)) - set(PROTECTED_TABLES)
+    with tgt:
+        for t in sorted(names):
+            src_cols = {r[1] for r in src.execute('PRAGMA table_info("%s")' % t)}
+            can = []
+            for r in tgt.execute('PRAGMA table_info("%s")' % t):
+                col, notnull, dflt, pk = r[1], r[3], r[4], r[5]
+                if col in src_cols:
+                    can.append(col)
+                elif notnull and dflt is None and not pk:
+                    raise ValueError(
+                        "备份包不兼容：表 %s 缺少必填列 %s，已取消恢复（数据库未改动）" % (t, col))
+            cols = ",".join('"%s"' % c for c in can)
+            rows = src.execute('SELECT %s FROM "%s"' % (cols, t)).fetchall()
+            tgt.execute('DELETE FROM "%s"' % t)
+            if rows:
+                tgt.executemany('INSERT INTO "%s" (%s) VALUES (%s)' % (
+                    t, cols, ",".join("?" * len(can))), rows)
+        # 显式写回主键后 AUTOINCREMENT 计数器不会跟着走，手工对齐避免后续新增撞主键
+        try:
+            src_seq = {r[0]: r[1] for r in src.execute("SELECT name,seq FROM sqlite_sequence")}
+        except sqlite3.Error:
+            src_seq = {}
+        for t in names:
+            if t not in src_seq:
+                continue
+            if tgt.execute("SELECT 1 FROM sqlite_sequence WHERE name=?", (t,)).fetchone():
+                tgt.execute("UPDATE sqlite_sequence SET seq=MAX(seq,?) WHERE name=?", (src_seq[t], t))
+            else:
+                tgt.execute("INSERT INTO sqlite_sequence(name,seq) VALUES(?,?)", (t, src_seq[t]))
+    return len(names)
+
+
 def _safe_member(name):
     """tar 里的路径必须规整，挡住 ../../etc/passwd 这类路径穿越"""
     return (name and not name.startswith("/") and not name.startswith("\\")
@@ -278,7 +325,7 @@ def restore(path, audit=True, protect=True, with_bin=False):
     with_bin 默认 False：`bin/openvpn` 只认「带安装码的替换/编译」这一条路。
     备份包里就算带了二进制也跳过——否则任何能写 data/ 的进程（也就是 Web）
     都能借「恢复」把外面的 ELF 变成 root 运行的程序，闸门就白设了。
-    只有命令行 `app.py --restore-full`（root 手工执行）才显式 with_bin=True。
+    只有命令行 `manage.py ovpn_cli restore-full`（root 手工执行）才显式 with_bin=True。
     """
     # 恢复会成批覆盖证书、配置、ccd 和数据库：必须独占，不能和「另一个请求在改账号」并行
     with core.SYS_LOCK:
@@ -350,21 +397,17 @@ def _restore(path, audit=True, protect=True, with_bin=False):
             for fn in os.listdir(srcccd):
                 shutil.copy2(os.path.join(srcccd, fn), os.path.join(core.CCD, fn))
 
-        # ---- 恢复 web/：只回灌业务表，底座自己的表一律不覆盖 ----
+        # ---- 恢复 web/：只回灌 ovpn 业务表，底座运行态与目标库表结构一律不碰 ----
         # 备份包里带的是整库文件，但 core_user / django_session / audit_auditlog /
-        # jobs 属于「底座运行态」，被旧包覆盖会导致：当前登录会话失效、审计断档、
-        # 迁移记录回退。所以先读出这些表的现有内容，覆盖后再写回去。
+        # jobs / django_migrations 属于「底座运行态」；整库覆盖会让登录态失效、
+        # 审计断档、迁移记录回退，老版本包的旧表结构还会把当前库打坏。
         web = os.path.join(tmp, "web")
         dbfile = os.path.join(web, "openvpn-web.db")
         if os.path.isfile(dbfile):
             src = sqlite3.connect(dbfile)
             tgt = core.db()
             try:
-                keep = _dump_tables(tgt, PROTECTED_TABLES)
-                with tgt:
-                    src.backup(tgt)
-                _put_tables(tgt, keep)
-                tgt.commit()
+                _restore_business_tables(src, tgt)
             finally:
                 src.close()
                 tgt.close()

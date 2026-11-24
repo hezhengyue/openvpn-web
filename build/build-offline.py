@@ -354,7 +354,9 @@ def main():
     # 自检：程序文本必须是 LF。Windows 工作区（core.autocrlf=true）里是 CRLF，
     # 一旦漏转，目标机上 ./install.sh 会直接报 "/bin/bash^M: bad interpreter"。
     crlf = []
-    for sub in ("", "django", "system", "tests"):
+    # sub=="" 已经递归遍历整棵打包树；2.6 起没有 django/ 子目录，
+    # 原来的 django/system/tests 三项只是重复扫描同一批文件。
+    for sub in ("",):
         base = os.path.join(out_dir, sub) if sub else out_dir
         for dirpath, _, filenames in os.walk(base):
             if os.path.relpath(dirpath, out_dir).split(os.sep)[0] in ("python", "vendor", "bin"):

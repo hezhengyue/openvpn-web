@@ -372,8 +372,9 @@ cat > "$SUDOERS" <<EOF
 # 显式 env_reset：除 env_keep 列出的以外，调用方环境变量一律不带进 root 进程。
 # 这样 OVPN_WEB_SELFTEST / OVPN_WEB_MOCK 都不可能经 sudo 到 worker 去豁免安装码闸门。
 Defaults:$USER env_reset
-# 只保留 ROOT（worker 需要知道安装目录）。
-Defaults:$USER env_keep += "OVPN_WEB_ROOT"
+# 只保留 ROOT 与运行时数据目录：worker 必须用和 Web ORM 同一个 db.sqlite3，
+# 否则设了 DATA_DIR/RUNTIME_DIR 后两边各写一个库。绝不放开 MOCK/SELFTEST。
+Defaults:$USER env_keep += "OVPN_WEB_ROOT DATA_DIR RUNTIME_DIR"
 # 末尾必须是 " *"：sudoers 里不带通配符的规则要求参数完全一致，
 # 而实际调用是 worker.py <32位task_id>，只写 worker.py 会导致 "sudo: a password is required"。
 # worker.py 自己校验 task_id 格式，并且动作只能从 data/tasks 里的白名单读取，不给自由参数。

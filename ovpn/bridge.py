@@ -27,6 +27,7 @@ from datetime import timedelta
 from django.http import JsonResponse, HttpResponse, FileResponse
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.db import close_old_connections
 
 ROOT = str(getattr(settings, 'PROJECT_ROOT', '') or
            os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -39,6 +40,12 @@ PORT = int(getattr(settings, 'OVPN_PORT', 8800))
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
 WRITE_LOCK = threading.Lock()
+
+
+class TaskBusy(RuntimeError):
+    """已有长任务在执行：新写请求直接 409，不排队、不抢锁。"""
+
+
 TASKS_DIR = os.path.join(core.DATA, "tasks")
 CTX = {"tid": ""}
 
@@ -197,26 +204,39 @@ def sudo_worker(tid, action, params=None, timeout=300):
 
 
 def start_task(kind, steps, actor_name="admin", on_error=None):
-    """steps: [(label, fn)]；fn 返回字符串写入日志。全程持全局写锁。"""
+    """steps: [(label, fn)]；fn 返回字符串写入日志。全程持全局写锁。
+
+    锁必须在主线程里先拿到：旧实现让子线程去抢锁，两个同时到达的高危请求
+    都可能先通过中间件的 WRITE_LOCK.locked() 检查，然后一个拿锁、一个排队，
+    排队那个的 HTTP 已经返回 tid，用户会以为两个任务都启动了。
+    """
+    if not WRITE_LOCK.acquire(blocking=False):
+        raise TaskBusy("有任务正在执行（安装 / 升级 / 恢复），等它完成后再操作")
     tid = uuid.uuid4().hex
-    core.ensure_dirs()
-    core.task_create(tid, kind, actor_name)
+    try:
+        core.ensure_dirs()
+        core.task_create(tid, kind, actor_name)
+    except Exception:
+        WRITE_LOCK.release()
+        raise
 
     def runner():
         try:
-            with WRITE_LOCK:
-                CTX["tid"] = tid
-                core.audit_ctx_set(actor_name, "")
-                total = len(steps)
-                for i, (label, fn) in enumerate(steps):
-                    task_update(tid, msg=label, progress=int(i * 100 / total))
-                    tlog(tid, "▶ " + label)
-                    res = fn()
-                    if res:
-                        tlog(tid, "  " + str(res))
-                    task_update(tid, progress=int((i + 1) * 100 / total))
-                task_update(tid, status="done", progress=100, msg="完成", finished_at=core.now())
-                tlog(tid, "✔ 全部完成")
+            # 工作线程复用主线程留下的 ORM 连接不安全：用前关掉旧连接，
+            # 结束时再关一次，别把 SQLite 连接泄漏在 daemon 线程里。
+            close_old_connections()
+            CTX["tid"] = tid
+            core.audit_ctx_set(actor_name, "")
+            total = len(steps)
+            for i, (label, fn) in enumerate(steps):
+                task_update(tid, msg=label, progress=int(i * 100 / total))
+                tlog(tid, "▶ " + label)
+                res = fn()
+                if res:
+                    tlog(tid, "  " + str(res))
+                task_update(tid, progress=int((i + 1) * 100 / total))
+            task_update(tid, status="done", progress=100, msg="完成", finished_at=core.now())
+            tlog(tid, "✔ 全部完成")
         except Exception as e:
             tlog(tid, "✘ 失败: %s" % e)
             tlog(tid, traceback.format_exc()[-1500:])
@@ -226,6 +246,9 @@ def start_task(kind, steps, actor_name="admin", on_error=None):
                     on_error(tid)
                 except Exception as ee:
                     tlog(tid, "回滚也失败: %s" % ee)
+        finally:
+            close_old_connections()
+            WRITE_LOCK.release()
 
     threading.Thread(target=runner, daemon=True).start()
     return tid
@@ -268,6 +291,12 @@ def startup_maintenance():
         n = core.prune_tasks(days=7)
         if n:
             print("[启动维护] 清理了 %d 个过期任务日志" % n)
+        for fn in ("ops-audit.jsonl", "auth.jsonl", "deny.jsonl"):
+            if core.rotate_jsonl(os.path.join(core.STATE, fn)):
+                print("[启动维护] %s 超过 10MB，已转存为 %s.1" % (fn, fn))
+        n = core.prune_auth_logs(keep=5000)
+        if n:
+            print("[启动维护] 清理了 %d 条过期认证日志" % n)
     except Exception as e:
         print("[启动维护] 跳过: %s" % e)
     try:

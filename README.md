@@ -19,7 +19,7 @@
 | 后台登录 | **Django Auth + django-axes**（失败 5 次锁 10 分钟），原生 Django 后台在 `/admin/` |
 | 审计 | 独立 `audit` app（表 `audit_auditlog`，只追加、可导出、可清理）+ 特权侧 `data/state/ops-audit.jsonl`，同一日志页合并展示 |
 | 静态文件 | WhiteNoise 托管，`collectstatic` 后离线可用 |
-| 业务核心 | 原 `core.py` / `fullbackup.py` **零改动**，`worker.py` root 提权 + 安装码闸门全部保留 |
+| 业务核心 | `system/core.py` / `system/fullbackup.py` 特权侧实现 + `ovpn/services/core.py` 的 Django ORM 门面（同名 API、零裸 SQL），`worker.py` root 提权 + 安装码闸门全部保留 |
 | 前端 | `index.html` 单页应用**零改动**，所有 REST API 路径与响应结构保持兼容 |
 
 关键文件：
@@ -33,9 +33,11 @@ ovpn/               Flask→Django 桥接：views / urls / auth / middleware / b
   auth.py           管理登录改用 Django Auth + Axes，自助改密仍走 core
   middleware.py     白名单 / 登录 / CSRF（X-CSRF-Token）/ 安全头 / 错误 JSON 化
   bridge.py         core 加载 + 长任务线程 + sudo worker + 响应封装
-accounts/           Django Auth 用户模型（底座 core app 改名，避开业务 core.py）
-common/ jobs/       底座公共模块与任务中心
-selftest_django.py  selftest 的 Flask→Django 兼容层（424 项自检原样运行）
+core/               Django Auth 用户模型（底座 app 由 accounts 改名，db_table 仍是 core_user）
+common/ jobs/ audit/ 底座公共模块、任务中心、独立审计
+system/             特权层：core.py / fullbackup.py / worker.py / install.sh / setup.py
+templates/          单文件前端 index.html + 自助页
+tests/selftest_django.py  selftest 的 Flask→Django 兼容层（当前 461 项自检原样运行）
 ```
 
 运行时与离线依赖（跟随底座模板 v1.1.0）：
@@ -184,69 +186,39 @@ VPN 客户端连上后：
 源码、构建、测试分开，根目录只留分类目录和一份 README：
 
 ```
-openvpn-web/
-├── src/                      运行时代码（打包后会被平铺到安装目录根）
-│   ├── serve.py              systemd 入口（Django 初始化 + Waitress 启动）
-│   ├── manage.py             Django 管理入口（migrate / ovpn_init / ovpn_cli）
-│   ├── core.py               核心逻辑（DB / 配置渲染 / ACL / 证书 / Excel / 指纹 / 备份）
-├── fullbackup.py         备份与恢复（openvpn/ + web/ 两块，带 SHA-256 校验）
-│   ├── worker.py             特权执行器，sudo 白名单调用，动作白名单
-│   ├── setup.py              一键配置器（签 CA / 写配置 / 下发规则 / 起 openvpn / 建账号）
-│   ├── auth-verify.py        OpenVPN 认证脚本（fail-closed、失败锁定）
-│   ├── index.html            单文件前端，原生 HTML/CSS/JS，不依赖 CDN
-│   ├── install.sh            一键安装：落文件 + 权限 + sudoers + systemd + 备二进制 + 调 setup.py + 起 Web
-│   ├── prepare-openvpn.sh    确保 openvpn 二进制就位（包内 → 就地编译），装完不许半成品
-│   ├── install-code.sh       生成「装外部代码」用的一次性安装码（只能 root 执行，700）
-│   ├── reset-admin.sh        忘记管理凭据时用 root 一键重置账户名 + 密码并重启服务
-│   ├── selftest.py           全链路自检（MOCK 模式，424 项）
-│   ├── selftest_django.py    selftest 的 Flask→Django test client 兼容层
-│   ├── config/               Django settings / urls / wsgi（STANDALONE 模式）
-│   ├── ovpn/                 Flask 路由迁移层（views / urls / auth / middleware / bridge）
-│   ├── accounts/             Django Auth 用户模型（避开业务 core.py 同名）
-│   ├── common/ jobs/         底座公共模块与任务中心
-│   └── requirements*.txt     standalone 离线依赖清单
-├── bin/                      预编译静态二进制
-│   ├── openvpn               OpenVPN 2.6.23，第三方库全静态，只依赖 glibc（最低 GLIBC_2.17）
-│   └── openssl               静态 openssl 3.0.16 命令行（签证书用，最小化系统没有 openssl 也能装）
-├── runtime/                  离线 Python 3.12（glibc 2.17 基线，含 Django 全家桶 + openpyxl）
-├── vendor/                   三方件快照（离线构建用）
-│   ├── src/                  源码包（openssl / lzo / lz4 / libcap-ng / openvpn）
-│   ├── static/prefix.tar.gz  预编译静态库，目标机「上传源码自编译」靠它 14 秒出结果
-│   ├── wheels/               Django 全家桶 / openpyxl 及其依赖的 cp312 wheel
-│   ├── SHA256SUMS            逐包校验值
-│   └── fetch.sh              有网机器上跑一次补齐 vendor/
-├── build/                    构建与打包（不进安装包）
-│   ├── build-offline.sh      生成完整离线目录 → dist/（Linux 构建机，会真的装一遍依赖）
-│   ├── build-offline.py      同上，但纯搬运，Windows 上也能跑（依赖留给安装时补）
-│   ├── build-static-openvpn.sh  静态编译 openvpn（也随包发行，供目标机自编译）
-│   ├── Dockerfile.build      glibc 2.17 可复现构建环境
-│   └── fixtar.py             修包内可执行位（Windows 打包必然丢 exec 位）
-├── tests/                    前端测试
-│   ├── smoke.js              jsdom 逐页切换抓运行时错误
-│   ├── shots.js              无头 Edge 逐页截图（改版式时用肉眼核对）
-│   └── package.json          jsdom 依赖
+openvpn-web/                  2.6 起「源码 = 交付包 = 标准 Django 根布局」
+├── manage.py serve.py start.sh   Django 管理入口 / systemd 入口 / 解释器探测
+├── config/                   settings / urls / wsgi（STANDALONE 裸机模式）
+├── ovpn/                     views / urls / auth / middleware / bridge + services（ORM 门面）+ models
+├── core/ common/ jobs/ audit/  底座应用：Auth（core_user）、公共模块、任务中心、独立审计
+├── templates/ static/        单文件前端与静态资源
+├── system/                   特权层（root）：core.py / fullbackup.py / worker.py / setup.py /
+│                              auth-verify.py / install.sh / install-code.sh / build-static-openvpn.sh
+├── bin/                      预编译静态二进制（openvpn / openssl）
+├── runtime/                  离线 Python 3.12（源码开发用，交付包里叫 python/）
+├── vendor/                   src/ static/prefix.tar.gz wheels/ SHA256SUMS fetch.sh
+├── build/ scripts/           构建打包、契约检查等工具（不进交付包）
+├── tests/                    selftest.py（461 项）/ selftest_django.py / smoke.js / shots.js
 ├── dist/                     产物：openvpn-web-x86_64.tar.gz
-└── README.md
+└── README.md BUILD-FROM-SOURCE.md CONTRACT.md
 ```
 
-**为什么源码分层、包内平铺**：`install.sh` 里写死了 `$DEST/core.py` / `$DEST/worker.py` / `$DEST/serve.py`，`worker.py` 又按 `ROOT/build-static-openvpn.sh` 找编译脚本，所以安装目录必须平铺。分层只存在于仓库里，`build/build-offline.py`（Windows）与 `build/build-offline.sh`（Linux）负责把 `src/*` 拍平到包根。
+**为什么不再分层**：2.0 之前仓库里是 `src/` 分层、包内平铺；2.6 起把源码、交付包统一成同一个 Django 根布局，`build/build-offline.py`（Windows）与 `build/build-offline.sh`（Linux）只做文件搬运，不再拍平目录。`system/` 始终是 root 特权层，Web 进程不可写。
 
 ### 3.2 装机后（/opt/openvpn-web）
 
 ```
-/opt/openvpn-web/
-├── python/           离线解释器 + Django 全家桶 + openpyxl（glibc 2.17 即可）
-├── bin/openvpn       静态 OpenVPN（第三方库全静态）
-├── bin/openssl       静态 openssl 命令行
-├── serve.py          systemd 入口（Django + Waitress）
-├── manage.py         Django 管理入口
-├── core.py  fullbackup.py  worker.py  setup.py  auth-verify.py  index.html
-├── config/ ovpn/ accounts/ common/ jobs/   Django 项目与应用
-├── selftest.py selftest_django.py          全链路自检与兼容层
-├── install.sh        一键安装
-├── build-static-openvpn.sh  + vendor/static/   「上传源码自动编译」用
-├── README.md
-└── data/             SQLite / 证书 / ccd / ovpn / 日志 / backups / full-backups（统一备份包）/ snapshots（仅兼容旧包）
+/opt/openvpn-web/     与仓库根同构（唯一例外：runtime/ 在包内叫 python/）
+├── python/           随包便携解释器 + Django 全家桶（glibc 2.17 即可）
+├── bin/openvpn bin/openssl   静态二进制（第三方库全静态）
+├── serve.py manage.py        systemd 入口 / Django 管理入口
+├── config/ ovpn/ core/ common/ jobs/ audit/ templates/ staticfiles/
+├── system/           特权脚本：worker.py / setup.py / auth-verify.py / install.sh /
+│                     install-code.sh / build-static-openvpn.sh（root 所有，Web 不可写）
+├── selftest.py       包内自检（安装尾声自动跑，461 项）
+├── vendor/static/    目标机「上传源码自动编译」用的预编译静态库
+└── data/             唯一可写区：SQLite / 证书 / ccd / ovpn / 日志 / backups /
+                      full-backups（统一备份包）/ snapshots（仅兼容旧包）
 ```
 
 进程与权限：

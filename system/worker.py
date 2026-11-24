@@ -381,9 +381,13 @@ def action_build_openvpn(p):
     src = safe_path(p.get("staged", ""), base=os.path.join(DATA, "staging"))
     if not os.path.exists(src):
         raise RuntimeError("上传的源码包不存在")
-    script = os.path.join(ROOT, "build-static-openvpn.sh")
+    # 与 core.build_env() 同一套查找顺序：2.6 平铺布局把脚本放在 system/ 下，
+    # 老包才放在安装根。只查根目录会出现「页面显示编译环境可用、点编译却报缺脚本」。
+    script = os.path.join(ROOT, "system", "build-static-openvpn.sh")
     if not os.path.exists(script):
-        raise RuntimeError("缺少 build-static-openvpn.sh，无法编译")
+        script = os.path.join(ROOT, "build-static-openvpn.sh")
+    if not os.path.exists(script):
+        raise RuntimeError("缺少 system/build-static-openvpn.sh，无法编译")
     env = dict(os.environ)
     env.update({
         "STATIC_LIBS": "1",
@@ -442,7 +446,8 @@ def action_collect_deny(p):
     p = os.path.join(STATE, "deny.jsonl")
     seen = set()
     if os.path.exists(p):
-        for line in open(p, "r", encoding="utf-8", errors="replace"):
+        # 只拿尾部若干行做近期去重：全量读入会让这个定时任务随日志体积越来越慢
+        for line in core.read_tail_lines(p, 5000):
             try:
                 seen.add(json.loads(line).get("raw", ""))
             except Exception:
@@ -478,27 +483,39 @@ def action_restore_snapshot(p):
     log("已恢复备份 %s" % path)
 
 
-WEB_FILES = {"app.py", "core.py", "index.html", "auth-verify.py", "README.md", "version.txt",
-             "self.html"}  # self.html 已并入 app.py；留着是给旧版本包兜底，不是主路径
+# Web 救场更新包：2.6 起源码根就是 Django 项目根，按「相对路径 + 扩展名」白名单
+# 保留原目录结构写入安装根。system/（root 执行体）、bin/、data/、python/、vendor/
+# 以及 *.sh 一律不在名单里，避免借「更新 Web」把外部代码装成 root 服务。
+WEB_UPDATE_DIRS = ("ovpn/", "core/", "jobs/", "common/", "templates/", "static/", "config/")
+WEB_UPDATE_EXT = (".py", ".html", ".css", ".js", ".json", ".txt")
+
+
+def _web_update_target(name):
+    """返回允许写入安装根的相对路径；不在白名单返回空串，非法路径直接拒绝。"""
+    if not name or name.startswith("/") or "\\" in name or ".." in name.split("/"):
+        raise RuntimeError("更新包含非法路径: %s" % name)
+    if name.startswith(WEB_UPDATE_DIRS) and name.endswith(WEB_UPDATE_EXT):
+        return name
+    return ""
 
 
 def action_update_web(p):
     src = safe_path(p.get("staged", ""), base=os.path.join(DATA, "staging"))
     if not os.path.exists(src):
         raise RuntimeError("Web 更新包不存在")
-    code_dir = os.path.dirname(os.path.abspath(__file__))
     with zipfile.ZipFile(src) as z:
-        for name in z.namelist():
-            if name.startswith("/") or ".." in name.split("/"):
-                raise RuntimeError("更新包含非法路径: %s" % name)
-            base = os.path.basename(name)
-            # 白名单：不允许更新包替换 worker.py（root 执行体）或 python/ / data/ / bin/
-            if base not in WEB_FILES:
-                continue
-            z.extract(name, code_dir)
-            if "/" in name:
-                shutil.move(os.path.join(code_dir, name), os.path.join(code_dir, base))
-    log("Web 文件已更新，准备重启服务（页面会自动重连）")
+        targets = [(info.filename, info) for info in z.infolist()
+                   if not info.is_dir() and _web_update_target(info.filename)]
+        if not targets:
+            raise RuntimeError("更新包里没有可更新的 Django 项目文件（ovpn/ templates/ 等）")
+        for name, info in targets:
+            # 先全部校验再写入，避免写一半才发现后半个文件非法
+            out = os.path.join(ROOT, *name.split("/"))
+            os.makedirs(os.path.dirname(out), exist_ok=True)
+            with z.open(info) as f, open(out, "wb") as w:
+                shutil.copyfileobj(f, w)
+            os.chmod(out, 0o644)
+    log("Web 文件已更新（%d 个），准备重启服务（页面会自动重连）" % len(targets))
     os.remove(src)
     if not MOCK:
         # 留 2 秒让本次 HTTP 响应先发回浏览器，再重启服务

@@ -16,6 +16,7 @@ CSRF_HEADER_NAME = 'HTTP_X_CSRF_TOKEN' 与前端既有的头对齐，token 由 /
 cookie token 补一次校验。
 """
 import os
+import time
 import uuid
 import threading
 
@@ -31,6 +32,10 @@ core = bridge.core
 
 _BOOTSTRAP_DONE = False
 _BOOTSTRAP_LOCK = threading.Lock()
+# 账号到期扫描要查库、还可能触发踢人。60 秒一次足够，且必须带锁：
+# waitress 多线程下每个轮询请求都扫一遍既浪费，也会重复 kick-user。
+_EXPIRE_LAST = 0.0
+_EXPIRE_LOCK = threading.Lock()
 
 # 未登录也要能访问的路径（首页容器、登录、自助页、session、favicon）
 PUBLIC_PATHS = ("/", "/api/login", "/self", "/favicon.ico", "/health/")
@@ -43,6 +48,27 @@ CSRF_GET_PATHS = ("/api/logs", "/api/selfcheck")
 
 def _is_public(path):
     return path in PUBLIC_PATHS or path.startswith(PUBLIC_PREFIXES)
+
+
+def _is_readonly_poll(path):
+    """只读轮询：不续期会话、不触发到期扫描。"""
+    return (path == "/api/session" or path.startswith("/api/task/")
+            or path in ("/health/", "/favicon.ico"))
+
+
+def _expire_due_users():
+    global _EXPIRE_LAST
+    now = time.time()
+    if now - _EXPIRE_LAST < 60:
+        return []
+    with _EXPIRE_LOCK:
+        now = time.time()
+        if now - _EXPIRE_LAST < 60:
+            return []
+        try:
+            return core.expire_users()
+        finally:
+            _EXPIRE_LAST = time.time()
 
 
 class BootstrapMiddleware:
@@ -72,12 +98,19 @@ class OvpnGuardMiddleware:
     def process_exception(self, request, exception):
         """等价原 Flask 的 @app.errorhandler：ValueError -> JSON 400（不泄漏栈）"""
         from django.http import JsonResponse
+        if isinstance(exception, bridge.TaskBusy):
+            return JsonResponse({"ok": False, "msg": str(exception)}, status=409)
         if isinstance(exception, ValueError):
             return JsonResponse({"ok": False, "msg": str(exception)}, status=400)
         return None
 
     def __call__(self, request):
         path = request.path
+        # 监控探活与静态资源必须先于管理端 IP 白名单放行：探活通常来自宿主机、
+        # 负载均衡或监控网段，把它们塞进白名单既不合理也会让健康检查 403；
+        # /static/ 则由 WhiteNoise 直接托管，本身不接触任何业务数据。
+        if path == "/health/" or path.startswith("/static/"):
+            return self.get_response(request)
         # CSRF 全部交给 CsrfViewMiddleware：settings 里 CSRF_HEADER_NAME 已对齐
         # 前端的 X-CSRF-Token，token 由 /api/session 用 get_token() 下发。
         # 这里只额外覆盖「带副作用的 GET」（Django 不管 GET），见下方 CSRF_GET_PATHS。
@@ -92,13 +125,12 @@ class OvpnGuardMiddleware:
         if not core.client_allowed(ip) and not (is_self and core.vpn_client_allowed(ip)):
             return bridge.jerr(
                 "来源 IP %s 不在管理端白名单内；要放行请在服务器上执行 "
-                "python3 manage.py allow %s" % (ip, ip), 403,
+                "python3 manage.py ovpn_cli allow %s" % (ip, ip), 403,
                 allow=core.allow_list())
-        core.log_audit = core.log_audit  # noqa  (审计函数从上下文取 actor)
 
         # 到期的账号自动停用
         try:
-            expired = core.expire_users()
+            expired = _expire_due_users()
             if expired:
                 core.write_all_config()
                 for name in expired:
@@ -120,6 +152,13 @@ class OvpnGuardMiddleware:
         # 登录校验：Django Auth
         if not getattr(request, "user", None) or not request.user.is_authenticated:
             return bridge.jerr("未登录", 401, need_login=True)
+
+        # 真实操作滑动续期；纯轮询不写 django_session，避免 700ms 日志轮询
+        # 不停制造写锁竞争，也避免绕过前端的脚本靠轮询让会话永不过期。
+        sess = getattr(request, "session", None)
+        if sess is not None and not (request.method in ("GET", "HEAD")
+                                     and _is_readonly_poll(path)):
+            sess.modified = True
 
         # 首登强制改密
         if _must_change() and path not in MUST_CHANGE_ALLOW:
@@ -180,7 +219,12 @@ class SecurityHeadersMiddleware:
             "style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; "
             "connect-src 'self'; object-src 'none'; base-uri 'self'; "
             "form-action 'self'; frame-ancestors 'none'")
-        if request.is_secure or (request.META.get("HTTP_X_FORWARDED_PROTO") or "").lower() == "https":
+        # request.is_secure 是方法，必须调用；漏掉 () 会把 bound method 当真值，
+        # 每个纯 HTTP 响应都下发一年 HSTS，浏览器缓存后内网后台就再也打不开。
+        # SECURE_PROXY_SSL_HEADER 只在 TRUST_LOCAL_PROXY 时配置，Django 的
+        # is_secure() 已按它判断转发头；不要再手工信 X-Forwarded-Proto，
+        # 否则直连端口伪造该头就能骗出 HSTS。
+        if request.is_secure():
             resp.setdefault("Strict-Transport-Security", "max-age=31536000")
         ctype = resp.get("Content-Type", "")
         if "text/html" in ctype:

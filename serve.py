@@ -35,6 +35,13 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
 # 这是单机便携交付：强制裸机模式（SQLite + WhiteNoise + Waitress，零外部服务）。
 # 不读 .env 的 STANDALONE 开关——交付形态固定，避免误配成 Docker 模式连不上库。
 os.environ["STANDALONE"] = "True"
+# README 承诺「反代 HTTPS 时设 OVPN_WEB_HTTPS=1 下发 Secure Cookie」，但底座实际
+# 读的是下面三个开关——此前这个变量只是注释，设了也不生效。集中在此映射一次，
+# 保证 /api 的 cookie、CSRF origin 与 HSTS 判定口径一致。
+if os.environ.get("OVPN_WEB_HTTPS") == "1":
+    os.environ["STANDALONE_USE_HTTPS"] = "true"
+    os.environ["USE_HTTPS"] = "true"
+    os.environ["TRUST_LOCAL_PROXY"] = "true"
 os.environ.setdefault("USE_HTTPS", "false")
 # 生产默认关 DEBUG；只有源码调试时显式设 OVPN_WEB_DEBUG=1 才打开
 if os.environ.get("OVPN_WEB_DEBUG") == "1":
@@ -75,7 +82,21 @@ if not os.environ.get("HOSTS"):
             ip = info[4][0]
             if ip not in hosts and not ip.startswith("127."):
                 hosts.append(ip)
-        # udp connect 取默认出口 IP
+        # 直接枚举本机所有全局 IPv4：getaddrinfo(hostname) 在 Ubuntu 上常只返回
+        # 127.0.1.1，而 udp connect 在无默认路由的离线机房拿不到地址，多网卡时也
+        # 只能拿到一个出口。全部列入后，从任意管理口访问都不会触发 DisallowedHost。
+        import subprocess
+        try:
+            r = subprocess.run(["ip", "-4", "-o", "addr", "show", "scope", "global"],
+                               capture_output=True, text=True, timeout=5)
+            for line in r.stdout.splitlines():
+                parts = line.split()
+                ip = parts[3].split("/")[0] if len(parts) >= 4 else ""
+                if ip and not ip.startswith("127.") and ip not in hosts:
+                    hosts.append(ip)
+        except Exception:
+            pass
+        # udp connect 兜底：老系统没有 ip 命令时仍能取到默认出口 IP
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             s.connect(("8.8.8.8", 80))

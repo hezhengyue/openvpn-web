@@ -244,7 +244,7 @@ pre::-webkit-scrollbar-thumb{background:oklch(.45 .02 250);background-clip:conte
   <label class="f"><span>管理账户</span><input id="lu" style="width:100%" placeholder="请输入管理账户" autocomplete="username" onkeydown="if(event.key==='Enter')$('#lp').focus()"></label>
   <label class="f"><span>管理密码</span><input type="password" id="lp" style="width:100%" placeholder="请输入管理密码" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()"></label>
   <button class="btn pri" style="width:100%;height:36px" onclick="doLogin()">登录</button>
-  <p style="margin:16px 0 0">忘记管理凭据时，在服务器上用 root 执行 <span class="mono">bash /opt/openvpn-web/reset-admin.sh</span> 重新生成。</p>
+  <p style="margin:16px 0 0">忘记管理凭据时，在安装目录用 root 执行 <span class="mono">python3 manage.py ovpn_cli reset-admin</span> 重新生成。</p>
 </div></div>
 
 <div id="force"><div class="lbox">
@@ -562,7 +562,7 @@ async function pgWizard(){
     <div id="witems">${tbl(['检查项','结果','说明'],W.items.map(i=>[esc(i.name),i.ok?badge('通过','ok'):badge(i.fatal?'不通过':'注意',i.fatal?'err':'warn'),esc(i.detail)]),'点【重新检测】开始')}</div></div>
   <div class="card"><h3>第 2 步 · 放置 openvpn 静态二进制 <small>≥ 2.6.23，glibc 2.17 ABI</small></h3>
     <div class="hint">包内已自带 <span class="mono">bin/openvpn</span>；缺失时可在此上传，校验项与自动编译一致。
-     <br>替换二进制需填<b>一次性安装码</b>：在服务器执行 <span class="mono">sudo /opt/openvpn-web/install-code.sh</span> 获取（一码一次，15 分钟内有效）。</div>
+     <br>替换二进制需填<b>一次性安装码</b>：在服务器执行 <span class="mono">sudo ./system/install-code.sh</span> 获取（一码一次，15 分钟内有效）。</div>
     <div class="bar"><input id="wcode" placeholder="安装码（8 位）" maxlength="12" style="width:150px;letter-spacing:1px"><input type="file" id="wbin"><button class="btn pri" onclick="wUpload()">上传并校验</button><span id="wver" class="muted">${esc(W.ver)}</span></div></div>
   <div class="card"><h3>第 3 步 · 参数</h3>${cfgForm()}
    <label class="f" style="margin-top:8px"><span>网络模式</span><select id="w_nat">
@@ -606,7 +606,7 @@ function cfgForm(c){c=c||S.cfg||{};const v=(k,d)=>esc(c[k]==null?(d||''):c[k]);
   <label class="f"><span>VPN 网段</span><input id="c_vpn_cidr" value="${v('vpn_cidr','10.8.0.0/24')}"></label>
   <label class="f"><span>tun-mtu</span><input type="number" id="c_tun_mtu" value="${v('tun_mtu',1400)}"></label>
  </div>
- <div class="hint" style="margin:-6px 0 12px">tun-mtu 默认 <b>1400</b>，避免隧道封装后超过物理 MTU；极简客户端不写这个值，改它无需重发客户端。</div>
+ <div class="hint" style="margin:-6px 0 12px">tun-mtu 默认 <b>1400</b>；本系统采用极简配置，服务端与客户端都<b>不写入</b>该值（由 OpenVPN 两端自动协商），修改它不会影响实际隧道 MTU。仅作历史配置兼容保留。</div>
  <div style="margin:0 0 14px">
   <div class="sub">附加推送路由 <span style="opacity:.7">· 回车加入，可粘贴多行</span></div>
   ${tagHtml('extra_routes','例如 10.20.0.0/16')}
@@ -1113,14 +1113,14 @@ async function pgUpdate(){const v=await get('/api/version'),
   <div class="stat"><div class="n">${esc(v.version)}</div><div class="t">服务端版本</div></div>
   <div class="stat"><div class="n">${esc(v.web_version)}</div><div class="t">Web 版本</div></div></div>
  <div class="hint">HTTP 服务器：<b>${esc(v.server||'未知')}</b>　线程数 ${esc(String(v.threads||1))}
-  <span class="muted">　·　这里显示「Werkzeug 开发服务器」表示 waitress 没装上（服务已自动退回，功能不受影响），装好后重启即可。</span></div>
+  <span class="muted">　·　正常应为 waitress；若这里读不到版本或服务信息，先检查 openvpn-web 服务状态与端口。</span></div>
  <div class="card"><h3>升级 OpenVPN <small>上传官方源码包，本机编译</small></h3>
   <div class="bar">${be.ok?badge('编译环境可用','ok'):badge('本机暂不能编译','warn')}
    <span class="muted">${be.ok?'gcc / make / pkg-config 齐备，约 1~3 分钟':'缺 '+be.missing.join('、')}</span>
    <button class="btn sm" onclick="recheckBuildEnv()">重新检测</button></div>
   <div class="muted" style="font-size:12px;margin-bottom:6px">安装完成与服务启动时已自动检查${be.checked_at?'，最近一次：'+esc(be.checked_at):''}。补装工具后点【重新检测】即可刷新，无需重启。</div>
   ${be.ok?`<div class="bar"><input id="upcode" placeholder="安装码（8 位）" maxlength="12" style="width:150px;letter-spacing:1px">
-   <span class="muted" style="font-size:12px">安装码：服务器执行 <span class="mono">sudo /opt/openvpn-web/install-code.sh</span> 获取（一码一次）</span></div>
+   <span class="muted" style="font-size:12px">安装码：服务器执行 <span class="mono">sudo ./system/install-code.sh</span> 获取（一码一次）</span></div>
    <div class="bar"><input type="file" id="upsrc" accept=".gz,.tgz"></div>
    <div class="bar"><label style="font-size:12px"><input type="checkbox" id="upsrcmajor"> 允许跨大版本</label>
     <button class="btn pri" onclick="upSource()">编译并更新</button></div><div id="uptask2"></div>`
@@ -1156,8 +1156,8 @@ async function pgUpdate(){const v=await get('/api/version'),
   ${tbl(['时间','文件','操作'],ul.map(x=>[
    esc(x.ts),
    '<span class="mono">'+esc((x.path||'').split('/').pop())+'</span>',
-   `<button class="btn sm" onclick="download('/api/user-backups/download?path='+encodeURIComponent('${esc(x.path)}'))">下载</button>
-    <button class="btn sm" onclick="ubRestore('${esc(x.path)}')">恢复</button>`]),'还没有账号备份，账号变更时会自动生成','userbackups',10,'pgUpdate')}</div>`}
+   `<button class="btn sm" data-dl="${esc(x.path)}" onclick="download('/api/user-backups/download?path='+encodeURIComponent(this.dataset.dl))">下载</button>
+    <button class="btn sm" data-rb="${esc(x.path)}" onclick="ubRestore(this.dataset.rb)">恢复</button>`]),'还没有账号备份，账号变更时会自动生成','userbackups',10,'pgUpdate')}</div>`}
 
 async function recheckBuildEnv(){try{await get('/api/update/build-env?refresh=1');toast('已重新检测编译环境','ok');pgUpdate()}catch(e){}}
 async function upSource(){const f=$('#upsrc').files[0];if(!f){toast('请选择 openvpn 源码包','err');return}
@@ -1213,7 +1213,7 @@ async function fullPreview(){const f=$('#fbf').files[0];if(!f){toast('请选择�
    <div class="bar"><button class="btn danger" onclick="fullRestore()">确认恢复这份备份</button></div>`;
  }catch(e){}}
 async function fullRestore(){if(!FB.token){toast('请先上传并检查备份包','err');return}
- confirmAct('恢复备份','将用 <b>'+esc(FB.name)+'</b> 覆盖当前 OpenVPN 证书、配置、ccd、二进制与 Web 台账、白名单，并重建规则、重启服务。'
+ confirmAct('恢复备份','将用 <b>'+esc(FB.name)+'</b> 覆盖当前 OpenVPN 证书、配置、ccd 与 Web 台账、白名单，并重建规则、重启服务（<b>不动 openvpn 二进制</b>）。'
   +'<br>当前状态会先自动打一份保护备份。在线用户会被断开，需要重新拨入。',
   async()=>{const j=await post('/api/full-backup/restore',{token:FB.token});
    afterRestore(j)},'确认恢复')}
@@ -1234,7 +1234,8 @@ const ACTCN={
  'usergroup.add':'新增用户组','usergroup.update':'修改用户组','usergroup.delete':'删除用户组',
  'grant.add':'新增授权','grant.delete':'删除授权',
  'ca.reinit':'重签 CA 与 tls-crypt','password.change':'修改管理密码',
- 'admin.reset':'重置管理账户与密码','admin_user.change':'修改管理账户名',
+ 'admin.reset':'重置管理账户与密码','admin.rename':'重置管理账户名',
+ 'admin_user.change':'修改管理账户名','login.fail':'登录失败','user.expire':'账号到期停用',
  'backup.create':'生成备份','backup.restore':'恢复备份',
  'backup.full_create':'生成备份','backup.full_download':'下载备份',
  'backup.full_delete':'删除备份','backup.full_restore':'恢复备份',
@@ -1321,8 +1322,8 @@ async function pgSecurity(){
    <span class="muted">立即生效，不用重启</span></div>
   <div class="hint">只有名单内的来源能打开后台；VPN 拨号客户端只放行自助改密页（<span class="mono">/self</span>），不给后台。
    保存时如果名单里已经没有你当前的 IP，会被拒绝——防止把自己关在门外。<br>
-   真配错了：SSH 上去执行 <span class="mono">python3 app.py --allow 10.20.30.0/24</span>
-   （或 <span class="mono">--allow-reset</span> 恢复成本机网段）。</div></div>
+   真配错了：SSH 上去执行 <span class="mono">python3 manage.py ovpn_cli allow 10.20.30.0/24</span>
+   （或 <span class="mono">ovpn_cli allow-reset</span> 恢复成本机网段）。</div></div>
  <div class="card"><h3>安全边界 <small>这套系统已经替你做掉的加固</small></h3><ul class="muted" style="line-height:1.9;padding-left:18px;margin:0">
    <li>纯 HTTP 内网页：按来源白名单放行 + 管理密码，PBKDF2 口令、签名 Cookie、CSRF、失败 5 次锁 10 分钟</li>
    <li>Web 以低权限用户运行，特权动作经 sudoers 白名单交给 worker</li>

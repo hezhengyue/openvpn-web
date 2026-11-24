@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-manage.py ovpn_cli —— 命令行救场工具（对应旧 app.py 的 --allow / --reset-admin / --restore-full）
+manage.py ovpn_cli —— 命令行救场工具（替代旧 app.py 的 --allow / --reset-admin / --restore-full）
 
 白名单配错把自己关在门外、忘记管理凭据、全备份回滚，都 SSH 上来跑本命令。
 """
 import os
 import re
 import sys
+import uuid
 
 from django.core.management.base import BaseCommand, CommandError
 from django.contrib.auth import get_user_model
@@ -41,16 +42,43 @@ class Command(BaseCommand):
             return
 
         if op == "reset-admin":
-            r = core.admin_reset_credentials()
-            # 同步到 Django User
+            r = core.admin_reset_credentials()   # 生成凭据、写 meta、清 must_change
             User = get_user_model()
-            u, _ = User.objects.get_or_create(username=r["username"],
-                                              defaults={"is_staff": True, "is_superuser": True})
+            # 必须「原地改名」而不是另建一个随机名超管：
+            #   1) 新建会让旧超管和旧密码继续有效，凭据泄露时等于没重置；
+            #   2) bootstrap.sync_admin_username() 取 id 最小的超管，重启后会把
+            #      meta.admin_user 同步回旧名字，界面又显示旧账户。
+            # 口径与 bootstrap 保持一致：主超管 = id 最小的那个。
+            supers = list(User.objects.filter(is_superuser=True).order_by("id"))
+            if supers:
+                u = supers[0]
+                # 新名字被别的账号占着（例如上一次重置的残留）：先改名停用，
+                # 否则 Django 的 username UNIQUE 会让本次重置直接失败。
+                clash = User.objects.filter(username=r["username"]).exclude(pk=u.pk).first()
+                if clash:
+                    clash.username = "disabled-" + uuid.uuid4().hex[:16]
+                    clash.is_active = False
+                    clash.is_staff = False
+                    clash.is_superuser = False
+                    clash.set_unusable_password()
+                    clash.save()
+            else:
+                u = User(username=r["username"])
+            u.username = r["username"]
+            u.is_active = True
             u.is_staff = True
             u.is_superuser = True
             u.set_password(r["password"])
             u.save()
-            core.set_meta("admin_must_change", 1)
+            # 其它超管一律停用并降权，避免留下第二条能用旧密码进后台的路。
+            for other in supers[1:]:
+                other.is_active = False
+                other.is_staff = False
+                other.is_superuser = False
+                other.set_unusable_password()
+                other.save()
+            # must_change 由 core.admin_reset_credentials() 清成 0：一次性随机
+            # 凭据无需再走首登强改，不能在这里又设回 1。
             self.stdout.write("管理账户: %s" % r["username"])
             self.stdout.write("管理密码: %s" % r["password"])
             self.stdout.write("请重启服务后使用新凭据登录: systemctl restart openvpn-web")

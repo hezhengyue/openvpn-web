@@ -164,6 +164,15 @@ def recent_auth(limit=8):
     return list(AuthLog.objects.order_by('-id')[:int(limit)].values())
 
 
+def prune_auth_logs(keep=5000):
+    """认证日志按条数封顶：审计表有 audit_purge，这张表以前只增不减。"""
+    keep = max(100, int(keep))
+    old_ids = list(AuthLog.objects.order_by('-id').values_list('id', flat=True)[keep:])
+    for i in range(0, len(old_ids), 500):
+        AuthLog.objects.filter(id__in=old_ids[i:i + 500]).delete()
+    return len(old_ids)
+
+
 AUDIT_JSONL = "ops-audit.jsonl"
 
 
@@ -367,17 +376,22 @@ def update_user(username, *, new_username=None, vpn_ip=None, enabled=None, note=
             VpnUser.objects.filter(username=username).update(username=renamed, updated_at=now())
             UserGroupMember.objects.filter(username=username).update(username=renamed)
             AclGrant.objects.filter(subject_type='user', subject=username).update(subject=renamed)
-            for pg in PeerGrant.objects.filter(src_username=username):
+            for pg in list(PeerGrant.objects.filter(src_username=username)):
                 clash = PeerGrant.objects.filter(
                     src_username=renamed, dst_username=pg.dst_username,
                     proto=pg.proto, ports=pg.ports).exists()
-                if not clash:
+                if clash:
+                    # 目标行已经表达了同一条互访关系；留着旧名那行就是孤儿授权
+                    PeerGrant.objects.filter(pk=pg.pk).delete()
+                else:
                     PeerGrant.objects.filter(pk=pg.pk).update(src_username=renamed)
-            for pg in PeerGrant.objects.filter(dst_username=username):
+            for pg in list(PeerGrant.objects.filter(dst_username=username)):
                 clash = PeerGrant.objects.filter(
                     src_username=pg.src_username, dst_username=renamed,
                     proto=pg.proto, ports=pg.ports).exists()
-                if not clash:
+                if clash:
+                    PeerGrant.objects.filter(pk=pg.pk).delete()
+                else:
                     PeerGrant.objects.filter(pk=pg.pk).update(dst_username=renamed)
             changes.append("账号 %s -> %s" % (username, renamed))
             old_name, username = username, renamed
@@ -423,6 +437,10 @@ def delete_user(username, actor="web"):
         existed = VpnUser.objects.filter(username=username).exists()
         AclGrant.objects.filter(subject_type='user', subject=username).delete()
         UserGroupMember.objects.filter(username=username).delete()
+        # 互访规则两端都是用户名：不清掉的话，以后新建同名账号会自动「继承」
+        # 前一个人的 P2P 权限。
+        PeerGrant.objects.filter(src_username=username).delete()
+        PeerGrant.objects.filter(dst_username=username).delete()
         VpnUser.objects.filter(username=username).delete()
     log_audit(actor, "user.delete", username)
     if not existed:
@@ -616,6 +634,8 @@ def _apply_import(token, actor="web", reset_empty=False, action="import.apply"):
         for n in gone:
             AclGrant.objects.filter(subject_type='user', subject=n).delete()
             UserGroupMember.objects.filter(username=n).delete()
+            PeerGrant.objects.filter(src_username=n).delete()
+            PeerGrant.objects.filter(dst_username=n).delete()
         if keep:
             VpnUser.objects.exclude(username__in=list(keep)).delete()
         else:
@@ -840,7 +860,13 @@ def update_user_group(gid, name=None, note=None, members=None, actor="web"):
             _check_group_name(name.strip(), "用户组")
             if UserGroup.objects.filter(name=name.strip()).exclude(pk=gid).exists():
                 raise ValueError("用户组名称已存在")
-            g.name = name.strip()
+            old_name = g.name
+            new_name = name.strip()
+            # AclGrant 按组名引用主体，改名必须同步搬迁，否则该组所有授权静默失效。
+            # 新名若已有孤儿授权（历史残留），先清掉再搬，避免重复授权。
+            AclGrant.objects.filter(subject_type='group', subject=new_name).delete()
+            AclGrant.objects.filter(subject_type='group', subject=old_name).update(subject=new_name)
+            g.name = new_name
         if note is not None:
             g.note = note
         g.save()

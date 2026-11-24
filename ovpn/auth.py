@@ -61,7 +61,8 @@ def api_login(request):
         core.log_audit("", "login.fail", "账户或密码错误 (%s)" % username, ip=ip)
         return jerr("账户或密码错误", 401)
     auth_login(request, user)
-    request.session.permanent = True
+    # 会话有效期由 settings.SESSION_COOKIE_AGE 控制；permanent 是 Flask 写法，
+    # 在 Django 的 SessionBase 上赋值不会有任何效果。
     # 登录成功后轮换 token（防 session fixation），与 Django 官方推荐一致
     rotate_token(request)
     core.set_meta("admin_user", user.username)

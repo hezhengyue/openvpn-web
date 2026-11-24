@@ -228,6 +228,12 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 if STANDALONE:
     DATA_DIR = _runtime_dir('DATA_DIR', 'data')
     _ensure_dir(DATA_DIR, 'DATA_DIR')
+    # 特权脚本（system/worker.py、auth-verify.py）不读 .env，只认进程环境变量；
+    # 把最终生效值回写，保证它们和 ORM 指向同一个数据目录/数据库。
+    # 进程环境已有值时保持原样（优先级仍然最高）。
+    os.environ.setdefault('DATA_DIR', str(DATA_DIR))
+    if RUNTIME_DIR:
+        os.environ.setdefault('RUNTIME_DIR', str(RUNTIME_DIR))
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
@@ -312,11 +318,12 @@ CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_TIME_LIMIT = 300
 # 会话时长：默认 1 小时，与前端「无操作 1 小时自动退出」保持一致。
-# SESSION_SAVE_EVERY_REQUEST 让每次请求滑动续期（真正实现「无操作超时」而非「登录后固定 1 小时」）：
-# 前端 60 秒 /api/session 轮询不算用户操作，但会刷新后端 session，所以真正的空闲判定在前端，
-# 后端这个时长是兜底（防止前端被绕过时会话永不过期）。
+# 不全局开 SESSION_SAVE_EVERY_REQUEST：前端 60 秒 /api/session、长任务 700ms
+# /api/task/<tid>/log 都是只读轮询，全局续期会把每个轮询变成一次 SQLite 写，
+# 还会让绕过前端的客户端会话永不过期。改为由 ovpn.middleware 对「真实请求」
+# 显式置 session.modified=True 实现滑动续期，轮询与静态资源不碰 session 表。
 SESSION_COOKIE_AGE = env.int('SESSION_COOKIE_AGE', default=3600)
-SESSION_SAVE_EVERY_REQUEST = True
+SESSION_SAVE_EVERY_REQUEST = False
 
 
 # ===================== 🔐 密码校验 & Axes 防爆破 =====================

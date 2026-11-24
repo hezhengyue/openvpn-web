@@ -10,24 +10,17 @@ URL、请求字段、响应结构保持与前端 index.html 完全一致。
 import os
 import io
 import re
-import sys
-import json
 import uuid
-import time
-import threading
-import traceback
 
 from django.conf import settings
-from django.http import HttpResponse, FileResponse
+from django.http import HttpResponse
 from django.shortcuts import render
-from django.views.decorators.csrf import csrf_exempt
-from django.contrib.auth import get_user_model
 
 from . import bridge
-from .bridge import (core, fullbackup, ok, jerr, err, jbody, client_ip, actor,
-                     admin_user, file_response, text_response, WRITE_LOCK,
-                     CTX, TASKS_DIR, tlog, task_update, sudo_worker, start_task,
-                     after_change, install_code, pubip_get, MOCK, ROOT)
+from .bridge import (core, fullbackup, ok, jbody, client_ip, actor,
+                     admin_user, file_response,
+                     CTX, TASKS_DIR, tlog, sudo_worker, start_task,
+                     after_change, install_code, pubip_get, MOCK)
 
 
 # =========================================================== 概览 / 状态
@@ -88,7 +81,9 @@ def api_task(request, tid):
 
 
 def api_task_log(request, tid):
-    offset = int(request.GET.get("offset", "0"))
+    if not re.fullmatch(r"[0-9a-f]{32}", tid or ""):
+        raise ValueError("任务 ID 非法")
+    offset = max(0, int(request.GET.get("offset", "0") or 0))
     p = os.path.join(TASKS_DIR, tid + ".log")
     if not os.path.exists(p):
         return ok({"text": "", "offset": 0})
@@ -760,7 +755,12 @@ def backups_restore(request):
 
 
 def user_backups_list(request):
-    return ok({"items": core.list_backups(kind="users", limit=100)})
+    items = core.list_backups(kind="users", limit=100)
+    # 只向浏览器暴露文件名，不把服务器绝对路径透出去
+    for item in items:
+        if item.get("path"):
+            item["path"] = os.path.basename(item["path"])
+    return ok({"items": items})
 
 
 def user_backup_download(request):
@@ -800,9 +800,8 @@ def full_backup_download(request, name):
     if os.path.basename(name) != name or not name.endswith(".tar.gz") or not os.path.isfile(path):
         raise ValueError("备份包不存在")
     core.log_audit("admin", "backup.full_download", name)
-    with open(path, "rb") as f:
-        data = f.read()
-    return file_response(io.BytesIO(data), "application/gzip", name)
+    # 备份包可能上百 MB：交给 FileResponse 流式发送，别整包读进内存
+    return file_response(path, "application/gzip", name)
 
 
 def full_backup_upload(request):
@@ -857,7 +856,8 @@ def api_logs(request):
             sudo_worker(tid, "collect-deny")
         except Exception:
             pass
-    return ok({"rows": core.get_logs(kind, int(request.GET.get("limit", "200")))})
+    limit = max(1, min(int(request.GET.get("limit", "200") or 200), 2000))
+    return ok({"rows": core.get_logs(kind, limit)})
 
 
 def api_selfcheck(request):

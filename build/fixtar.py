@@ -4,7 +4,9 @@
 规则：
   openvpn-web-*/bin/*             -> 755   （openvpn / openssl 等静态二进制）
   openvpn-web-*/python/bin/*      -> 755   （python3.12 解释器；软链本身保持 777）
-  openvpn-web-*/ 顶层的 *.sh/*.py -> 755   （install.sh / setup.py / worker.py / serve.py ...）
+  openvpn-web-*/ 顶层的 *.sh/*.py -> 755   （install.sh / serve.py ...）
+  openvpn-web-*/system/*.sh|*.py  -> 755   （worker.py / setup.py / auth-verify.py ...）
+  system/install-code.sh          -> 700   （能造安装码，只给 root）
   其余保持不变。
 """
 import os
@@ -27,6 +29,11 @@ def fix_mode(name):
         return None
     if rel.startswith("bin/") or rel.startswith("python/bin/"):
         return 0o755
+    if rel == "system/install-code.sh":     # 造安装码的脚本必须只给 root
+        return 0o700
+    if rel.startswith("system/") and "/" not in rel[len("system/"):]:
+        if rel.endswith((".sh", ".py")):
+            return 0o755
     if "/" not in rel.rstrip("/"):          # 顶层文件
         if rel.endswith((".sh", ".py")):
             return 0o755

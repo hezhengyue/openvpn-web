@@ -27,9 +27,24 @@ import ipaddress
 import subprocess
 import base64
 import threading
+# 注意：不要把 datetime.timezone 放在模块全局——ovpn/services/core.py 会继承
+# 本模块的全部 globals，同名的 django.utils.timezone 会被覆盖掉。
 from datetime import datetime, timedelta
 
+# 与 Django settings 的运行时目录策略保持一致：DATA_DIR 优先，其次
+# RUNTIME_DIR/data，最后才回落到安装根/data。否则运维设了 DATA_DIR 后，
+# ORM 和这些特权脚本会各写一个库，页面上的账号和认证脚本看到的不是同一份数据。
 ROOT = os.environ.get("OVPN_WEB_ROOT", "/opt/openvpn-web")
+
+
+def _resolve_data_dir():
+    explicit = (os.environ.get("DATA_DIR") or "").strip()
+    if explicit:
+        return os.path.abspath(explicit)
+    runtime = (os.environ.get("RUNTIME_DIR") or "").strip()
+    if runtime:
+        return os.path.join(os.path.abspath(runtime), "data")
+    return os.path.join(ROOT, "data")
 # 系统级写操作的进程内互斥：Web 现在是多线程（waitress），两个管理员同时点保存 /
 # 两个账号同时改地址，都会并发走「写配置 + 重建 ccd + 重放下发规则」。
 # 这些动作单独看都是幂等的，交叉执行却不安全：iptables 那条流水线是「先 FLUSH 再逐条 ADD」，
@@ -37,7 +52,7 @@ ROOT = os.environ.get("OVPN_WEB_ROOT", "/opt/openvpn-web")
 # 直到 5 分钟后的定时重放才恢复。锁住就只剩单线程时的行为。
 SYS_LOCK = threading.RLock()      # 可重入：write_all_config 内部还会调 rebuild_ccd
 
-DATA = os.path.join(ROOT, "data")
+DATA = _resolve_data_dir()
 # 与 Django 同用一个物理库：Web 走 ORM，特权脚本（worker/auth-verify/setup）走 sqlite，
 # 两边看到的是同一份台账。文件名沿用 django-web-base 的 db.sqlite3。
 DB_PATH = os.path.join(DATA, "db.sqlite3")
@@ -57,7 +72,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "2.6.5"
+WEB_VERSION = "2.6.6"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -1011,6 +1026,26 @@ def rotate_openvpn_log(max_bytes=20 << 20):
         return False
 
 
+def rotate_jsonl(path, max_bytes=10 << 20):
+    """JSONL 日志超限时转存为 .1 并重建空文件；只保留一份旧文件。
+
+    ops-audit / auth / deny 都是 append-only，长期运行只增不减；deny.jsonl
+    还会被 collect-deny 全量读入做去重，不封顶会越跑越慢。
+    """
+    try:
+        if not os.path.isfile(path) or os.path.getsize(path) < max_bytes:
+            return False
+        old = path + ".1"
+        if os.path.exists(old):
+            os.remove(old)
+        os.replace(path, old)
+        with open(path, "a", encoding="utf-8"):
+            pass
+        return True
+    except OSError:
+        return False
+
+
 # --------------------------------------------------------------------------- 用户台账
 
 def validate_expires_at(value):
@@ -1159,6 +1194,9 @@ def _rename_user(con, old, new):
                 (new, old))
     con.execute("UPDATE OR IGNORE peer_grants SET dst_username=? WHERE dst_username=?",
                 (new, old))
+    # OR IGNORE 遇到「新名下已有同一条规则」会跳过搬运，旧名那行就成了孤儿授权；
+    # 改名后旧名不应再被任何规则引用，统一清掉。
+    con.execute("DELETE FROM peer_grants WHERE src_username=? OR dst_username=?", (old, old))
 
 
 def update_user(username, *, new_username=None, vpn_ip=None, enabled=None, note=None,
@@ -1223,6 +1261,9 @@ def delete_user(username, actor="web"):
     con = db()
     con.execute("DELETE FROM acl_grants WHERE subject_type='user' AND subject=?", (username,))
     con.execute("DELETE FROM user_group_members WHERE username=?", (username,))
+    # 互访规则两端都是用户名，不清掉的话新建同名账号会继承前一个人的 P2P 权限
+    con.execute("DELETE FROM peer_grants WHERE src_username=? OR dst_username=?",
+                (username, username))
     r = con.execute("DELETE FROM users WHERE username=?", (username,))
     con.commit()
     con.close()
@@ -1294,7 +1335,10 @@ def prune_user_backups(keep=None):
 
 def user_backup_path(path):
     """校验并返回台账备份的真实路径（必须落在 BACKUPS 目录、且是 users-*.xlsx/csv/tsv）"""
-    p = os.path.realpath(str(path or "").strip())
+    raw = str(path or "").strip()
+    # 接口只向浏览器返回文件名；相对路径一律相对 BACKUPS 解析，
+    # 仍由下面的 realpath + 前缀校验挡住路径穿越。
+    p = os.path.realpath(raw if os.path.isabs(raw) else os.path.join(BACKUPS, raw))
     base = os.path.realpath(BACKUPS)
     if not p.startswith(base + os.sep):
         raise ValueError("备份路径非法")
@@ -1536,11 +1580,19 @@ def _apply_import(token, actor="web", reset_empty=False, action="import.apply"):
         for n in gone:
             con.execute("DELETE FROM acl_grants WHERE subject_type='user' AND subject=?", (n,))
             con.execute("DELETE FROM user_group_members WHERE username=?", (n,))
+            con.execute("DELETE FROM peer_grants WHERE src_username=? OR dst_username=?", (n, n))
         if keep:
             q = ",".join("?" * len(keep))
             con.execute("DELETE FROM users WHERE username NOT IN (%s)" % q, list(keep))
         else:
             con.execute("DELETE FROM users")
+        # 两阶段交接 IP：先把保留账号的 vpn_ip 挪到唯一占位值，再写最终值。
+        # 否则「新账号接手某个旧账号即将让出的 IP」会在逐行 UPDATE 时撞 UNIQUE。
+        # 占位值不是合法 IPv4，绝不与最终值冲突；同一事务内最终会被覆盖。
+        for i, rowid in enumerate([x[0] for x in
+                                   con.execute("SELECT rowid FROM users").fetchall()]):
+            con.execute("UPDATE users SET vpn_ip=? WHERE rowid=?",
+                        ("__import_pending_%d__" % i, rowid))
         for r in rows:
             old = con.execute("SELECT * FROM users WHERE username=?", (r["username"],)).fetchone()
             exp = r.get("expires_at") or ""
@@ -1907,6 +1959,11 @@ def update_user_group(gid, name=None, note=None, members=None, actor="web"):
             if con.execute("SELECT 1 FROM user_groups WHERE name=? AND id<>?",
                            (name.strip(), gid)).fetchone():
                 raise ValueError("用户组名称已存在")
+            # 授权主体存的是组名，改名必须同步搬迁，否则整个组的授权静默失效
+            con.execute("DELETE FROM acl_grants WHERE subject_type='group' AND subject=?",
+                        (name.strip(),))
+            con.execute("UPDATE acl_grants SET subject=? WHERE subject_type='group' AND subject=?",
+                        (name.strip(), row["name"]))
             con.execute("UPDATE user_groups SET name=? WHERE id=?", (name.strip(), gid))
         if note is not None:
             con.execute("UPDATE user_groups SET note=? WHERE id=?", (note, gid))
@@ -2197,7 +2254,10 @@ def pki_info():
         days = None
         try:
             exp = datetime.strptime(f.get("notAfter", ""), "%b %d %H:%M:%S %Y %Z")
-            days = (exp - datetime.utcnow()).days
+            # utcnow() 在 Python 3.12 起废弃；notAfter 解析出来是 naive，
+            # 这里去掉 tzinfo 保持两边同类可比。局部导入避免污染被继承的命名空间。
+            from datetime import timezone as _dt_timezone
+            days = (exp - datetime.now(_dt_timezone.utc).replace(tzinfo=None)).days
         except Exception:
             pass
         out.append({
@@ -2551,7 +2611,9 @@ def render_rules(c):
         L += [
             '# 默认 NAT 模式：开箱可用，不需要机房网关配回程路由；但内网日志源 IP = VPN 服务器',
             '# 固定内网 IP 时优先 SNAT（源地址稳定），探测不到再退回 MASQUERADE',
-            'GW=$(ip -4 -o addr show scope global 2>/dev/null | awk \'{split($4,a,"/"); print a[1]; exit}\' || true)',
+            '# 按路由表取实际出接口的 src：直接取第一张 global 网卡会选中 docker0',
+            '# 或 tun0 的地址，SNAT 到那个 IP 后内网回包根本回不来',
+            "GW=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '/src/{for(i=1;i<=NF;i++) if($i==\"src\") print $(i+1); exit}' || true)",
             'if [ -n "$GW" ]; then',
             '  $IPT -t nat -A OVPNWEB_NAT -m comment --comment OVPNWEB_NAT -j SNAT --to-source "$GW"',
             "else",
