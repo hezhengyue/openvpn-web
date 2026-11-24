@@ -57,7 +57,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "2.4.1"
+WEB_VERSION = "2.4.2"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -2439,11 +2439,20 @@ def render_ovpn(c):
         # 否则 Windows 发出的 1460 字节段进隧道后仍会超 MTU。
         L.append("mssfix %s" % int(c["mssfix"]))
     # NCP 只协商 AEAD（GCM/CHACHA20）。若主 cipher 是非 AEAD（如对齐 iKuai
-    # 用的 AES-256-CFB），必须显式写老式 cipher 指令，否则客户端不会用它、
-    # 两端协商不一致。AEAD 场景保持不写，继续走 NCP。
+    # 用的 AES-256-CFB），客户端必须同时写两项：
+    #   data-ciphers           —— 加入 2.6 的 NCP 协商列表，否则客户端只上报
+    #                              默认 AEAD 列表，服务端只收 CFB 时直接
+    #                              AUTH_FAILED "no shared cipher"（GUI 会误报
+    #                              「错误的凭据」并反复弹密码框，密码其实是对的）；
+    #   cipher / fallback     —— 兼容 2.4 老客户端及 NCP 不可用时的回退。
+    # AEAD 场景保持不写，继续走默认的 NCP。
     _first_cipher = (c.get("data_ciphers") or "").split(":")[0].strip()
     if _first_cipher and not any(x in _first_cipher.upper() for x in ("GCM", "CHACHA", "AEAD")):
-        L.append("cipher %s" % _first_cipher)
+        L += [
+            "data-ciphers %s" % (c.get("data_ciphers") or "").strip(),
+            "data-ciphers-fallback %s" % _first_cipher,
+            "cipher %s" % _first_cipher,
+        ]
     L += [
         "verb 3",
         "auth-user-pass",
@@ -2487,6 +2496,9 @@ def config_fingerprint(c):
         # disable-dco 从 2.4.1 起写进 ovpn；老客户端没有它会在 RDP 大流量下冲垮隧道，
         # 纳入指纹确保全员重发（用常量钉死，后续不再因升级本身反复变化）。
         "dco_policy": "disabled",
+        # 2.4.2 起非 AEAD 客户端配置显式写 data-ciphers/fallback；老 ovpn 会因
+        # 「no shared cipher」连不上（GUI 误报密码错），必须纳入指纹强制重发。
+        "client_cipher_policy": "explicit",
         "compress": c.get("compress", "off"),
         "ca": hashlib.sha256(pki["ca"].encode()).hexdigest(),
         "ta": hashlib.sha256(pki["ta"].encode()).hexdigest(),

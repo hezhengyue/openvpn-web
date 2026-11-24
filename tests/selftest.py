@@ -181,6 +181,14 @@ def main():
     _cfb_ovpn = core.render_ovpn(_cfb)
     check("非 AEAD 时 server.conf 写 cipher AES-256-CFB", "\ncipher AES-256-CFB\n" in _cfb_conf)
     check("非 AEAD 时 ovpn 写 cipher AES-256-CFB", "\ncipher AES-256-CFB\n" in _cfb_ovpn)
+    # OpenVPN 2.6 忽略旧式 --cipher 做 NCP 协商：若客户端不把 CFB 加进
+    # data-ciphers，服务端（只收 CFB）会回 AUTH_FAILED/no shared cipher，
+    # GUI 误弹「错误的凭据」。两端 NCP 列表必须有交集，fallback 也要同步。
+    check("非 AEAD 时 ovpn 显式写 data-ciphers（2.6 NCP）", "\ndata-ciphers AES-256-CFB\n" in _cfb_ovpn)
+    check("非 AEAD 时 ovpn 的 fallback 与主 cipher 一致",
+          "\ndata-ciphers-fallback AES-256-CFB\n" in _cfb_ovpn)
+    check("AEAD 默认场景不往 ovpn 写 data-ciphers/cipher",
+          "data-ciphers " not in ovpn and "\ncipher " not in ovpn)
     check("非 AEAD 时两端开启 LZO", "comp-lzo yes" in _cfb_conf and "comp-lzo yes" in _cfb_ovpn)
     check("非 AEAD 场景不写 tls-crypt", "tls-crypt " not in _cfb_conf and "<tls-crypt>" not in _cfb_ovpn)
     # VPN 网段必须自动出现在推送路由里，且只出现一次（不能走两处各写一遍）
