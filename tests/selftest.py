@@ -1399,7 +1399,7 @@ def main():
         _ok_tls = dict(_scfg)
         _ok_tls["tls_min"] = _v
         check("validate_cfg 接受合法 tls_min %s" % _v, not core.validate_cfg(_ok_tls))
-    for _bad in (-1, 1700, 1400, "1360\nup /bin/sh", "abc"):
+    for _bad in (-1, 1700, 1500, "1360\nup /bin/sh", "abc"):
         check("validate_cfg 拒绝非法 mssfix %r" % _bad,
               any("mssfix" in e for e in core.validate_cfg(dict(_scfg, mssfix=_bad))),
               core.validate_cfg(dict(_scfg, mssfix=_bad)))
