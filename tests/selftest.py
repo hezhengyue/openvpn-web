@@ -122,6 +122,19 @@ def main():
     check("默认 tun-mtu 1400", core.cfg()["tun_mtu"] == 1400)
     check("默认 mssfix 1360（大包超时修复）", core.cfg()["mssfix"] == 1360)
     check("默认不再有内网网段概念", core.cfg()["lan_nets"] == [])
+    # 全新安装回归：setup.py 先用 SCHEMA 裸建表，再 migrate --fake-initial。
+    # SCHEMA 里每条 CREATE INDEX 引用的表都必须存在（否则 init_db 抛 no such table、
+    # meta 初始化中断）；且必须含 audit 占位表与 ovpn.0001 建表集合对齐
+    # （否则 fake-initial 判定表不齐、真建表撞 asset_groups 已存在）。
+    import re as _re_sch
+    _schema = core.SCHEMA
+    _idx_tables = _re_sch.findall(r"CREATE\s+INDEX[\s\S]*?\sON\s+(\w+)\s*\(", _schema)
+    _schema_tables = set(_re_sch.findall(r"CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+(\w+)", _schema))
+    check("SCHEMA 每条索引引用的表都存在",
+          all(t in _schema_tables for t in _idx_tables),
+          "索引表=%s 建表=%s" % (_idx_tables, sorted(_schema_tables)))
+    check("SCHEMA 含 audit 占位表（对齐 ovpn.0001，保证 fake-initial 成功）",
+          "audit" in _schema_tables, sorted(_schema_tables))
     core.gen_pki()
     ca = open(os.path.join(core.DATA, "ca.crt")).read()
     ta = open(os.path.join(core.DATA, "ta.key")).read()

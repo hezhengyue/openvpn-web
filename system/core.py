@@ -201,6 +201,15 @@ CREATE TABLE IF NOT EXISTS backups (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, kind TEXT, path TEXT, note TEXT);
 CREATE TABLE IF NOT EXISTS preview_tokens (
   token TEXT PRIMARY KEY, payload TEXT, created_at REAL);
+-- audit 占位表：审计已在 2.3.0 迁到独立 audit app（audit_auditlog），本表不再写入。
+-- 但 ovpn.0001 迁移仍声明建它（0003 再删除），而全新安装先由本 SCHEMA 裸建表、
+-- 再跑 migrate --fake-initial：django 要求 initial 迁移涉及的表「全有或全无」才 fake，
+-- 若这张表缺失就会拒绝 fake、改为真建，撞上已存在的 asset_groups 而失败。
+-- 所以这里必须保留建表（与 ovpn.0001 结构一致），让 migrate 阶段由 0003 统一删掉。
+-- 曾因删了本表却留下 idx_audit 索引，导致 init_db 抛 no such table: main.audit。
+CREATE TABLE IF NOT EXISTS audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT DEFAULT '', actor TEXT DEFAULT '',
+  action TEXT DEFAULT '', detail TEXT DEFAULT '', ip TEXT DEFAULT '');
 CREATE INDEX IF NOT EXISTS idx_attempts ON auth_attempts(k, ts);
 CREATE INDEX IF NOT EXISTS idx_authlog ON auth_log(id DESC);
 CREATE INDEX IF NOT EXISTS idx_audit ON audit(id DESC);
