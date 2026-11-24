@@ -175,6 +175,14 @@ def main():
     check("关闭 tls-crypt 后 server.conf 不写 tls-crypt", "tls-crypt " not in core.render_server_conf(_no_tls))
     check("关闭 tls-crypt 后 ovpn 无 <tls-crypt> 块", "<tls-crypt>" not in core.render_ovpn(_no_tls))
     check("tls-crypt 开关纳入配置指纹", core.config_fingerprint(_no_tls) != core.config_fingerprint(core.cfg()))
+    # 非 AEAD（AES-256-CFB）须两端显式 cipher，才能复现 iKuai 的可用组合
+    _cfb = dict(core.cfg(), data_ciphers="AES-256-CFB", tls_crypt=False, compress="lzo")
+    _cfb_conf = core.render_server_conf(_cfb)
+    _cfb_ovpn = core.render_ovpn(_cfb)
+    check("非 AEAD 时 server.conf 写 cipher AES-256-CFB", "\ncipher AES-256-CFB\n" in _cfb_conf)
+    check("非 AEAD 时 ovpn 写 cipher AES-256-CFB", "\ncipher AES-256-CFB\n" in _cfb_ovpn)
+    check("非 AEAD 时两端开启 LZO", "comp-lzo yes" in _cfb_conf and "comp-lzo yes" in _cfb_ovpn)
+    check("非 AEAD 场景不写 tls-crypt", "tls-crypt " not in _cfb_conf and "<tls-crypt>" not in _cfb_ovpn)
     # VPN 网段必须自动出现在推送路由里，且只出现一次（不能走两处各写一遍）
     vpn_net = core.vpn_network(core.cfg())
     vpn_gw = str(vpn_net.network_address + 1)

@@ -2367,9 +2367,14 @@ def render_server_conf(c):
     ]
     if c.get("tls_crypt", True):
         L.append("tls-crypt %s" % os.path.join(DATA, "ta.key"))
+    _dc = c["data_ciphers"]
+    _first_dc = _dc.split(":")[0].strip()
+    _non_aead = bool(_first_dc) and not any(x in _first_dc.upper() for x in ("GCM", "CHACHA", "AEAD"))
     L += [
-        "data-ciphers %s" % c["data_ciphers"],
-        "data-ciphers-fallback AES-256-CBC",
+        "data-ciphers %s" % _dc,
+        # 非 AEAD（如 AES-256-CFB）不参与 NCP 协商，必须靠老式 cipher 固定；
+        # fallback 同步成同一算法，否则对端协商不过时会落到不同的 CBC。
+        ("cipher %s" % _first_dc) if _non_aead else "data-ciphers-fallback AES-256-CBC",
         "tls-version-min %s" % c["tls_min"],
         "tun-mtu %s" % c["tun_mtu"],
         # DCO（Data Channel Offload）把数据通道下沉到内核，会绕过用户态的
@@ -2433,6 +2438,12 @@ def render_ovpn(c):
         # 与服务端一致：客户端也要钳制出方向的 TCP MSS，
         # 否则 Windows 发出的 1460 字节段进隧道后仍会超 MTU。
         L.append("mssfix %s" % int(c["mssfix"]))
+    # NCP 只协商 AEAD（GCM/CHACHA20）。若主 cipher 是非 AEAD（如对齐 iKuai
+    # 用的 AES-256-CFB），必须显式写老式 cipher 指令，否则客户端不会用它、
+    # 两端协商不一致。AEAD 场景保持不写，继续走 NCP。
+    _first_cipher = (c.get("data_ciphers") or "").split(":")[0].strip()
+    if _first_cipher and not any(x in _first_cipher.upper() for x in ("GCM", "CHACHA", "AEAD")):
+        L.append("cipher %s" % _first_cipher)
     L += [
         "verb 3",
         "auth-user-pass",
