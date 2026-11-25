@@ -12,10 +12,39 @@
 - **真实环境实测（2026-11-18，Anolis 8.10 / OpenVPN 2.6.23 / TCP）**：建中文账号 `张三` → 服务端生成 `ccd/张三` → 客户端用中文账号认证通过 → `PUSH_REPLY ... ifconfig 10.8.0.2` 拿到台账固定 IP；白名单按来源判定：隧道内 IP 访问 `/api/state` = 403、`/self` = 200，白名单内网段可进后台，公网 IP 全 403
 
 - 真实 Django HTTP 服务启动验证：首页、会话、登录、CSRF、state、向导自检、账号、版本、导出均 200；测试机 10.255.114.15 上 `install.sh` 完整跑通，装完自检 426 项全过，OpenVPN 与 Web 双进程在跑
+- 测试机 192.168.9.223（CentOS 7.9 + firewalld 0.6.3）：3.0.1 起实测「LAN → VPN 客户端」转发路径打通，详见 [INC-0001](INCIDENTS.md#inc-0001)
 - 前端 JS 通过 `node --check`
 - 所有 `.py` 通过 `py_compile`，所有 `.sh` 通过 `bash -n`
 
-**限制（如实说明）**：
+---
+
+## 11.1 部署环境矩阵
+
+**这张表的用途是暴露缺口，不是炫耀覆盖。** 没打 ✅ 的组合就是下一次的坑——[INC-0001](INCIDENTS.md#inc-0001) 就是「只验了无防火墙的机器」的代价。
+
+矩阵针对**防火墙形态**，因为它决定「LAN → VPN 客户端」这条转发路径通不通（OpenVPN 自身的 `tun`、`ip_forward`、`OVPN_ACL`、`OVPNWEB_NAT` 与防火墙无关，各环境一致）。
+
+| 防火墙形态 | 状态 | 说明 |
+|---|---|---|
+| 无防火墙 / iptables 无 FORWARD 规则 | ✅ 实测 | `FORWARD -P ACCEPT`，转发天然通 |
+| firewalld 启用（CentOS 7 / Anolis / Rocky） | ✅ 实测 | 3.0.1 修复后通过；`tun0` 不在任何 zone，需 direct 规则 |
+| firewalld 启用但被 `reload` 过 | ⚠️ 自愈 | reload 重建 `FORWARD` 链会冲掉 `OVPN_ACL` 跳转，timer 5 分钟内重放恢复 |
+| ufw 启用（Ubuntu / Debian） | ❓ **未实测** | `DEFAULT_FORWARD_POLICY=DROP` 同样会拦转发，3.0.1 只在 `precheck.py` 给了提示，**没有自动写入规则** |
+| nftables 原生（无 firewalld / ufw） | ❓ **未实测** | 若 `inet filter forward` 链有 `policy drop`，行为等同 firewalld；当前无自动处理 |
+| 云主机安全组 / 上游 ACL 拦 | ➖ 不在范围 | 属网络层，本系统无法感知；`precheck.py` 不检测 |
+| SELinux enforcing | ⚠️ 部分 | 预检会读取状态并提示；OpenVPN 读写 `data/` 与端口绑定实测正常，未做完整用例 |
+
+**已知风险最高的空格是 ufw。** Debian/Ubuntu 用户装完大概率复现 `ping` 通、TCP 不通，且现象与 INC-0001 完全一致。3.0.1 的处理是：
+
+- `precheck.py` 会提示 `DEFAULT_FORWARD_POLICY`
+- `TROUBLESHOOTING` 有对应条目
+- 但**不会自动改 ufw 配置**（`/etc/default/ufw` 的改动需要 `ufw reload`，风险与我们刻意避免的 `firewall-cmd --reload` 同类）
+
+如果后续要正式支持 Debian/Ubuntu，应该单独做一轮实测，而不是靠推断。
+
+---
+
+## 11.2 限制（如实说明）
 
 1. 沙盒内以 MOCK 模式验证业务逻辑，**`iptables` / `systemd` / 真实 OpenVPN 进程未实际执行**，这部分由目标机上的 `install.sh` + 安装向导完成，向导自带环境自检与失败回滚
 2. 静态 openvpn 二进制与离线 Python 运行时**未在本环境实际编译/下载**（需要联网构建机），由 `build/build-offline.sh` / `build/Dockerfile.build` 复现；也可在目标机就地编译，或在「升级」页上传二进制（要安装码）

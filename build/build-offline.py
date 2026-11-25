@@ -267,6 +267,10 @@ def main():
             if os.path.isdir(p):
                 n += copy_tree(p, os.path.join(out_dir, d), eol_lf=True)
     n += copy_tree(os.path.join(src, "system"), os.path.join(out_dir, "system"), eol_lf=True)
+    # docs/：现场排障要查 TROUBLESHOOTING / INCIDENTS，装机后机器上也得有；
+    # selftest 的「复盘库与断言的互相钉死」也会读 docs/INCIDENTS.md。
+    if os.path.isdir(os.path.join(src, "docs")):
+        n += copy_tree(os.path.join(src, "docs"), os.path.join(out_dir, "docs"), eol_lf=True)
     # scripts/：接入契约检查器。common/tests.py 的 ContractCheckTest 按
     # <项目根>/scripts/contract_check.py 定位它，装机后跑 manage.py test 要用；
     # 漏带会让「测试全绿」这条验收在交付包上直接 1 error。

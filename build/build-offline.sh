@@ -57,6 +57,12 @@ else
     done
 fi
 cp -a "$ROOT/system" "$OUT"/ 2>/dev/null || true
+# docs/：现场排障要查 TROUBLESHOOTING / INCIDENTS；selftest 的「复盘库与断言互相钉死」
+# 也要读 docs/INCIDENTS.md，漏带会让那条断言变成 SKIP。
+if [ -d "$ROOT/docs" ]; then
+    cp -a "$ROOT/docs" "$OUT"/ 2>/dev/null || true
+    chmod 644 "$OUT"/docs/*.md 2>/dev/null || true
+fi
 mkdir -p "$OUT/tests"
 cp -f "$ROOT/tests/selftest.py" "$ROOT/tests/selftest_django.py" "$OUT/tests/" 2>/dev/null || true
 # 目标机「上传源码自动编译」要用这个脚本，core 按 ROOT/system/build-static-openvpn.sh 找

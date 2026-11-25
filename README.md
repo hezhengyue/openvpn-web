@@ -19,6 +19,8 @@
 3. [docs/CODING_STANDARDS.md](docs/CODING_STANDARDS.md) — 命名、分层、异常、日志、测试、提交
 4. [CONTRACT.md](CONTRACT.md) — 接入契约 v3.0；改完必须 `python scripts/contract_check.py --strict` 0 FAIL / 0 WARN
 
+**修 bug 之前额外读 [docs/INCIDENTS.md](docs/INCIDENTS.md)**（故障复盘库）——里面记的是「哪些现象最容易把人带向错方向、怎么用一条命令定性、靠哪条断言保证不复发」。**修完必须给它补一条记录（或挂上已有条目），且记录里的断言必须真实存在**——`tests/selftest.py` 有元检查会拦住「文档说防住了、断言其实被删了」。
+
 验收命令（缺一不可）：
 
 ```bash
@@ -26,7 +28,7 @@ python scripts/contract_check.py --strict
 python django/manage.py check
 python django/manage.py makemigrations --check --dry-run
 python django/manage.py test          # 期望 172 项；cwd 无关（TEST_RUNNER 已钉死发现根）
-python tests/selftest.py              # 期望 464 项
+python tests/selftest.py              # 期望 472 项
 python -m unittest system.tests.test_fullbackup_restore
 ```
 
@@ -208,8 +210,9 @@ openvpn-web/
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | 部署、卸载、向导、日常操作、备份恢复 | 运维 |
 | [docs/NETWORK_IKUAI.md](docs/NETWORK_IKUAI.md) | 爱快网关下的无 NAT 溯源配置 | 网络 |
 | [docs/SECURITY.md](docs/SECURITY.md) | 特权隔离、安装码、上线安全清单 | 安全 / 运维 |
-| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | 排障清单 | 运维 |
-| [docs/VERIFICATION.md](docs/VERIFICATION.md) | 已验证项与已知限制 | 验收 |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | 排障清单（按现象查） | 运维 |
+| [docs/INCIDENTS.md](docs/INCIDENTS.md) | 故障复盘库（按事件查：误判过程、定性方法、防复发断言） | 开发者 / 运维 |
+| [docs/VERIFICATION.md](docs/VERIFICATION.md) | 已验证项、部署环境矩阵、已知限制 | 验收 |
 | [docs/CHANGELOG.md](docs/CHANGELOG.md) | 完整版本历史 | 所有人 |
 
 ---

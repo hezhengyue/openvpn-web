@@ -7,6 +7,7 @@
 """
 import os
 import io
+import re
 import sys
 import csv
 import time
@@ -1561,6 +1562,18 @@ def main():
     else:
         _bo_ok = None      # 装机目录没有 build/，这条只在仓库里适用
     check("打包脚本把源码包一起带上（否则目标机想编也没料）", _bo_ok)
+    # docs/ 必须进包：现场排障要查 TROUBLESHOOTING/INCIDENTS，复盘库元检查也要读它。
+    # 漏带不会报错，只会让元检查退化成 SKIP —— 静默失效，所以单独钉一条。
+    if _bo_ok is None:
+        check("打包脚本把 docs/ 一起带上", None, "装机目录没有 build/")
+    else:
+        check("打包脚本把 docs/ 一起带上", '"$ROOT/docs"' in _bo)
+        _bo_py = os.path.join(CODE, "build", "build-offline.py")
+        if os.path.isfile(_bo_py):
+            check("Windows 打包脚本也带 docs/",
+                  '"docs"' in open(_bo_py, encoding="utf-8").read())
+        else:
+            check("Windows 打包脚本也带 docs/", None, "装机目录没有 build/")
 
     # ---- 1.3.29：一键安装 / 跨发行版预检 / 强制随包 Python ----
     check("install.sh 强制只用随包 Python，不再退回目标机系统 python3",
@@ -1661,6 +1674,27 @@ def main():
         finally:
             f1.close()
         check("worker 的跨进程锁真的互斥（第二个拿不到）", busy_blocked)
+
+    # ---------- 故障复盘库与断言的互相钉死 ----------
+    # docs/INCIDENTS.md 每条故障都挂一个 `tests/selftest.py::<断言名>` 锚点。
+    # 断言被改名/删除而文档没跟上，坑就会在「文档说已经防住了」的假象里复发，
+    # 所以这里反向校验：文档引用过的断言必须仍然存在。
+    section("故障复盘库与断言的互相钉死")
+    _inc_p = os.path.join(CODE, "docs", "INCIDENTS.md")
+    if not os.path.isfile(_inc_p):
+        check("复盘库随包分发（docs/INCIDENTS.md）", None, "当前目录没有 docs/（历史交付包）")
+    else:
+        _inc = open(_inc_p, encoding="utf-8").read()
+        # 形如 `tests/selftest.py::<断言名>` 的是文档里的写法示例，不是真锚点，排除掉
+        _anchors = [a for a in re.findall(r"`tests/selftest\.py::([^`]+)`", _inc)
+                    if not a.startswith("<")]
+        check("复盘库至少登记了一条故障", len(_anchors) > 0)
+        _self_src = open(os.path.abspath(__file__), encoding="utf-8").read()
+        _missing = [a for a in _anchors if a not in _self_src]
+        check("复盘库引用的断言全部仍然存在（%d 条）" % len(_anchors), not _missing,
+              "缺失: " + "; ".join(_missing))
+        check("每条故障都挂了断言（引用数 ≥ 条目数）",
+              len(_anchors) >= len(re.findall(r'<a id="inc-\d+"></a>', _inc)))
 
     print("\n" + "=" * 62)
     print(" 通过 %d 项 / 失败 %d 项" % (len(PASS), len(FAIL)))

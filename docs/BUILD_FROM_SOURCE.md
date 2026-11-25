@@ -109,7 +109,7 @@ docker run --rm -v "$PWD/dist:/out" ovpn-build cp -r /build/dist/openvpn-web-x86
 
 ```bash
 cd dist/openvpn-web-x86_64
-./python/bin/python3 tests/selftest.py     # 期望 461 项全过
+./python/bin/python3 tests/selftest.py     # 期望 472 项全过
 ./python/bin/python3 scripts/contract_check.py . --strict   # 期望 0 FAIL / 0 WARN
 ```
 
