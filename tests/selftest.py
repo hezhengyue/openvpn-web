@@ -1645,6 +1645,54 @@ def main():
     check("依赖不预装：安装时从包内 vendor/wheels 离线补",
           "vendor/wheels" in _inst and "--find-links" in _inst)
 
+    # ---- 3.0.1：交付链路的「包名/路径漂移」----
+    # 这类问题的共同点：不会报错，只会让装出来的机器少依赖或打出误导性警告，
+    # 装完还能跑，所以靠人工验收发现不了（本次就是这么漂了三个版本）。
+    _dep_line = ""
+    for _ln in _inst.splitlines():
+        if "_DEPS=" in _ln:
+            _dep_line = _ln.strip()
+            break
+    check("install.sh 依赖清单不再含已移除的 auditlog/import_export/simpleui/flask",
+          bool(_dep_line) and not any(k in _dep_line for k in
+                                      ("auditlog", "import_export", "simpleui", "flask")))
+    check("install.sh 依赖清单与 requirements-standalone.txt 同源",
+          all(k in _dep_line for k in ("django", "axes", "whitenoise", "waitress",
+                                       "environ", "openpyxl", "celery")))
+    # 分隔符必须是逗号：`import django axes` 是 SyntaxError，探针会恒假，
+    # 于是每次安装都白跑一遍 fallback 并误报「依赖仍不完整」（3.0.1 交付包就是这个问题）。
+    _dm = re.search(r'_DEPS="([^"]*)"', _inst)
+    _dep_val = _dm.group(1) if _dm else ""
+    check("install.sh 依赖清单用逗号分隔（空格会让 import 恒失败）",
+          bool(_dep_val) and "," in _dep_val and " " not in _dep_val)
+    # 3.0 起 requirements 在 django/ 下：写死 $DEST/requirements-standalone.txt 会让
+    # pip install 因「文件不存在」静默失败（|| true），只能靠 fallback 解包兜底。
+    check("install.sh 认得 django/ 下的 requirements-standalone.txt",
+          'django/requirements-standalone.txt' in _inst)
+    # 3.0.1 交付包实测：setup.py 的 [8/8] 在 [5/8] 下发规则之后 reload firewalld，
+    # 会把刚建好的 OVPN_ACL 跳转和 OVPNWEB_NAT 整个冲掉——VPN 照常能用，
+    # 但 ACL 等于全员放行、NAT 消失，而且定时重放不一定救得回来。
+    _setup_p = os.path.join(SYS, "setup.py")
+    if os.path.isfile(_setup_p):
+        _setup_src = open(_setup_p, encoding="utf-8").read()
+        _fw_i = _setup_src.find("def firewall(")
+        _fw_j = _setup_src.find("\ndef ", _fw_i + 1) if _fw_i >= 0 else -1
+        _fw_body = _setup_src[_fw_i:_fw_j] if _fw_i >= 0 and _fw_j > 0 else ""
+        # 只看代码行：注释里为了说明原因会提到 --reload，不能算违规
+        _fw_code = "\n".join(ln for ln in _fw_body.splitlines()
+                             if not ln.strip().startswith("#"))
+        check("setup.py 配防火墙不 reload（会冲掉刚下发的 ACL/NAT 链）",
+              bool(_fw_code) and "--reload" not in _fw_code)
+    if os.path.isfile(_bo_p):
+        _bo2 = open(_bo_p, encoding="utf-8").read()
+        check("打包脚本按 requirements-standalone.txt 装依赖（不再写死 flask）",
+              "requirements-standalone.txt" in _bo2 and "flask==" not in _bo2)
+        check("打包脚本把 scripts/ 与 .contract.json 带进包（否则包内 manage.py test 报错）",
+              '"$ROOT/scripts"' in _bo2 and ".contract.json" in _bo2)
+    else:
+        check("打包脚本按 requirements-standalone.txt 装依赖（不再写死 flask）", None,
+              "装机目录没有 build/")
+
     # 闸门做在 worker 里，但用户得能在界面上把码填进来，否则这功能等于没有
     # 模板随 ovpn app 走（3.0 起 django/ovpn/templates/ovpn/）
     _html = open(os.path.join(DJANGO, "ovpn", "templates", "ovpn", "index.html"), encoding="utf-8").read()

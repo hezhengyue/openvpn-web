@@ -92,32 +92,36 @@ def save_cfg(a):
 def firewall(c):
     port = int(c["port"])
     proto = c["proto"]
+    web_port = int(os.environ.get("OVPN_WEB_PORT", 8800))
     done = []
+    # 关键：全程不用 `firewall-cmd --reload`。
+    # reload 会重建 FORWARD / POSTROUTING 链，把 [5/8] 刚下发的 OVPN_ACL 跳转和
+    # OVPNWEB_NAT 直接冲掉——装完 VPN 能用、但 ACL 变全员放行、NAT 消失，
+    # 而且要到 5 分钟后的定时重放才可能回来（本次实测就没回来）。
+    # 每条规则都「--permanent + 运行时」各下一次：既立即生效又重启不丢。
+    def both(args):
+        sh(["firewall-cmd", "--permanent"] + args)
+        sh(["firewall-cmd"] + args)
+
     if shutil.which("firewall-cmd"):
         rc, out = sh(["firewall-cmd", "--state"])
         if rc == 0 and "running" in out:
-            sh(["firewall-cmd", "--permanent", "--add-port=%d/%s" % (port, proto)])
+            both(["--add-port=%d/%s" % (port, proto)])
             # Web 端口先对私网放行；应用层还有一道「管理端访问白名单」（默认收紧到
             # 本机网卡所在网段 + 127.0.0.1），VPN 拨号用户只能打开自助改密页
-            sh(["firewall-cmd", "--permanent", "--add-rich-rule",
-                "rule family=ipv4 source address=10.0.0.0/8 port port=%d protocol=tcp accept"
-                % int(os.environ.get("OVPN_WEB_PORT", 8800))])
-            sh(["firewall-cmd", "--permanent", "--add-rich-rule",
-                "rule family=ipv4 source address=172.16.0.0/12 port port=%d protocol=tcp accept"
-                % int(os.environ.get("OVPN_WEB_PORT", 8800))])
-            sh(["firewall-cmd", "--permanent", "--add-rich-rule",
-                "rule family=ipv4 source address=192.168.0.0/16 port port=%d protocol=tcp accept"
-                % int(os.environ.get("OVPN_WEB_PORT", 8800))])
+            for _net in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"):
+                both(["--add-rich-rule",
+                      "rule family=ipv4 source address=%s port port=%d protocol=tcp accept"
+                      % (_net, web_port)])
             # LAN → VPN 客户端：firewalld 的 zone 链只无条件放行 ICMP，其余转发流量
             # 全部落到 FORWARD 末尾的 REJECT。不补这几条就会出现「内网 ping 得通客户端、
             # 但 RDP/SSH/HTTP 全不通」，而且客户端侧抓包看不到任何报文，极难定位。
-            # 只放行私网源到 tun0，公网源仍由 firewalld 拦；--direct 规则 reload 后仍在。
+            # 只放行私网源到 tun0，公网源仍由 firewalld 拦；--direct 规则重启后仍在。
             for _net in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"):
-                sh(["firewall-cmd", "--permanent", "--direct", "--add-rule", "ipv4",
-                    "filter", "FORWARD", "0", "-s", _net, "-o", "tun0", "-j", "ACCEPT"])
-            sh(["firewall-cmd", "--reload"])
+                both(["--direct", "--add-rule", "ipv4", "filter", "FORWARD", "0",
+                      "-s", _net, "-o", "tun0", "-j", "ACCEPT"])
             done.append("firewalld: %d/%s 放行，Web %s/tcp 限私网，转发放行私网→tun0"
-                        % (port, proto, os.environ.get("OVPN_WEB_PORT", 8800)))
+                        % (port, proto, web_port))
     if shutil.which("ufw"):
         sh(["ufw", "allow", "%d/%s" % (port, proto)])
         done.append("ufw: %d/%s 放行" % (port, proto))
@@ -137,8 +141,25 @@ def write_sysctl():
 
 
 def mask_units():
-    for unit in ("openvpn@.service", "openvpn-server@.service"):
-        sh(["systemctl", "mask", unit])
+    """屏蔽系统自带的模板单元，避免它抢 1194（本系统自己起 daemon）。
+
+    CentOS 7 的 systemd 219 不支持 `systemctl mask openvpn@`（会报
+    "missing the instance name"，模板单元的 mask 到 systemd 231 才支持），
+    所以直接按 mask 的实现方式，在 /etc/systemd/system 下建指向 /dev/null 的软链。
+    系统里已有真实单元文件时不动它（不替用户做决定）。
+    """
+    for name in ("openvpn@.service", "openvpn-server@.service"):
+        p = "/etc/systemd/system/" + name
+        try:
+            if os.path.islink(p):
+                if os.readlink(p) == "/dev/null":
+                    continue          # 已经是 masked
+                os.remove(p)          # 指向别处的旧软链，改成 mask
+            elif os.path.exists(p):
+                continue              # 真实单元文件，尊重现状
+            os.symlink("/dev/null", p)
+        except OSError:
+            sh(["systemctl", "mask", name])   # 兜底：极端情况下退回 systemctl
 
 
 def install_timer():

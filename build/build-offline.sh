@@ -47,6 +47,11 @@ chmod +x "$ROOT"/build/*.sh "$ROOT"/system/*.sh 2>/dev/null || true
 # 3.0 起 Django 源码集中在 django/（manage.py/serve.py/各 app/templates/static/
 # requirements 都在里面），整目录进包；兼容历史平铺布局。
 cp -f "$ROOT/README.md" "$OUT"/ 2>/dev/null || true
+# 契约标记与接入约定：scripts/contract_check.py 缺 .contract.json 会退回 tier 2 /
+# unspecified，external_boundaries 直接判失败；装机后跑 manage.py test 会因此 1 error。
+for f in CONTRACT.md .contract.json .env.example; do
+    cp -f "$ROOT/$f" "$OUT"/ 2>/dev/null || true
+done
 if [ -d "$ROOT/django" ]; then
     cp -a "$ROOT/django" "$OUT"/ 2>/dev/null || true
 else
@@ -65,6 +70,13 @@ if [ -d "$ROOT/docs" ]; then
 fi
 mkdir -p "$OUT/tests"
 cp -f "$ROOT/tests/selftest.py" "$ROOT/tests/selftest_django.py" "$OUT/tests/" 2>/dev/null || true
+# scripts/：接入契约检查器。common/tests.py 的 ContractCheckTest 按
+# <项目根>/scripts/contract_check.py 定位它，漏带会让包内 manage.py test 直接 1 error。
+if [ -d "$ROOT/scripts" ]; then
+    cp -a "$ROOT/scripts" "$OUT"/ 2>/dev/null || true
+    rm -rf "$OUT/scripts/__pycache__" 2>/dev/null || true
+    chmod 755 "$OUT"/scripts/*.sh 2>/dev/null || true
+fi
 # 目标机「上传源码自动编译」要用这个脚本，core 按 ROOT/system/build-static-openvpn.sh 找
 cp -f "$BUILD/build-static-openvpn.sh" "$OUT/system"/ 2>/dev/null || true
 chmod 755 "$OUT/system"/*.sh 2>/dev/null || true
@@ -162,22 +174,28 @@ fi
 PY="$OUT/python/bin/python3"
 "$PY" -V
 
-# 2) Flask / openpyxl：vendor/wheels 优先（--no-index 完全不碰 PyPI）
-echo "[2/3] 安装离线 wheel …"
-PKGS=("flask==3.1.3" "openpyxl==3.1.5" "waitress==3.0.2")
+# 2) Django 全家桶 / openpyxl：vendor/wheels 优先（--no-index 完全不碰 PyPI）
+# 清单只认一份真源：django/requirements-standalone.txt（3.0 起在 django/ 下，兼容平铺）。
+echo "[2/3] 安装离线依赖 …"
+REQ="$ROOT/django/requirements-standalone.txt"
+[ -f "$REQ" ] || REQ="$ROOT/requirements-standalone.txt"
+if [ ! -f "$REQ" ]; then
+    echo "错误: 找不到 requirements-standalone.txt（django/ 与仓库根都没有）"
+    exit 1
+fi
 if ls "$VENDOR"/wheels/*.whl >/dev/null 2>&1; then
     echo "    使用 $VENDOR/wheels（--no-index，不联网）"
     "$PY" -m pip install --no-cache-dir --disable-pip-version-check --no-index \
-          --find-links "$VENDOR/wheels" "${PKGS[@]}"
+          --find-links "$VENDOR/wheels" -r "$REQ"
 else
     if [ "$VENDOR_ONLY" = "1" ]; then
         echo "错误: 严格离线模式下缺少 $VENDOR/wheels/*.whl"
         exit 1
     fi
     echo "    没有本地 wheel，从 PyPI 装（建议之后执行 ./vendor/fetch.sh 把 wheel 固化下来）"
-    "$PY" -m pip install --no-cache-dir --disable-pip-version-check --only-binary=:all: "${PKGS[@]}"
+    "$PY" -m pip install --no-cache-dir --disable-pip-version-check --only-binary=:all: -r "$REQ"
 fi
-"$PY" -c 'import flask, openpyxl, waitress; print("    依赖自检 OK: flask", flask.__version__ if hasattr(flask,"__version__") else "3.x", "/ openpyxl", openpyxl.__version__, "/ waitress", __import__("importlib.metadata", fromlist=["version"]).version("waitress"))'
+"$PY" -c 'import django, axes, whitenoise, waitress, environ, openpyxl, celery, colorlog, pythonjsonlogger, ipware; print("    依赖自检 OK: Django", django.get_version())'
 
 # 3) 静态 OpenVPN 二进制
 if [ "$SKIP_OVPN" -eq 0 ]; then

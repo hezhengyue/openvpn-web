@@ -53,6 +53,8 @@
 | [INC-0002](#inc-0002) | 1.3.28 | 配置项换行注入 → 以 root 执行的 `server.conf` | 2 |
 | [INC-0003](#inc-0003) | 1.3.27 | 环境变量经 `sudo` 传递，绕过安装码闸门 → root 装任意 ELF | 3 |
 | [INC-0004](#inc-0004) | 1.3.24 | 缺二进制就 `exit 1`，装完 Web 起不来、向导进不去 | 2 |
+| [INC-0005](#inc-0005) | 3.0.1 包 | 依赖探针写成 `import a b`（空格）恒假，每次安装都误报「依赖不完整」 | 2 |
+| [INC-0006](#inc-0006) | 3.0.1 包 | 装完 ACL / NAT 链被 `firewall-cmd --reload` 冲掉，服务与页面却全正常 | 1 |
 
 ---
 
@@ -303,6 +305,155 @@ systemctl is-active openvpn      # 手动 daemon，可能显示 unknown，看进
 
 - `tests/selftest.py::prepare-openvpn.sh 随包分发`
 - `tests/selftest.py::install.sh 装完自动跑包内 selftest`
+
+---
+
+<a id="inc-0005"></a>
+## INC-0005 · 依赖探针写成 `import a b`，恒假 → 每次安装都误报「依赖不完整」
+
+| 项 | 内容 |
+|---|---|
+| 版本 | 3.0.1 交付包（2026-11-25 构建） |
+| 影响面 | 所有用该包安装的目标机；不影响运行，但制造误导性警告并白跑一遍 fallback |
+| 严重度 | 中（功能正常，但把「安装失败」的信号用废了） |
+
+### 现象
+
+每次 `install.sh` 都打印同一串：
+
+```text
+包内运行时缺依赖，从 vendor/wheels 离线补装…
+直接解包 38 个依赖到 site-packages
+警告: 依赖仍不完整，Web 可能起不来（检查包内 vendor/wheels）
+```
+
+而同一份日志往下三行，`precheck.py` 又说：
+
+```text
+[  OK  ] Web 依赖    Django 全家桶 / openpyxl / waitress 已就位
+```
+
+Web 实际也正常启动。**同一次安装里，两个检查给出相反结论。**
+
+### 误判与代价
+
+| 当时的判断 | 实际 |
+|---|---|
+| 旧安装残留的运行时确实缺包（`celery` / `colorlog` / `pythonjsonlogger` / `ipware` 是 3.0 新加的） | 前半对：第一次确实缺。但补完再装，警告照旧 |
+| pip 被 `>/dev/null 2>&1 \|\| true` 静默失败了 | 方向对，所以先把错误暴露出来——结果 pip 一次都没失败过 |
+| fallback 解包不完整（`.data` 目录、sdist 处理写死 simpleui） | 都不是。解包后 81 项全在，逐项 import 全过 |
+
+**最贵的一条误判**：把「警告」和「逐项检查」当成了两件事。实际上它们自相矛盾——`_deps_ok` 返回假，而紧接着的 `for _m in $_DEPS; do import $_m` 每个都成功。**同一个清单、两种结论，这本身就说明探针本身坏了**，应该第一时间怀疑它，而不是去查依赖。
+
+### 根因
+
+```sh
+_DEPS="django axes whitenoise waitress environ openpyxl celery colorlog pythonjsonlogger ipware"
+_deps_ok() { "$PY" -c "import $_DEPS" >/dev/null 2>&1; }
+```
+
+展开后是 `python3 -c "import django axes whitenoise …"` —— **Python 的 import 语句不认空格分隔**，这是 `SyntaxError`，所以 `_deps_ok` 恒返回非 0。逐项循环用的是 `for _m in $_DEPS`（shell 按空格分词），每项单独 `import` 都合法，于是永远「看起来只差整体检查这一关」。
+
+### 定性方法
+
+一条命令就能看出语法问题：
+
+```bash
+/opt/openvpn-web/python/bin/python3 -c "import django axes whitenoise"
+# SyntaxError: invalid syntax. Perhaps you forgot a comma?
+```
+
+或者直接看清单有没有逗号：
+
+```bash
+grep '_DEPS=' system/install.sh
+```
+
+### 修复
+
+- 清单改逗号分隔（`django,axes,whitenoise,…`），逐项循环用 `${_DEPS//,/ }` 还原成空格
+- `pip` 的输出不再丢弃：失败时打印最后 5 行
+- 依赖仍不完整时，逐个报「缺: xxx」，而不是只给一句笼统警告
+- 清单去掉 `auditlog` / `import_export` / `simpleui`（3.0 已移除，留着同样会让探针恒假）
+
+### 防复发
+
+- `tests/selftest.py::install.sh 依赖清单用逗号分隔（空格会让 import 恒失败）`
+- `tests/selftest.py::install.sh 依赖清单不再含已移除的 auditlog/import_export/simpleui/flask`
+
+---
+
+<a id="inc-0006"></a>
+## INC-0006 · 装完 ACL / NAT 链消失，但服务、页面、VPN 全部正常
+
+| 项 | 内容 |
+|---|---|
+| 版本 | 3.0.1 交付包（2026-11-25 构建） |
+| 影响面 | 所有全新安装（每台必现）；ACL 实际退化为全员放行，NAT 模式会直接断网 |
+| 严重度 | 高（安全与可用性都受影响，且安装过程零报错） |
+
+### 现象
+
+`./install.sh` 返回 `RC=0`，装完检查一切正常：
+
+```text
+systemctl is-active openvpn-web   → active
+index / health / admin / static   → 200 / 200 / 200 / 200
+VPN 进程                          → 1 个在跑
+```
+
+但 `iptables` 里什么都没有：
+
+```text
+$ iptables -S | grep -c OVPN        → 0
+$ iptables -L OVPN_ACL -n
+iptables: No chain/target/match by that name.
+```
+
+即：ACL 链不存在 = 没有过滤点（observe 模式下看不出差别，enforce 模式下等于全员放行）；`OVPNWEB_NAT` 也一样消失。
+
+### 误判与代价
+
+| 当时的判断 | 实际 |
+|---|---|
+| 安装成功（服务 active、页面 200、版本号对、自检 477/477 全过） | 前半都对，但**没验证 iptables 状态**，等于只验收了「进程活着」 |
+| 定时重放 5 分钟内会自愈 | 错。timer 日志显示 `Started`，规则依旧不在（rules.sh 被重写后 timer 还没跑到新一轮） |
+| 规则脚本本身生成错了 | 错。`bash /etc/openvpn-web/rules.sh` 手动重放立刻恢复 4 条 |
+
+**最贵的一条误判**：`selftest` 全过 + 页面 200 让人以为安装验收完成了。实际上 selftest 是纯逻辑自检（不碰真实 iptables），而「进程活着」和「规则挂着」是两件事——**安装类验收必须显式检查 `iptables -S`**。
+
+### 根因
+
+`setup.py` 的执行顺序：
+
+```text
+[5/8] 下发 NAT / ACL 规则      ← 建 OVPN_ACL / OVPNWEB_NAT，插进 FORWARD / POSTROUTING
+[6/8] 接管进程与规则重放
+[7/8] 启动 OpenVPN
+[8/8] 账号 + firewall()        ← 末尾 firewall-cmd --reload
+```
+
+`firewall-cmd --reload` 会按持久配置**重建** `FORWARD` / `POSTROUTING` 链，把 `[5/8]` 刚插进去的跳转整个冲掉。这也正是 3.0.1 在 `render_rules()` 里刻意避开 reload 的原因——同一条纪律没覆盖到 `firewall()`。
+
+### 定性方法
+
+装完立刻两条命令：
+
+```bash
+iptables -S | grep -c OVPN            # 期望 4；装完是 0 就是被 reload 冲了
+bash /etc/openvpn-web/rules.sh        # 手动重放，能恢复 → 证明脚本没问题、是被冲掉的
+```
+
+第二条是关键：**能恢复 = 规则脚本无罪**，问题在「谁在之后又 reload 了」。
+
+### 修复
+
+- `firewall()` 全程不用 `--reload`；每条规则「`--permanent` + 运行时」各下一次，既立即生效又重启不丢
+- 顺手修 `mask_units()`：CentOS 7 的 systemd 219 不支持 `systemctl mask openvpn@`（要求实例名），改为按 mask 的实现方式在 `/etc/systemd/system` 下建 `/dev/null` 软链
+
+### 防复发
+
+- `tests/selftest.py::setup.py 配防火墙不 reload（会冲掉刚下发的 ACL/NAT 链）`
 
 ---
 

@@ -247,7 +247,7 @@ def main():
         shutil.rmtree(out_dir)
     os.makedirs(os.path.join(out_dir, "bin"), exist_ok=True)
     n = 0
-    for fn in ("README.md", "CONTRACT.md"):
+    for fn in ("README.md", "CONTRACT.md", ".env.example"):
         p = os.path.join(src, fn)
         if os.path.isfile(p):
             copy_file(p, os.path.join(out_dir, fn), eol_lf=True)
