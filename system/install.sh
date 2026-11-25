@@ -138,8 +138,15 @@ purge_all() {
         done || true
         firewall-cmd --permanent --remove-port=8800/tcp >/dev/null 2>&1 || true
         firewall-cmd --remove-port=8800/tcp >/dev/null 2>&1 || true
+        # 安装时补的「私网 → tun0」转发放行（见 setup.py firewall() / core.render_rules）
+        for _src in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
+            firewall-cmd --permanent --direct --remove-rule ipv4 filter FORWARD 0 \
+                -s "$_src" -o tun0 -j ACCEPT >/dev/null 2>&1 || true
+            firewall-cmd --direct --remove-rule ipv4 filter FORWARD 0 \
+                -s "$_src" -o tun0 -j ACCEPT >/dev/null 2>&1 || true
+        done
         firewall-cmd --reload >/dev/null 2>&1 || true
-        say "      已撤 Web 端口放行（VPN 端口如手工加过请自行确认）"
+        say "      已撤 Web 端口放行与转发放行（VPN 端口如手工加过请自行确认）"
     else
         say "      无 firewalld，跳过"
     fi

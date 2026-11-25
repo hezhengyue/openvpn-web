@@ -74,7 +74,7 @@ PY = os.environ.get("OVPN_WEB_PY") or (
 )
 MOCK = os.environ.get("OVPN_WEB_MOCK") == "1"
 
-WEB_VERSION = "3.0.0"
+WEB_VERSION = "3.0.1"
 MIN_SECURE_VERSION = "2.6.23"          # 2026 年那批 CVE 的修复线
 ALLOWED_BRANCH = "2.6"                  # 默认只允许 2.6.x -> 2.6.y
 BRANCH_EOL = {"2.6": "2028-08-31", "2.7": "官方未公布（当前 Full Stable）"}
@@ -2672,6 +2672,28 @@ def render_rules(c):
         L.append('$IPT -A OVPN_ACL -m limit --limit 5/min --limit-burst 10 -j LOG '
                  '--log-prefix "OVPN_OBSERVE " --log-level 4')
         L.append("$IPT -A OVPN_ACL -j ACCEPT")
+    # 5) firewalld 兼容：CentOS/RHEL 默认开着 firewalld 时，zone 链里只无条件追加了
+    #    一条 `-p icmp -j ACCEPT`，其余转发流量全部落到 FORWARD 末尾的
+    #    `-j REJECT --reject-with icmp-host-prohibited`。表现就是「内网能 ping 通
+    #    VPN 客户端，但任何 TCP/UDP 都连不上」——极容易被误判成客户端防火墙问题。
+    #    这里只放行「私网源 → tun0」（公网源仍由 firewalld 自己拦住），且：
+    #    · 用 --direct 插到 FORWARD_direct（在 zone 链和 REJECT 之前），幂等；
+    #    · 绝不 reload —— reload 会重建 FORWARD 链，把上面刚装好的 OVPN_ACL 跳转冲掉。
+    L += [
+        "",
+        "# 5) firewalld 兼容：放行「私网 → tun0」转发，否则 LAN 访问 VPN 客户端只有 ICMP 能过",
+        "if command -v firewall-cmd >/dev/null 2>&1 && "
+        "firewall-cmd --state >/dev/null 2>&1; then",
+        "  for FW_SRC in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do",
+        '    if ! $IPT -C FORWARD_direct -s "$FW_SRC" -o tun0 -j ACCEPT >/dev/null 2>&1; then',
+        '      firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 '
+        '-s "$FW_SRC" -o tun0 -j ACCEPT >/dev/null 2>&1 || true',
+        '      firewall-cmd --direct --add-rule ipv4 filter FORWARD 0 '
+        '-s "$FW_SRC" -o tun0 -j ACCEPT >/dev/null 2>&1 || true',
+        "    fi",
+        "  done",
+        "fi",
+    ]
     return "\n".join(L) + "\n"
 
 
@@ -3186,6 +3208,19 @@ def selfcheck():
         else:
             add("NAT 生效", has_nat, "OVPNWEB_NAT 已做地址转换（内网日志源 IP = VPN 服务器）"
                 if has_nat else "未生效，点【重建规则】")
+        # firewalld 只在 zone 链里无条件放行 ICMP，其余转发流量落到 FORWARD 末尾的
+        # REJECT —— 内网访问 VPN 客户端会「ping 通、TCP 全不通」，且客户端侧看不到
+        # 任何报文。这里检查 direct 链里是否有「私网 → tun0」的放行。
+        if shutil.which("firewall-cmd"):
+            fd = ipt("forward_direct", ["iptables", "-w", "5", "-S", "FORWARD_direct"])
+            fw_ok = ("-o tun0 -j ACCEPT" in fd) or \
+                    any(l.startswith("-A FORWARD_direct") and "tun0" in l and "ACCEPT" in l
+                        for l in fd.splitlines())
+            add("firewalld 转发放行", fw_ok,
+                "已放行私网→tun0（内网可访问 VPN 客户端）" if fw_ok else
+                "firewalld 会拦掉「内网 → VPN 客户端」的转发（现象：ping 通但 RDP/SSH 全不通），"
+                "点【重建规则】自动补齐，或手工 firewall-cmd --permanent --direct --add-rule "
+                "ipv4 filter FORWARD 0 -s 10.0.0.0/8 -o tun0 -j ACCEPT")
     return out
 
 

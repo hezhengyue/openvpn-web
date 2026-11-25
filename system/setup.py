@@ -108,8 +108,15 @@ def firewall(c):
             sh(["firewall-cmd", "--permanent", "--add-rich-rule",
                 "rule family=ipv4 source address=192.168.0.0/16 port port=%d protocol=tcp accept"
                 % int(os.environ.get("OVPN_WEB_PORT", 8800))])
+            # LAN → VPN 客户端：firewalld 的 zone 链只无条件放行 ICMP，其余转发流量
+            # 全部落到 FORWARD 末尾的 REJECT。不补这几条就会出现「内网 ping 得通客户端、
+            # 但 RDP/SSH/HTTP 全不通」，而且客户端侧抓包看不到任何报文，极难定位。
+            # 只放行私网源到 tun0，公网源仍由 firewalld 拦；--direct 规则 reload 后仍在。
+            for _net in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"):
+                sh(["firewall-cmd", "--permanent", "--direct", "--add-rule", "ipv4",
+                    "filter", "FORWARD", "0", "-s", _net, "-o", "tun0", "-j", "ACCEPT"])
             sh(["firewall-cmd", "--reload"])
-            done.append("firewalld: %d/%s 放行，Web %s/tcp 限私网"
+            done.append("firewalld: %d/%s 放行，Web %s/tcp 限私网，转发放行私网→tun0"
                         % (port, proto, os.environ.get("OVPN_WEB_PORT", 8800)))
     if shutil.which("ufw"):
         sh(["ufw", "allow", "%d/%s" % (port, proto)])

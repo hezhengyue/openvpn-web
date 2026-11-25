@@ -273,9 +273,16 @@ def collect(root, port=8800, vpn_port=1194, reinstall=False):
         except Exception:
             pass
         bits = [x for x in (", ".join(found), fw_active, se) if x]
+        fw_note = "。安装脚本会按检测结果放行 VPN 端口；若装完访问不到 Web 端口，请检查这层白名单"
+        if "运行中" in fw_active:
+            fw_note += ("。firewalld 默认只放行 ICMP、其余转发流量一律 REJECT，"
+                        "安装会额外补「私网 → tun0」的转发规则，否则内网访问 VPN 客户端"
+                        "会 ping 通但 RDP/SSH 全不通")
+        elif "ufw" in found:
+            fw_note += ("。ufw 的 DEFAULT_FORWARD_POLICY 为 DROP 时会拦掉转发，"
+                        "需要时请改成 ACCEPT 并放行 VPN 网段")
         add("info", "firewall", "防火墙 / SELinux",
-            ("；".join(bits) or "未检测到常见防火墙") +
-            "。安装脚本会按检测结果放行 VPN 端口；若装完访问不到 Web 端口，请检查这层白名单")
+            ("；".join(bits) or "未检测到常见防火墙") + fw_note)
 
     return out
 

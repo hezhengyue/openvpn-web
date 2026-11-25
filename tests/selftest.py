@@ -610,6 +610,18 @@ def main():
     check("改 IP 后旧权限不残留", "-s 10.8.0.13" not in rr3 and "-s 10.8.0.14" in rr3)
     core.set_meta("acl_mode", "observe")
 
+    # firewalld（CentOS/RHEL 默认）只在 zone 链里无条件放行 ICMP，其余转发流量全部落到
+    # FORWARD 末尾的 REJECT —— 内网访问 VPN 客户端会「ping 通、TCP 全不通」。
+    # 规则脚本必须带「私网 → tun0」的 direct 放行，且不能靠 reload 生效
+    # （reload 会重建 FORWARD 链，把 OVPN_ACL 跳转冲掉）。
+    rr_fw = core.render_rules(core.cfg())
+    check("firewalld 转发放行规则已生成",
+          "-o tun0 -j ACCEPT" in rr_fw and "-C FORWARD_direct" in rr_fw)
+    check("firewalld 修复不触发 reload",
+          "--reload" not in rr_fw)
+    check("转发放行只对私网源段生效",
+          "10.0.0.0/8 172.16.0.0/12 192.168.0.0/16" in rr_fw)
+
     # 用户反馈的三行示例：新建组 / 批量新增 / 编辑条目必须共用同一套解析
     sample = ("1.1.1.1/32 any 22,33,55,900-1000,10001\n"
               "2.2.2.2 icmp\n"

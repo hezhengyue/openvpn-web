@@ -474,6 +474,7 @@ def action_collect_deny(p):
 def action_selfcheck_system(p):
     res = {}
     for name, cmd in (("forward", ["iptables", "-S", "FORWARD"]),
+                      ("forward_direct", ["iptables", "-S", "FORWARD_direct"]),
                       ("acl", ["iptables", "-S", "OVPN_ACL"]),
                       ("nat", ["iptables", "-t", "nat", "-S", "POSTROUTING"]),
                       ("nat_chain", ["iptables", "-t", "nat", "-S", "OVPNWEB_NAT"])):
